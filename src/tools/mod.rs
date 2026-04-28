@@ -24,10 +24,9 @@ impl PollardServer {
         }
     }
 
-    /// Combined tool router for all lifecycle and query tools.
-    /// Drill-down tools are added in Task 29.
+    /// Combined tool router for all lifecycle, query, and drill-down tools.
     pub fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
-        Self::lifecycle_router() + Self::query_router()
+        Self::lifecycle_router() + Self::query_router() + Self::drill_down_router()
     }
 }
 

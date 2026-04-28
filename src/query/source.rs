@@ -5,6 +5,7 @@
 use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::Profile;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -33,7 +34,7 @@ pub struct ResolvedSource {
     pub content: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SourceListing {
     pub function: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -46,7 +47,7 @@ pub struct SourceListing {
     pub lines: Vec<SourceLine>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct SourceLine {
     pub line: u32,
     pub samples: u64,

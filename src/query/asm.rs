@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
+use schemars::JsonSchema;
 use serde::Serialize;
 
 #[derive(Debug, Default)]
@@ -12,7 +13,7 @@ pub struct Args {
     pub with_samples: bool,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct AsmListing {
     pub function: String,
     pub module: Option<String>,
@@ -22,7 +23,7 @@ pub struct AsmListing {
     pub instructions: Vec<AsmInstruction>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct AsmInstruction {
     pub offset: u32,
     pub asm: String,
