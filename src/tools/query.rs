@@ -2,7 +2,7 @@
 
 use crate::error::ToolError;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
-use crate::query::{call_tree, stacks_containing, top_functions};
+use crate::query::{call_tree, folded, stacks_containing, top_functions};
 use crate::tools::PollardServer;
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -123,6 +123,29 @@ pub struct CallTreeArgs {
 }
 
 // ---------------------------------------------------------------------------
+// folded_stacks args
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+pub struct FoldedStacksArgs {
+    /// Profile ID returned by load_profile.
+    pub profile_id: String,
+    /// Optional function-name filter; only stacks containing at least one
+    /// matching frame are emitted (the full stack is preserved in the line).
+    #[serde(default)]
+    pub function_filter: Option<String>,
+    #[serde(flatten)]
+    pub common: CommonFilterArgs,
+}
+
+#[derive(serde::Serialize, JsonSchema)]
+pub struct FoldedStacksOutput {
+    /// Folded text: one line per unique stack, formatted as
+    /// `root;child;...;leaf <samples>`.
+    pub folded: String,
+}
+
+// ---------------------------------------------------------------------------
 // stacks_containing args
 // ---------------------------------------------------------------------------
 
@@ -190,6 +213,23 @@ impl PollardServer {
         };
         let result = call_tree::call_tree(session.profile(), &q_args)?;
         Ok(Json(result))
+    }
+
+    #[tool(
+        name = "folded_stacks",
+        description = "Flamegraph-folded text export. One line per unique stack: `root;...;leaf <samples>`. Pipeable into inferno-flamegraph; diffable across profiles with `comm`."
+    )]
+    pub async fn folded_stacks(
+        &self,
+        Parameters(args): Parameters<FoldedStacksArgs>,
+    ) -> Result<Json<FoldedStacksOutput>, ErrorData> {
+        let session = get_session(self, &args.profile_id).await?;
+        let q_args = folded::Args {
+            filter_args: parse_filter(&args.common),
+            function_filter: args.function_filter.clone(),
+        };
+        let folded = folded::folded_stacks(session.profile(), &q_args)?;
+        Ok(Json(FoldedStacksOutput { folded }))
     }
 
     #[tool(
