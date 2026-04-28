@@ -56,8 +56,7 @@ impl EventSource {
 /// first miss.
 pub fn resolve(profile: &Profile, event: Option<&str>) -> Result<EventSource, ToolError> {
     let raw = match event {
-        None => return Ok(EventSource::Samples),
-        Some(s) if s.is_empty() => return Ok(EventSource::Samples),
+        None | Some("") => return Ok(EventSource::Samples),
         Some(s) => s,
     };
     if marker_event_exists(profile, raw) {

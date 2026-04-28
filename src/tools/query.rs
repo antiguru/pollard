@@ -93,6 +93,13 @@ pub struct TopFunctionsArgs {
     /// the bencher harness that inlined it). Off by default.
     #[serde(default)]
     pub expand_inlines: Option<bool>,
+    /// Event source: omit (or empty string) for the default samples track —
+    /// cycles, in samply's perf recorder. Pass a marker name like
+    /// `"cache-misses"`, `"branch-misses"`, or `"instructions"` to
+    /// aggregate that hardware counter instead. The error lists known
+    /// events when the name doesn't match.
+    #[serde(default)]
+    pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -135,6 +142,11 @@ pub struct CallTreeArgs {
     /// Off by default to keep the historical tree shape.
     #[serde(default)]
     pub expand_inlines: Option<bool>,
+    /// Event source: omit for the default samples track. Pass a marker
+    /// name (`"cache-misses"`, `"branch-misses"`, `"instructions"`) to
+    /// build the tree from a hardware-counter event instead.
+    #[serde(default)]
+    pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -235,6 +247,13 @@ pub struct CompareProfilesArgs {
     /// profiles come from differently-named binaries).
     #[serde(default)]
     pub align_by: Option<String>,
+    /// Event source: omit for the default samples track. Pass a marker
+    /// name (`"cache-misses"`, `"branch-misses"`, `"instructions"`) to
+    /// diff a hardware-counter event instead. Resolved against profile
+    /// A; the `*_ms` columns are omitted from each row when the event
+    /// is not time-shaped.
+    #[serde(default)]
+    pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -264,13 +283,14 @@ pub struct StacksContainingArgs {
 impl PollardServer {
     #[tool(
         name = "top_functions",
-        description = "Top-N functions by self or total samples."
+        description = "Top-N functions by self or total samples. Pass `event=\"<name>\"` (e.g. `cache-misses`, `branch-misses`, `instructions`) to aggregate hardware-counter markers instead of the default samples track; pct columns then mean \"% of <event>\"."
     )]
     pub async fn top_functions(
         &self,
         Parameters(args): Parameters<TopFunctionsArgs>,
     ) -> Result<Json<top_functions::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
+        let event = crate::query::event::resolve(session.profile(), args.event.as_deref())?;
         let q_args = top_functions::Args {
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
@@ -281,6 +301,7 @@ impl PollardServer {
             },
             filter_args: parse_filter(&args.common),
             expand_inlines: args.expand_inlines.unwrap_or(false),
+            event,
         };
         let result = top_functions::top_functions(session.profile(), &q_args)?;
         Ok(Json(result))
@@ -369,6 +390,10 @@ impl PollardServer {
     ) -> Result<Json<compare::Output>, ErrorData> {
         let session_a = get_session(self, &args.profile_id_a).await?;
         let session_b = get_session(self, &args.profile_id_b).await?;
+        // Resolve the event against profile A. Profiles recorded together
+        // share the same event set; rejecting on B-only events is the
+        // strict and useful semantic when the two profiles disagree.
+        let event = crate::query::event::resolve(session_a.profile(), args.event.as_deref())?;
         let q_args = compare::Args {
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
@@ -385,6 +410,7 @@ impl PollardServer {
                 Some("function") => compare::AlignBy::Function,
                 _ => compare::AlignBy::FunctionAndModule,
             },
+            event,
         };
         let result = compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
         Ok(Json(result))

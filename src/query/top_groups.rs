@@ -77,11 +77,16 @@ pub struct GroupEntry {
 pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     let depth = args.directory_depth;
     let group_by = args.group_by;
+    // top_groups always aggregates the default samples track. Surfacing
+    // marker-backed events here (cache-misses, …) is out of scope for the
+    // initial event= rollout — the README and tool description note this.
+    let event = crate::query::event::EventSource::Samples;
     let (counts, total_samples): (HashMap<String, Counts>, u64) = aggregate_grouped(
         profile,
         args.filter.as_deref(),
         &args.filter_args,
         args.expand_inlines,
+        &event,
         |func, module, file| match group_by {
             GroupBy::Function => Some(func.to_owned()),
             GroupBy::Module => Some(module.unwrap_or("<unknown>").to_owned()),

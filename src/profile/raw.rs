@@ -374,7 +374,10 @@ mod tests {
         assert_eq!(m.length, 2);
         assert_eq!(m.name, vec![1, 1]);
         assert_eq!(
-            m.data[0].as_ref().and_then(|d| d.cause.as_ref()).map(|c| c.stack),
+            m.data[0]
+                .as_ref()
+                .and_then(|d| d.cause.as_ref())
+                .map(|c| c.stack),
             Some(7)
         );
         assert!(m.data[1].is_none());
