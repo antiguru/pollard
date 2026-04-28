@@ -87,6 +87,12 @@ pub struct TopFunctionsArgs {
     /// hot but call into hot code).
     #[serde(default)]
     pub sort_by: Option<String>,
+    /// When true, expand each native frame into its DWARF inline chain so
+    /// self-time attributes to the deepest inlined callee instead of the
+    /// enclosing function (e.g. surfaces `core::iter::Sum::sum` instead of
+    /// the bencher harness that inlined it). Off by default.
+    #[serde(default)]
+    pub expand_inlines: Option<bool>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -197,6 +203,7 @@ impl PollardServer {
                 _ => top_functions::SortBy::SelfTime,
             },
             filter_args: parse_filter(&args.common),
+            expand_inlines: args.expand_inlines.unwrap_or(false),
         };
         let result = top_functions::top_functions(session.profile(), &q_args)?;
         Ok(Json(result))

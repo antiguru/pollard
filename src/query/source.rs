@@ -16,6 +16,11 @@ pub struct Args {
     pub module: Option<String>,
     pub with_samples: bool,
     pub whole_file: bool,
+    /// When true, the matcher also considers DWARF inline frames — letting
+    /// callers ask for source of an inlined function (e.g.
+    /// `core::iter::Sum::sum`) rather than only the enclosing native one.
+    /// Line attribution uses the inline frame's own (file, line).
+    pub expand_inlines: bool,
 }
 
 impl Default for Args {
@@ -25,6 +30,7 @@ impl Default for Args {
             module: None,
             with_samples: true,
             whole_file: false,
+            expand_inlines: false,
         }
     }
 }
@@ -78,7 +84,12 @@ pub async fn source_for_function(
     let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
         message: e.to_string(),
     })?;
-    let (ctx, _samples_per_line, _total) = attribute(profile, &matcher, args.module.as_deref())?;
+    let (ctx, _samples_per_line, _total) = attribute(
+        profile,
+        &matcher,
+        args.module.as_deref(),
+        args.expand_inlines,
+    )?;
     let resolved = fetch_source(profile, &ctx).await?;
     build_listing(
         profile,
@@ -87,13 +98,54 @@ pub async fn source_for_function(
         resolved,
         args.with_samples,
         args.whole_file,
+        args.expand_inlines,
     )
+}
+
+/// Record one matched frame's contribution to ambiguity tracking, source
+/// fetch context, and per-line sample counts. Factored out so the native
+/// path and the inline-chain path can share it.
+#[allow(clippy::too_many_arguments)]
+fn record_match(
+    function_name: &str,
+    module: Option<&str>,
+    frame_file: Option<&str>,
+    frame_line: Option<u32>,
+    lib: Option<&RawLib>,
+    address: Option<i64>,
+    matched_pairs: &mut HashMap<(String, String), u64>,
+    file: &mut Option<String>,
+    ctx_lib: &mut Option<RawLib>,
+    ctx_offset: &mut Option<u32>,
+    samples_per_line: &mut HashMap<u32, u64>,
+    total: &mut u64,
+) {
+    let key = (function_name.to_owned(), module.unwrap_or("").to_owned());
+    *matched_pairs.entry(key).or_default() += 1;
+    if file.is_none() {
+        *file = frame_file.map(str::to_owned);
+        *ctx_lib = lib.cloned();
+    }
+    // Capture the first usable address — needed to anchor the samply-api
+    // `/source/v1` lookup. Frame addresses are stored as `i64`
+    // (negative = unknown); samply-api expects a u32 library-relative offset.
+    if ctx_offset.is_none()
+        && let Some(addr) = address
+        && let Ok(off) = u32::try_from(addr)
+    {
+        *ctx_offset = Some(off);
+    }
+    if let Some(line) = frame_line {
+        *samples_per_line.entry(line).or_default() += 1;
+        *total += 1;
+    }
 }
 
 fn attribute(
     profile: &Profile,
     matcher: &FunctionMatcher,
     module_filter: Option<&str>,
+    expand_inlines: bool,
 ) -> Result<(FetchContext, HashMap<u32, u64>, u64), ToolError> {
     let mut samples_per_line: HashMap<u32, u64> = HashMap::new();
     let mut total: u64 = 0;
@@ -114,36 +166,55 @@ fn attribute(
                 let Some(info) = profile.frame_info(handle, frame_idx) else {
                     continue;
                 };
-                if !matcher.matches(info.function_name) {
-                    continue;
-                }
+                let module = info.module_name;
                 if let Some(m) = module_filter
-                    && info.module_name != Some(m)
+                    && module != Some(m)
                 {
                     continue;
                 }
-                let key = (
-                    info.function_name.to_owned(),
-                    info.module_name.unwrap_or("").to_owned(),
-                );
-                *matched_pairs.entry(key).or_default() += 1;
-                if file.is_none() {
-                    file = info.file.map(str::to_owned);
-                    ctx_lib = info.lib.cloned();
+
+                // Native-frame match.
+                if matcher.matches(info.function_name) {
+                    record_match(
+                        info.function_name,
+                        module,
+                        info.file,
+                        info.line,
+                        info.lib,
+                        info.address,
+                        &mut matched_pairs,
+                        &mut file,
+                        &mut ctx_lib,
+                        &mut ctx_offset,
+                        &mut samples_per_line,
+                        &mut total,
+                    );
                 }
-                // Capture the first usable address — needed to anchor the
-                // samply-api `/source/v1` lookup. Frame addresses are stored
-                // as `i64` (negative = unknown); samply-api expects a u32
-                // library-relative offset.
-                if ctx_offset.is_none()
-                    && let Some(addr) = info.address
-                    && let Ok(off) = u32::try_from(addr)
-                {
-                    ctx_offset = Some(off);
-                }
-                if let Some(line) = info.line {
-                    *samples_per_line.entry(line).or_default() += 1;
-                    total += 1;
+
+                // Inline-frame matches. Each inline entry brings its own
+                // (file, line); the lib and address still come from the
+                // enclosing native frame, since that's what samply-api needs
+                // to resolve the file via `/source/v1`.
+                if expand_inlines {
+                    for inl in profile.inline_chain(handle, frame_idx) {
+                        if !matcher.matches(&inl.function) {
+                            continue;
+                        }
+                        record_match(
+                            &inl.function,
+                            module,
+                            inl.file.as_deref(),
+                            inl.line,
+                            info.lib,
+                            info.address,
+                            &mut matched_pairs,
+                            &mut file,
+                            &mut ctx_lib,
+                            &mut ctx_offset,
+                            &mut samples_per_line,
+                            &mut total,
+                        );
+                    }
                 }
             }
         }
@@ -272,12 +343,13 @@ pub fn build_listing(
     resolved: ResolvedSource,
     _with_samples: bool,
     whole_file: bool,
+    expand_inlines: bool,
 ) -> Result<SourceListing, ToolError> {
     // Re-attribute samples for this listing.
     let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
         message: e.to_string(),
     })?;
-    let (_file, samples_per_line, total) = attribute(profile, &matcher, module)?;
+    let (_file, samples_per_line, total) = attribute(profile, &matcher, module, expand_inlines)?;
 
     let total_lines: Vec<(u32, String)> = resolved
         .content
@@ -341,6 +413,47 @@ mod tests {
     use crate::profile::raw::RawProfile;
 
     #[test]
+    fn expand_inlines_matches_inline_function_with_its_own_line() {
+        // linear_chain.json: a → b → c → d, 100 samples on `d`. Inject one
+        // inline record on `d` mapping to a different file + line. With
+        // expand_inlines, querying `leaf_inline` should resolve and return
+        // a listing with samples attributed to the inline frame's line.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains
+            .resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[3] = vec![InlineFrame {
+            function: "leaf_inline".into(),
+            file: Some("/tmp/leaf_inline.rs".into()),
+            line: Some(2),
+        }];
+        let profile = Profile::from_raw(raw);
+
+        let source = "fn outer() {}\nfn leaf_inline() { compute() }\n";
+        let listing = build_listing(
+            &profile,
+            "leaf_inline",
+            None,
+            ResolvedSource {
+                file: "/tmp/leaf_inline.rs".to_owned(),
+                language: Some("rust".to_owned()),
+                content: source.to_owned(),
+            },
+            true,
+            true, // whole_file so we definitely include line 2
+            true, // expand_inlines
+        )
+        .unwrap();
+
+        // Line 2 (the inline frame's line) gets all 100 samples.
+        let line2 = listing.lines.iter().find(|l| l.line == 2).expect("line 2");
+        assert_eq!(line2.samples, 100);
+        assert_eq!(listing.total_function_samples, 100);
+    }
+
+    #[test]
     fn returns_per_line_samples() {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
@@ -359,6 +472,7 @@ mod tests {
                 content: source.to_owned(),
             },
             true,
+            false,
             false,
         )
         .unwrap();
@@ -384,6 +498,7 @@ mod tests {
                 content: "// dummy\n".to_owned(),
             },
             true,
+            false,
             false,
         )
         .unwrap_err();
@@ -416,6 +531,7 @@ mod tests {
                 content: "// dummy\n".to_owned(),
             },
             true,
+            false,
             false,
         )
         .unwrap_err();

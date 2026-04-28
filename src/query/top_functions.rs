@@ -16,6 +16,10 @@ pub struct Args {
     pub limit: usize,
     pub sort_by: SortBy,
     pub filter_args: Filter,
+    /// When true, fan each native frame out into its DWARF inline chain
+    /// (innermost-first when walking leaf-to-root), so self-time attributes
+    /// to the deepest inlined callee instead of the enclosing function.
+    pub expand_inlines: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -75,6 +79,7 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
             profile,
             handle,
             args.sort_by,
+            args.expand_inlines,
             &matcher,
             &mut counts,
             &mut total_samples,
@@ -134,6 +139,7 @@ fn accumulate_thread(
     profile: &Profile,
     handle: ThreadHandle,
     _sort_by: SortBy,
+    expand_inlines: bool,
     matcher: &Option<FunctionMatcher>,
     counts: &mut HashMap<(String, Option<String>), Counts>,
     total_samples: &mut u64,
@@ -142,36 +148,40 @@ fn accumulate_thread(
     for &stack_opt in &raw.samples.stack {
         let Some(stack_idx) = stack_opt else { continue };
         *total_samples += 1;
-        let mut frames = profile.walk_stack(handle, stack_idx);
+
+        // Build the leaf-to-root chain. When expand_inlines is set we emit
+        // each native frame's DWARF inline chain innermost-first BEFORE the
+        // native name, so the deepest inlined callee at the leaf becomes
+        // index 0 (and gets self-time attribution).
+        let mut entries: Vec<(String, Option<String>)> = Vec::new();
+        for frame_idx in profile.walk_stack(handle, stack_idx) {
+            let Some(info) = profile.frame_info(handle, frame_idx) else {
+                continue;
+            };
+            let module = info.module_name.map(str::to_owned);
+            if expand_inlines {
+                for inl in profile.inline_chain(handle, frame_idx) {
+                    entries.push((inl.function.clone(), module.clone()));
+                }
+            }
+            entries.push((info.function_name.to_owned(), module));
+        }
+
+        let mut iter = entries.into_iter();
         let mut seen_in_stack: std::collections::HashSet<(String, Option<String>)> =
             Default::default();
-        if let Some(leaf_frame_idx) = frames.next()
-            && let Some(info) = profile.frame_info(handle, leaf_frame_idx)
-            && matcher
-                .as_ref()
-                .is_none_or(|m| m.matches(info.function_name))
+        if let Some(leaf) = iter.next()
+            && matcher.as_ref().is_none_or(|m| m.matches(&leaf.0))
         {
-            let key = (
-                info.function_name.to_owned(),
-                info.module_name.map(str::to_owned),
-            );
-            counts.entry(key.clone()).or_default().self_samples += 1;
-            counts.entry(key.clone()).or_default().total_samples += 1;
-            seen_in_stack.insert(key);
+            counts.entry(leaf.clone()).or_default().self_samples += 1;
+            counts.entry(leaf.clone()).or_default().total_samples += 1;
+            seen_in_stack.insert(leaf);
         }
-        for frame_idx in frames {
-            if let Some(info) = profile.frame_info(handle, frame_idx)
-                && matcher
-                    .as_ref()
-                    .is_none_or(|m| m.matches(info.function_name))
+        for entry in iter {
+            if matcher.as_ref().is_none_or(|m| m.matches(&entry.0))
+                && seen_in_stack.insert(entry.clone())
             {
-                let key = (
-                    info.function_name.to_owned(),
-                    info.module_name.map(str::to_owned),
-                );
-                if seen_in_stack.insert(key.clone()) {
-                    counts.entry(key).or_default().total_samples += 1;
-                }
+                counts.entry(entry).or_default().total_samples += 1;
             }
         }
     }
@@ -208,6 +218,55 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.functions.len(), 1);
+    }
+
+    #[test]
+    fn expand_inlines_attributes_self_to_innermost_inline() {
+        // linear_chain.json: a → b → c → d, 100 samples on leaf `d`.
+        // Inject one inline record on `d` so wholesym would have produced
+        // [leaf_inline (innermost), d (outer)]. With expand_inlines, the
+        // self-time should attribute to `leaf_inline`, not `d`.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains
+            .resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[3] = vec![InlineFrame {
+            function: "leaf_inline".into(),
+            file: None,
+            line: None,
+        }];
+        let profile = Profile::from_raw(raw);
+
+        let plain = top_functions(&profile, &Args::default()).unwrap();
+        // Without expansion, `d` owns all 100 self samples.
+        assert_eq!(plain.functions[0].function, "d");
+        assert_eq!(plain.functions[0].self_samples, 100);
+        assert!(!plain.functions.iter().any(|e| e.function == "leaf_inline"));
+
+        let expanded = top_functions(
+            &profile,
+            &Args {
+                expand_inlines: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let leaf = expanded
+            .functions
+            .iter()
+            .find(|e| e.function == "leaf_inline")
+            .expect("leaf_inline must appear");
+        assert_eq!(leaf.self_samples, 100);
+        // `d` becomes a non-self ancestor; its self_samples drop to 0.
+        let d = expanded
+            .functions
+            .iter()
+            .find(|e| e.function == "d")
+            .expect("d must still appear in totals");
+        assert_eq!(d.self_samples, 0);
+        assert_eq!(d.total_samples, 100);
     }
 
     #[test]

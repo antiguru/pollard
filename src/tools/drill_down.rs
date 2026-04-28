@@ -26,6 +26,11 @@ pub struct SourceForFunctionArgs {
     pub with_samples: Option<bool>,
     #[serde(default)]
     pub whole_file: Option<bool>,
+    /// When true, the function matcher also considers DWARF inline frames
+    /// — letting callers ask for the source of an inlined function (e.g.
+    /// `core::iter::Sum::sum`) instead of only the enclosing native one.
+    #[serde(default)]
+    pub expand_inlines: Option<bool>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -54,6 +59,7 @@ impl PollardServer {
             module: args.module,
             with_samples: args.with_samples.unwrap_or(true),
             whole_file: args.whole_file.unwrap_or(false),
+            expand_inlines: args.expand_inlines.unwrap_or(false),
         };
         let result = source::source_for_function(session.profile(), &q_args).await?;
         Ok(Json(result))
