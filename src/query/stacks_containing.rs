@@ -6,6 +6,7 @@ use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::Profile;
 use crate::query::filters::Filter;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -16,7 +17,7 @@ pub struct Args {
     pub limit: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
     pub function_filter: String,
     pub matched_frame_samples: u64,
@@ -26,14 +27,14 @@ pub struct Output {
     pub stacks: Vec<StackOutput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct StackOutput {
     pub samples: u64,
     pub pct: f32,
     pub frames: Vec<FrameOutput>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct FrameOutput {
     pub function: String,
     #[serde(skip_serializing_if = "Option::is_none")]

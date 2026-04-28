@@ -6,6 +6,7 @@ use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::{Profile, ThreadHandle};
 use crate::query::filters::Filter;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -24,7 +25,7 @@ pub enum SortBy {
     TotalTime,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
     pub thread: Option<String>,
     pub process: Option<String>,
@@ -34,7 +35,7 @@ pub struct Output {
     pub functions: Vec<FunctionEntry>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct FunctionEntry {
     pub rank: usize,
     pub function: String,

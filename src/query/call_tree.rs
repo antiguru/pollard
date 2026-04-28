@@ -6,6 +6,7 @@ use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::{Profile, ThreadHandle};
 use crate::query::filters::Filter;
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
 
@@ -34,7 +35,7 @@ impl Default for Args {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
     pub thread: Option<String>,
     pub total_samples: u64,
@@ -42,28 +43,22 @@ pub struct Output {
     pub tree: Option<Node>,
 }
 
-#[derive(Debug, Serialize, Clone)]
+#[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct PruningKnobs {
     pub min_pct: f32,
     pub max_depth: u32,
     pub max_breadth: u32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 #[serde(untagged)]
 pub enum Node {
     Frame(FrameNode),
-    Omitted {
-        #[allow(non_snake_case)]
-        _omitted: OmittedSummary,
-    },
-    Truncated {
-        #[allow(non_snake_case)]
-        _truncated: TruncatedSummary,
-    },
+    Omitted { omitted: OmittedSummary },
+    Truncated { truncated: TruncatedSummary },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct FrameNode {
     pub function: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -78,13 +73,13 @@ pub struct FrameNode {
     pub children: Vec<Node>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct OmittedSummary {
     pub count: u32,
     pub combined_pct: f32,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, JsonSchema)]
 pub struct TruncatedSummary {
     pub deepest_descendant_pct: f32,
 }
@@ -229,7 +224,7 @@ fn build_node(
     }
     if depth > args.max_depth {
         return Some(Node::Truncated {
-            _truncated: TruncatedSummary { deepest_descendant_pct: total_pct },
+            truncated: TruncatedSummary { deepest_descendant_pct: total_pct },
         });
     }
 
@@ -274,7 +269,7 @@ fn build_node(
     }
     if omitted_count > 0 {
         children.push(Node::Omitted {
-            _omitted: OmittedSummary {
+            omitted: OmittedSummary {
                 count: omitted_count,
                 combined_pct: 100.0 * omitted_samples as f32 / total,
             },
