@@ -8,6 +8,7 @@ expression: result
   "total_samples": "[total]",
   "filter": null,
   "sort_by": "self",
+  "event": "samples",
   "functions": [
     {
       "rank": 1,
