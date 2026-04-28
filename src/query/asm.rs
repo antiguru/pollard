@@ -25,7 +25,8 @@ use crate::profile::Profile;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
-use wholesym::{SymbolManager, SymbolManagerConfig};
+use std::path::Path;
+use wholesym::{LookupAddress, MultiArchDisambiguator, SymbolManager, SymbolManagerConfig};
 
 #[derive(Debug, Default)]
 pub struct Args {
@@ -241,11 +242,23 @@ struct DecodedInstr {
     text: String,
 }
 
+/// Disassemble a function. Returns the decoded instruction stream, the arch
+/// name, and the `(start_rel, size_bytes)` actually used — which may have
+/// been refined from the caller-provided fallback if wholesym could resolve
+/// authoritative bounds for `sample_addr`.
+///
+/// `sample_addr` is any PC observed inside the function (e.g. a key from
+/// `frame_counts`). When wholesym can load the library, looking up that PC
+/// gives us the surrounding symbol's true entry and size. Without this step
+/// (issue #24), the fallback heuristic in `resolve_function` could point
+/// `start_rel` before the function's real entry, so the disassembler would
+/// decode alignment padding as a run of nonsense instructions.
 async fn disassemble(
     lib: &crate::profile::raw::RawLib,
-    start_rel: u32,
-    size_bytes: u32,
-) -> Result<(Vec<DecodedInstr>, String), ToolError> {
+    fallback_start: u32,
+    fallback_size: u32,
+    sample_addr: Option<u32>,
+) -> Result<(Vec<DecodedInstr>, String, u32, u32), ToolError> {
     // Build a SymbolManager with Spotlight so local macOS libs can be found.
     let config = SymbolManagerConfig::new().use_spotlight(true);
     let mut manager = SymbolManager::with_config(config);
@@ -254,13 +267,51 @@ async fn disassemble(
     let lib_info = build_library_info(lib);
     manager.add_known_library(lib_info.clone());
 
+    // Try to refine bounds via the symbol map. Falls back silently to the
+    // caller-provided heuristic when the binary isn't reachable (e.g. paths
+    // stripped from a fixture, dyld shared cache image, etc.).
+    let (start_rel, size_bytes) = match sample_addr {
+        Some(addr) => match refine_bounds_via_symbol_map(&manager, lib, addr).await {
+            Some((sym_start, Some(sym_size))) => (sym_start, sym_size.max(1)),
+            // Symbol entry is trustworthy even when the size isn't known —
+            // keep the heuristic size as an overread.
+            Some((sym_start, None)) => (sym_start, fallback_size),
+            None => (fallback_start, fallback_size),
+        },
+        None => (fallback_start, fallback_size),
+    };
+
     // Build the /asm/v1 JSON request.
     let request = build_asm_request(lib, start_rel, size_bytes);
 
     // Call the JSON API (requires wholesym/api feature).
     let response_json = manager.query_json_api("/asm/v1", &request).await;
 
-    parse_asm_response(&response_json, start_rel)
+    let (decoded, arch) = parse_asm_response(&response_json, start_rel)?;
+    Ok((decoded, arch, start_rel, size_bytes))
+}
+
+/// Look up `sample_addr` inside the library's symbol map and return the
+/// surrounding symbol's `(address, size)`. `None` when the binary cannot be
+/// loaded or the address falls outside any known symbol.
+async fn refine_bounds_via_symbol_map(
+    manager: &SymbolManager,
+    lib: &crate::profile::raw::RawLib,
+    sample_addr: u32,
+) -> Option<(u32, Option<u32>)> {
+    // Prefer the binary path; fall back to debug_path. When both are null
+    // (e.g. the test fixture deliberately strips them) we can't load the map.
+    let path_str = lib.path.as_deref().or(lib.debug_path.as_deref())?;
+    let disambiguator = lib
+        .arch
+        .as_ref()
+        .map(|arch| MultiArchDisambiguator::Arch(arch.clone()));
+    let map = manager
+        .load_symbol_map_for_binary_at_path(Path::new(path_str), disambiguator)
+        .await
+        .ok()?;
+    let info = map.lookup(LookupAddress::Relative(sample_addr)).await?;
+    Some((info.symbol.address, info.symbol.size))
 }
 
 fn build_library_info(lib: &crate::profile::raw::RawLib) -> wholesym::LibraryInfo {
@@ -466,15 +517,21 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
 
     let module_name = lib.name.clone();
 
-    let (decoded, arch) = disassemble(&lib, loc.start_rel, loc.size_bytes).await?;
+    // Pick any sample address as the "anchor" for symbol-map refinement.
+    // `BTreeMap` would give a deterministic min, but the choice doesn't
+    // matter — every key falls inside the same symbol by construction.
+    let sample_anchor = loc.frame_counts.keys().copied().next();
 
-    let instructions = attribute_samples(&decoded, loc.start_rel, &loc.frame_counts);
+    let (decoded, arch, start_rel, size_bytes) =
+        disassemble(&lib, loc.start_rel, loc.size_bytes, sample_anchor).await?;
+
+    let instructions = attribute_samples(&decoded, start_rel, &loc.frame_counts);
 
     Ok(AsmListing {
         function: args.function.clone(),
         module: module_name,
-        start_address: format!("0x{:x}", loc.start_rel),
-        size: format!("0x{:x}", loc.size_bytes),
+        start_address: format!("0x{start_rel:x}"),
+        size: format!("0x{size_bytes:x}"),
         arch,
         instructions,
     })
