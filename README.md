@@ -14,10 +14,10 @@ Early development. Not yet published to crates.io.
 
 ## Tools
 
-`pollard` exposes 11 MCP tools:
+`pollard` exposes 13 MCP tools:
 
 * **Lifecycle:** `load_profile`, `unload_profile`, `list_profiles`,
-  `describe_profile`
+  `describe_profile`, `summary`
 * **Query:** `top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`,
   `compare_profiles`
 * **Drill-down:** `source_for_function`, `asm_for_function`,

@@ -2,6 +2,7 @@
 
 use crate::error::ToolError;
 use crate::query::describe::{ProfileDescription, describe};
+use crate::query::summary;
 use crate::tools::PollardServer;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
@@ -165,5 +166,24 @@ impl PollardServer {
             &session.path().display().to_string(),
             session.unsymbolicated_pct(),
         )))
+    }
+
+    #[tool(
+        name = "summary",
+        description = "One-shot orientation: shape (duration, sample rate, time range, unsymbolicated bracket), dominant thread, top 5 modules, top 10 functions by self time, and top 10 by total time. Use this first instead of chaining describe_profile + top_functions."
+    )]
+    pub async fn summary(
+        &self,
+        Parameters(args): Parameters<ProfileIdArgs>,
+    ) -> Result<Json<summary::Output>, rmcp::ErrorData> {
+        let session = self.registry.get_or_error(&args.profile_id).await?;
+        let result = summary::summary(
+            session.profile(),
+            session.id(),
+            session.name(),
+            &session.path().display().to_string(),
+            session.unsymbolicated_pct(),
+        )?;
+        Ok(Json(result))
     }
 }
