@@ -23,7 +23,30 @@ Early development. Not yet published to crates.io.
 
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
 
-## Build
+## Install
+
+Once published to crates.io:
+
+```sh
+cargo install pollard
+```
+
+Until then, install from this repository:
+
+```sh
+cargo install --git https://github.com/antiguru/pollard
+```
+
+Either form puts a `pollard` binary on your `PATH`.
+Register it with Claude Code as a user-scoped MCP server:
+
+```sh
+claude mcp add pollard pollard --scope user
+```
+
+After that, `load_profile`, `top_functions`, `call_tree` and the rest of the tools listed above are available in any Claude Code session.
+
+## Build from source
 
 ```sh
 cargo build --release
