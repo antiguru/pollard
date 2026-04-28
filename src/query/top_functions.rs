@@ -56,15 +56,23 @@ pub struct FunctionEntry {
 
 const DEFAULT_LIMIT: usize = 30;
 
-#[derive(Default)]
-struct Counts {
-    self_samples: u64,
-    total_samples: u64,
+#[derive(Default, Clone)]
+pub(crate) struct Counts {
+    pub(crate) self_samples: u64,
+    pub(crate) total_samples: u64,
 }
 
-pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
-    args.filter_args.validate_thread(profile)?;
-    let matcher = match args.filter.as_deref() {
+/// Per-function `(self, total)` sample counts plus profile-wide total.
+/// Shared between [`top_functions`] and [`crate::query::compare`] so cross-
+/// profile diffs see the same aggregation rules.
+pub(crate) fn aggregate_functions(
+    profile: &Profile,
+    filter: Option<&str>,
+    filter_args: &Filter,
+    expand_inlines: bool,
+) -> Result<(HashMap<(String, Option<String>), Counts>, u64), ToolError> {
+    filter_args.validate_thread(profile)?;
+    let matcher = match filter {
         Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
             message: e.to_string(),
         })?),
@@ -74,17 +82,28 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
     let mut counts: HashMap<(String, Option<String>), Counts> = HashMap::new();
     let mut total_samples: u64 = 0;
 
-    for handle in args.filter_args.threads(profile) {
+    for handle in filter_args.threads(profile) {
         accumulate_thread(
             profile,
             handle,
-            args.sort_by,
-            args.expand_inlines,
+            SortBy::SelfTime,
+            expand_inlines,
             &matcher,
             &mut counts,
             &mut total_samples,
         );
     }
+
+    Ok((counts, total_samples))
+}
+
+pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
+    let (counts, total_samples) = aggregate_functions(
+        profile,
+        args.filter.as_deref(),
+        &args.filter_args,
+        args.expand_inlines,
+    )?;
 
     // Build output
     let mut entries: Vec<((String, Option<String>), Counts)> = counts.into_iter().collect();
@@ -230,8 +249,7 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
         let t = &mut raw.threads[0];
-        t.inline_chains
-            .resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         t.inline_chains[3] = vec![InlineFrame {
             function: "leaf_inline".into(),
             file: None,

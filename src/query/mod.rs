@@ -1,6 +1,7 @@
 pub mod address_to_function;
 pub mod asm;
 pub mod call_tree;
+pub mod compare;
 pub mod describe;
 pub mod filters;
 pub mod folded;
