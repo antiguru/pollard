@@ -1,11 +1,11 @@
 [package]
 name = "pollard"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 rust-version = "1.95"
 license = "MIT OR Apache-2.0"
 description = "MCP server that exposes Firefox-format performance profiles to AI coding assistants."
-repository = "https://github.com/<user>/pollard"
+repository = "https://github.com/antiguru/pollard"
 keywords = ["profiling", "mcp", "ai", "firefox-profiler", "samply"]
 categories = ["development-tools::profiling", "command-line-utilities"]
 

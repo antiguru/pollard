@@ -10,7 +10,7 @@ this tool does to call trees so an LLM can hold them.
 
 ## Status
 
-Early development. Not yet published to crates.io.
+Early development. Published to [crates.io](https://crates.io/crates/pollard).
 
 ## Tools
 
@@ -27,13 +27,11 @@ See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
 
 ## Install
 
-Once published to crates.io:
-
 ```sh
 cargo install pollard
 ```
 
-Until then, install from this repository:
+Or install the latest from this repository:
 
 ```sh
 cargo install --git https://github.com/antiguru/pollard
