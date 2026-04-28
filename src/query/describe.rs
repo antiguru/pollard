@@ -51,7 +51,7 @@ pub fn describe(
 
     for thread in profile.threads() {
         let raw = thread.raw();
-        let times = &raw.samples.time;
+        let times = raw.samples.absolute_times();
         let dur = times.last().copied().unwrap_or(0.0) - times.first().copied().unwrap_or(0.0);
         let samples = raw.samples.length as u64;
         total_samples += samples;

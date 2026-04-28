@@ -83,8 +83,7 @@ impl Profile {
     pub fn duration_ms(&self) -> f64 {
         self.threads()
             .filter_map(|t| {
-                let raw = t.raw();
-                let times = &raw.samples.time;
+                let times = t.raw().samples.absolute_times();
                 Some(*times.last()? - *times.first()?)
             })
             .fold(0.0_f64, f64::max)

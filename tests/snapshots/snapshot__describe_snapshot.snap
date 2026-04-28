@@ -1,0 +1,95 @@
+---
+source: tests/snapshot.rs
+assertion_line: 27
+expression: desc
+---
+{
+  "profile_id": "[id]",
+  "name": "tiny",
+  "path": "[path]",
+  "duration_ms": "[duration]",
+  "sample_rate_hz": 1000.0,
+  "total_samples": "[total]",
+  "unsymbolicated_pct": "[pct]",
+  "processes": [
+    {
+      "pid": 50258,
+      "name": "",
+      "thread_count": 12,
+      "threads": [
+        {
+          "tid": 27367466,
+          "name": "rustfmt",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367480,
+          "name": "Thread <27367480>",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367481,
+          "name": "Thread <27367481>",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367482,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367483,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367484,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367485,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367486,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367487,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367488,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367489,
+          "name": "tokio-runtime-worker",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 27367490,
+          "name": "rustfmt",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        }
+      ]
+    }
+  ]
+}

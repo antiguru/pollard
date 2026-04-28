@@ -6,7 +6,33 @@
 
 #![allow(dead_code)]
 
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
+
+/// Deserialize a pid/tid that may be encoded as a JSON integer, float, or
+/// quoted string (e.g. `"50258"` or `"50258.1"` in real samply output).
+/// We extract the integer part and discard fractional suffixes like `.1`.
+fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
+    use serde::de::Error;
+    use serde_json::Value;
+    let v = Value::deserialize(de)?;
+    match v {
+        Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                Ok(u)
+            } else if let Some(f) = n.as_f64() {
+                Ok(f as u64)
+            } else {
+                Err(D::Error::custom("cannot convert number to u64"))
+            }
+        }
+        Value::String(s) => {
+            // Take the part before any `.` (handles "50258.1")
+            let base = s.split('.').next().unwrap_or(&s);
+            base.parse::<u64>().map_err(D::Error::custom)
+        }
+        other => Err(D::Error::custom(format!("expected number or string, got {other}"))),
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -51,7 +77,9 @@ pub struct RawLib {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawThread {
+    #[serde(deserialize_with = "deserialize_id_as_u64")]
     pub tid: u64,
+    #[serde(deserialize_with = "deserialize_id_as_u64")]
     pub pid: u64,
     #[serde(default)]
     pub name: Option<String>,
@@ -100,7 +128,9 @@ pub struct RawFuncTable {
 pub struct RawStackTable {
     pub length: usize,
     pub frame: Vec<usize>,
+    #[serde(default)]
     pub category: Vec<usize>,
+    #[serde(default)]
     pub subcategory: Vec<usize>,
     pub prefix: Vec<Option<usize>>,
 }
@@ -110,11 +140,37 @@ pub struct RawStackTable {
 pub struct RawSampleTable {
     pub length: usize,
     pub stack: Vec<Option<usize>>,
+    /// Absolute timestamps (ms). Present in synthetic / pre-processed profiles.
+    #[serde(default)]
     pub time: Vec<f64>,
+    /// Relative time deltas (ms). Present in raw samply output.
+    /// Use [`Self::absolute_times`] to get absolute timestamps from either
+    /// field.
+    #[serde(default)]
+    pub time_deltas: Vec<f64>,
     #[serde(default)]
     pub weight: Option<Vec<f64>>,
     #[serde(default)]
     pub weight_type: Option<String>,
+}
+
+impl RawSampleTable {
+    /// Return absolute timestamps regardless of whether the profile stores
+    /// `time` or `timeDeltas`.
+    pub fn absolute_times(&self) -> Vec<f64> {
+        if !self.time.is_empty() {
+            return self.time.clone();
+        }
+        // Convert time deltas to absolute by summing.
+        let mut acc = 0.0f64;
+        self.time_deltas
+            .iter()
+            .map(|&d| {
+                acc += d;
+                acc
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Deserialize)]
