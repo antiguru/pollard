@@ -104,7 +104,7 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
         .map(FunctionMatcher::new)
         .transpose()
         .map_err(|e| ToolError::Internal { message: e.to_string() })?;
-    let _paths_to = args
+    let paths_to = args
         .paths_to
         .as_deref()
         .map(FunctionMatcher::new)
@@ -120,6 +120,7 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             handle,
             args.inverted,
             &root_matcher,
+            &paths_to,
             &mut root,
             &mut total_samples,
         );
@@ -147,6 +148,7 @@ fn accumulate_with_root(
     handle: ThreadHandle,
     inverted: bool,
     root_matcher: &Option<FunctionMatcher>,
+    paths_to_matcher: &Option<FunctionMatcher>,
     root: &mut AggNode,
     total_samples: &mut u64,
 ) {
@@ -156,6 +158,16 @@ fn accumulate_with_root(
         let mut frames: Vec<usize> = profile.walk_stack(handle, stack_idx).collect();
         if !inverted {
             frames.reverse();
+        }
+        // If a paths_to matcher is set, skip stacks that don't contain a matching frame.
+        if let Some(m) = paths_to_matcher {
+            if !frames.iter().any(|&f| {
+                profile
+                    .frame_info(handle, f)
+                    .is_some_and(|i| m.matches(i.function_name))
+            }) {
+                continue;
+            }
         }
         // If a root matcher is set, find the frame that matches and trim the prefix.
         if let Some(m) = root_matcher {
@@ -339,6 +351,25 @@ mod tests {
         } else {
             panic!("expected frame root");
         }
+    }
+
+    #[test]
+    fn paths_to_keeps_only_matching_stacks() {
+        let raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/paths_to.json"
+        ))
+        .unwrap();
+        let profile = Profile::from_raw(raw);
+        let tree = call_tree(
+            &profile,
+            &Args {
+                paths_to: Some("lock_acquire".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tree.total_samples, 50);
     }
 
     #[test]
