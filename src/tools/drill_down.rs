@@ -13,11 +13,7 @@ async fn session(
     server: &PollardServer,
     profile_id: &str,
 ) -> Result<std::sync::Arc<crate::session::ProfileSession>, ToolError> {
-    server
-        .registry
-        .get(profile_id)
-        .await
-        .ok_or(ToolError::ProfileNotFound { profile_id: profile_id.to_owned() })
+    server.registry.get_or_error(profile_id).await
 }
 
 #[derive(Deserialize, JsonSchema)]

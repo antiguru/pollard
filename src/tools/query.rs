@@ -19,11 +19,7 @@ async fn get_session(
     server: &PollardServer,
     profile_id: &str,
 ) -> Result<Arc<crate::session::ProfileSession>, ToolError> {
-    server
-        .registry
-        .get(profile_id)
-        .await
-        .ok_or_else(|| ToolError::ProfileNotFound { profile_id: profile_id.to_owned() })
+    server.registry.get_or_error(profile_id).await
 }
 
 // ---------------------------------------------------------------------------

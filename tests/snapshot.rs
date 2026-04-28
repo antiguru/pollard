@@ -11,7 +11,7 @@ const FIXTURE: &str = "tests/fixtures/tiny.json.gz";
 #[tokio::test]
 async fn describe_snapshot() {
     let registry = pollard::registry::SessionRegistry::new(2);
-    let id = registry
+    let (id, _evicted) = registry
         .load(std::path::Path::new(FIXTURE), Some("tiny"))
         .await
         .unwrap();
@@ -38,7 +38,7 @@ async fn describe_snapshot() {
 #[tokio::test]
 async fn top_functions_snapshot() {
     let registry = pollard::registry::SessionRegistry::new(2);
-    let id = registry
+    let (id, _evicted) = registry
         .load(std::path::Path::new(FIXTURE), Some("tiny"))
         .await
         .unwrap();

@@ -35,7 +35,7 @@ async fn source_for_inner_loop() {
     assert!(status.success(), "samply record exited with status {}", status);
 
     let registry = pollard::registry::SessionRegistry::new(1);
-    let id = registry.load(out.path(), None).await.unwrap();
+    let (id, _evicted) = registry.load(out.path(), None).await.unwrap();
     let session = registry.get(&id).await.unwrap();
 
     // source_for_function is SYNCHRONOUS — no .await.
@@ -81,7 +81,7 @@ async fn asm_for_inner_loop() {
     assert!(status.success(), "samply record exited with status {}", status);
 
     let registry = pollard::registry::SessionRegistry::new(1);
-    let id = registry.load(out.path(), None).await.unwrap();
+    let (id, _evicted) = registry.load(out.path(), None).await.unwrap();
     let session = registry.get(&id).await.unwrap();
 
     let listing = pollard::query::asm::asm_for_function(
