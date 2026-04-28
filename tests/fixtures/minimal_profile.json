@@ -1,0 +1,20 @@
+{
+    "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+    "libs": [],
+    "threads": [{
+        "name": "Main",
+        "tid": 1,
+        "pid": 1,
+        "registerTime": 0.0,
+        "stringArray": ["foo", "bar"],
+        "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "innerWindowID": [], "implementation": [], "line": [], "column": [], "nativeSymbol": []},
+        "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+        "samples": {"length": 0, "stack": [], "time": [], "weight": null, "weightType": "samples"},
+        "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+        "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+        "markers": {"length": 0, "data": [], "name": [], "startTime": [], "endTime": [], "phase": [], "category": []},
+        "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []},
+        "processType": "default",
+        "processStartupTime": 0.0
+    }]
+}
