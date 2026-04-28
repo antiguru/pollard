@@ -20,7 +20,9 @@ pub struct ProfileDescription {
 
 #[derive(Serialize, JsonSchema, Debug)]
 pub struct ProcessDescription {
-    pub pid: u64,
+    /// String form to preserve the `.N` sub-process suffix samply emits for
+    /// distinct processes that share the same OS pid (e.g. `"1969186.1"`).
+    pub pid: String,
     pub name: String,
     pub thread_count: usize,
     pub threads: Vec<ThreadDescription>,
@@ -48,9 +50,16 @@ pub fn describe(
         0.0
     };
 
-    // Group threads by pid.
-    let mut by_pid: std::collections::BTreeMap<u64, Vec<ThreadDescription>> =
-        std::collections::BTreeMap::new();
+    // Group threads by pid. The Firefox processed-profile schema attaches
+    // the process name to each thread (`processName`), not to a separate
+    // process record — so we recover it here by taking the first non-empty
+    // value seen for each pid. We bucket on the full [`Pid`] so the `.N`
+    // sub-process suffix samply uses (parent recorder vs. forked targets
+    // sharing one OS pid) doesn't collapse them into a single entry.
+    let mut by_pid: std::collections::BTreeMap<
+        crate::profile::raw::Pid,
+        (Option<String>, Vec<ThreadDescription>),
+    > = std::collections::BTreeMap::new();
     let mut total_samples: u64 = 0;
 
     for thread in profile.threads() {
@@ -59,22 +68,25 @@ pub fn describe(
         let dur = times.last().copied().unwrap_or(0.0) - times.first().copied().unwrap_or(0.0);
         let samples = raw.samples.length as u64;
         total_samples += samples;
-        by_pid
-            .entry(thread.pid())
-            .or_default()
-            .push(ThreadDescription {
-                tid: thread.tid(),
-                name: thread.name().unwrap_or("").to_owned(),
-                samples,
-                duration_ms: dur,
-            });
+        let entry = by_pid.entry(thread.pid_full()).or_default();
+        if entry.0.is_none()
+            && let Some(pname) = thread.process_name().filter(|s| !s.is_empty())
+        {
+            entry.0 = Some(pname.to_owned());
+        }
+        entry.1.push(ThreadDescription {
+            tid: thread.tid(),
+            name: thread.name().unwrap_or("").to_owned(),
+            samples,
+            duration_ms: dur,
+        });
     }
 
     let processes = by_pid
         .into_iter()
-        .map(|(pid, threads)| ProcessDescription {
-            pid,
-            name: String::new(), // TODO: extract from RawProfile.processes when present
+        .map(|(pid, (proc_name, threads))| ProcessDescription {
+            pid: pid.to_string(),
+            name: proc_name.unwrap_or_default(),
             thread_count: threads.len(),
             threads,
         })
@@ -108,5 +120,35 @@ mod tests {
         assert_eq!(desc.name, "name1");
         assert_eq!(desc.unsymbolicated_pct, 0.0);
         assert!(!desc.processes.is_empty() || !desc.processes.is_empty());
+    }
+
+    #[test]
+    fn process_name_recovered_from_thread_field() {
+        // Firefox-style schema places the process name on each thread, not
+        // on a separate process record. Confirm describe() picks it up.
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [{
+                "name": "Main",
+                "processName": "rustfmt",
+                "tid": 1,
+                "pid": 42,
+                "registerTime": 0.0,
+                "stringArray": [],
+                "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                "samples": {"length": 0, "stack": [], "time": []},
+                "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let desc = describe(&profile, "id", "n", "/tmp/p", 0.0);
+        assert_eq!(desc.processes.len(), 1);
+        assert_eq!(desc.processes[0].pid, "42");
+        assert_eq!(desc.processes[0].name, "rustfmt");
     }
 }

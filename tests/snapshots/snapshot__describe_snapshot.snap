@@ -12,16 +12,23 @@ expression: desc
   "unsymbolicated_pct": "[pct]",
   "processes": [
     {
-      "pid": 1969186,
-      "name": "",
-      "thread_count": 11,
+      "pid": "1969186",
+      "name": "samply",
+      "thread_count": 1,
       "threads": [
         {
           "tid": 1969186,
           "name": "samply",
           "samples": "[n]",
           "duration_ms": "[dur]"
-        },
+        }
+      ]
+    },
+    {
+      "pid": "1969186.1",
+      "name": "rustfmt",
+      "thread_count": 9,
+      "threads": [
         {
           "tid": 1969186,
           "name": "rustfmt",
@@ -75,7 +82,14 @@ expression: desc
           "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
-        },
+        }
+      ]
+    },
+    {
+      "pid": "1969186.2",
+      "name": "rustfmt",
+      "thread_count": 1,
+      "threads": [
         {
           "tid": 1969186,
           "name": "rustfmt",

@@ -36,6 +36,59 @@ fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Err
     }
 }
 
+/// A samply pid. The Firefox processed-profile schema permits either a plain
+/// integer or a string with a `.N` suffix (e.g. `"1969186.1"`) to distinguish
+/// distinct processes that share the same OS pid (e.g. the parent samply
+/// recorder vs. forked targets). The base [`u64`] alone is lossy — we keep
+/// the suffix so describe_profile can bucket them apart.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Pid {
+    pub value: u64,
+    pub suffix: Option<u32>,
+}
+
+impl std::fmt::Display for Pid {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.suffix {
+            Some(s) => write!(f, "{}.{}", self.value, s),
+            None => write!(f, "{}", self.value),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for Pid {
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        use serde_json::Value;
+        let v = Value::deserialize(de)?;
+        match v {
+            Value::Number(n) => {
+                let value = n
+                    .as_u64()
+                    .or_else(|| n.as_f64().map(|f| f as u64))
+                    .ok_or_else(|| D::Error::custom("cannot convert number to u64"))?;
+                Ok(Pid {
+                    value,
+                    suffix: None,
+                })
+            }
+            Value::String(s) => {
+                let mut parts = s.splitn(2, '.');
+                let value = parts
+                    .next()
+                    .unwrap_or("")
+                    .parse::<u64>()
+                    .map_err(D::Error::custom)?;
+                let suffix = parts.next().and_then(|p| p.parse::<u32>().ok());
+                Ok(Pid { value, suffix })
+            }
+            other => Err(D::Error::custom(format!(
+                "expected number or string, got {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawProfile {
@@ -81,10 +134,15 @@ pub struct RawLib {
 pub struct RawThread {
     #[serde(deserialize_with = "deserialize_id_as_u64")]
     pub tid: u64,
-    #[serde(deserialize_with = "deserialize_id_as_u64")]
-    pub pid: u64,
+    pub pid: Pid,
     #[serde(default)]
     pub name: Option<String>,
+    /// Per-thread process name (e.g. "rustfmt", "Compositor"). Firefox's
+    /// processed-profile schema attaches this at the thread level — not on a
+    /// separate process record — so describe_profile recovers it by reading
+    /// any thread that belongs to the pid.
+    #[serde(default)]
+    pub process_name: Option<String>,
     pub register_time: f64,
     pub string_array: Vec<String>,
     pub frame_table: RawFrameTable,

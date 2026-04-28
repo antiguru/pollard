@@ -12,7 +12,7 @@
 
 #![allow(dead_code)]
 
-use crate::profile::raw::{RawLib, RawProfile, RawThread};
+use crate::profile::raw::{Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
     raw: RawProfile,
@@ -66,7 +66,7 @@ impl Profile {
             for (i, t) in p.threads.iter().enumerate() {
                 threads.push(ThreadHandle {
                     process: ProcessHandle {
-                        pid: t.pid,
+                        pid: t.pid.value,
                         process_idx: Some(pi),
                     },
                     thread_idx: i,
@@ -188,11 +188,21 @@ impl<'a> ThreadView<'a> {
     }
 
     pub fn pid(&self) -> u64 {
+        self.raw().pid.value
+    }
+
+    /// Full pid including the `.N` sub-process suffix when present.
+    /// Use this for grouping; use [`Self::pid`] for filter-by-integer matches.
+    pub fn pid_full(&self) -> Pid {
         self.raw().pid
     }
 
     pub fn name(&self) -> Option<&'a str> {
         self.raw().name.as_deref()
+    }
+
+    pub fn process_name(&self) -> Option<&'a str> {
+        self.raw().process_name.as_deref()
     }
 
     pub fn samples(&self) -> &'a crate::profile::raw::RawSampleTable {
