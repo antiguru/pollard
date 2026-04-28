@@ -68,6 +68,8 @@ pub struct FrameNode {
     pub function: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub chain: Option<Vec<String>>,
     pub self_samples: u64,
     pub self_pct: f32,
     pub total_samples: u64,
@@ -116,7 +118,10 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
         accumulate(profile, handle, args.inverted, &mut root, &mut total_samples);
     }
 
-    let tree = build_node(&root, total_samples, "ROOT".into(), None, args, 0);
+    let mut tree = build_node(&root, total_samples, "ROOT".into(), None, args, 0);
+    if let Some(node) = tree.as_mut() {
+        compress_chains(node);
+    }
 
     Ok(Output {
         thread: None,
@@ -236,12 +241,33 @@ fn build_node(
     Some(Node::Frame(FrameNode {
         function,
         module,
+        chain: None,
         self_samples: agg.self_samples,
         self_pct: 100.0 * agg.self_samples as f32 / total,
         total_samples: agg.total_samples,
         total_pct,
         children,
     }))
+}
+
+fn compress_chains(node: &mut Node) {
+    if let Node::Frame(frame) = node {
+        loop {
+            let only_real_child = matches!(frame.children.as_slice(), [Node::Frame(_)]);
+            if !only_real_child {
+                break;
+            }
+            let child = frame.children.remove(0);
+            if let Node::Frame(child_frame) = child {
+                let chain_entry = child_frame.function.clone();
+                frame.chain.get_or_insert_with(Vec::new).push(chain_entry);
+                frame.children = child_frame.children;
+            }
+        }
+        for c in &mut frame.children {
+            compress_chains(c);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -262,5 +288,30 @@ mod tests {
         let p = fixture();
         let tree = call_tree(&p, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
         assert!(tree.tree.is_some());
+    }
+
+    #[test]
+    fn collapses_linear_chain() {
+        let raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/linear_chain.json"
+        ))
+        .unwrap();
+        let profile = Profile::from_raw(raw);
+        let tree = call_tree(&profile, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
+        let root = tree.tree.unwrap();
+        if let Node::Frame(f) = root {
+            // Task 17: compression collapses ROOT → [a, b, c, d] because every node
+            // has exactly one Frame child. Single-root hoisting (Task 20) will later
+            // change this to function="a", chain=["b","c","d"]; this assertion will
+            // be updated in that task.
+            assert_eq!(
+                f.chain.as_deref(),
+                Some(
+                    &["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()][..]
+                )
+            );
+        } else {
+            panic!("expected frame root");
+        }
     }
 }
