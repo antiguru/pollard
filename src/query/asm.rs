@@ -20,7 +20,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::FunctionMatcher;
+use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
 use crate::profile::Profile;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -66,38 +66,6 @@ struct FunctionLocation {
     frame_counts: HashMap<u32, u64>,
 }
 
-fn matcher_to_string(matcher: &FunctionMatcher) -> String {
-    match matcher {
-        FunctionMatcher::Substring(s) => s.clone(),
-        FunctionMatcher::Regex(r) => format!("re:{}", r.as_str()),
-    }
-}
-
-fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> Vec<String> {
-    let mut candidates: Vec<String> = Vec::new();
-    for thread in profile.threads() {
-        let raw = thread.raw();
-        for func_idx in 0..raw.func_table.length {
-            if let Some(s_idx) = raw.func_table.name.get(func_idx)
-                && let Some(s) = raw.string_array.get(*s_idx)
-            {
-                candidates.push(s.clone());
-            }
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
-    let needle = matcher_to_string(matcher);
-    candidates.sort_by_key(|c| {
-        if c.contains(&needle) {
-            0
-        } else {
-            c.len().abs_diff(needle.len())
-        }
-    });
-    candidates.into_iter().take(5).collect()
-}
-
 /// Walk every sample/frame and resolve the function to a `FunctionLocation`.
 ///
 /// Returns `None` (indicating "function not found") if no matching frame is
@@ -138,7 +106,9 @@ fn resolve_function(
                 }
 
                 // Get the relative address for this frame.
-                let Some(rel_addr_i64) = info.address else { continue };
+                let Some(rel_addr_i64) = info.address else {
+                    continue;
+                };
                 if rel_addr_i64 < 0 {
                     continue;
                 }
@@ -171,12 +141,7 @@ fn resolve_function(
                         .and_then(|o| *o);
                     if let Some(ns_idx) = native_sym_idx {
                         let ns_addr = ns.address.get(ns_idx).copied().unwrap_or(-1);
-                        let ns_size = ns
-                            .function_size
-                            .get(ns_idx)
-                            .copied()
-                            .flatten()
-                            .unwrap_or(0);
+                        let ns_size = ns.function_size.get(ns_idx).copied().flatten().unwrap_or(0);
                         if ns_addr >= 0 {
                             native_loc = Some((ns_addr as u32, ns_size as u32, lib_idx));
                         }
@@ -212,7 +177,12 @@ fn resolve_function(
         (min, estimated)
     };
 
-    Some(FunctionLocation { start_rel, size_bytes, lib_idx, frame_counts })
+    Some(FunctionLocation {
+        start_rel,
+        size_bytes,
+        lib_idx,
+        frame_counts,
+    })
 }
 
 // ─── disassembly via wholesym/samply-api ────────────────────────────────────
@@ -268,11 +238,7 @@ fn build_library_info(lib: &crate::profile::raw::RawLib) -> wholesym::LibraryInf
     }
 }
 
-fn build_asm_request(
-    lib: &crate::profile::raw::RawLib,
-    start_rel: u32,
-    size_bytes: u32,
-) -> String {
+fn build_asm_request(lib: &crate::profile::raw::RawLib, start_rel: u32, size_bytes: u32) -> String {
     let mut obj = serde_json::json!({
         "startAddress": format!("0x{start_rel:x}"),
         "size":         format!("0x{size_bytes:x}"),
@@ -360,10 +326,7 @@ fn parse_asm_response(
     // Compute lengths from adjacent offsets.
     let mut decoded: Vec<DecodedInstr> = Vec::with_capacity(raw_pairs.len());
     for (i, &(offset, ref text)) in raw_pairs.iter().enumerate() {
-        let next_offset = raw_pairs
-            .get(i + 1)
-            .map(|&(o, _)| o)
-            .unwrap_or(total_size);
+        let next_offset = raw_pairs.get(i + 1).map(|&(o, _)| o).unwrap_or(total_size);
         let len = next_offset.saturating_sub(offset);
         decoded.push(DecodedInstr {
             offset,
@@ -429,8 +392,9 @@ fn attribute_samples(
 // ─── public entry point ──────────────────────────────────────────────────────
 
 pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListing, ToolError> {
-    let matcher = FunctionMatcher::new(&args.function)
-        .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+    let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+        message: e.to_string(),
+    })?;
 
     let loc = resolve_function(profile, &matcher, args.module.as_deref()).ok_or_else(|| {
         ToolError::FunctionNotFound {
@@ -449,11 +413,9 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
 
     let module_name = lib.name.clone();
 
-    let (decoded, arch) =
-        disassemble(&lib, loc.start_rel, loc.size_bytes).await?;
+    let (decoded, arch) = disassemble(&lib, loc.start_rel, loc.size_bytes).await?;
 
-    let instructions =
-        attribute_samples(&decoded, loc.start_rel, &loc.frame_counts);
+    let instructions = attribute_samples(&decoded, loc.start_rel, &loc.frame_counts);
 
     Ok(AsmListing {
         function: args.function.clone(),

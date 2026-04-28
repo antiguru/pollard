@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::FunctionMatcher;
+use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
 use crate::profile::{Profile, ThreadHandle};
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
@@ -98,16 +98,22 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
         .as_deref()
         .map(FunctionMatcher::new)
         .transpose()
-        .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+        .map_err(|e| ToolError::Internal {
+            message: e.to_string(),
+        })?;
     let paths_to = args
         .paths_to
         .as_deref()
         .map(FunctionMatcher::new)
         .transpose()
-        .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+        .map_err(|e| ToolError::Internal {
+            message: e.to_string(),
+        })?;
 
     let mut root = AggNode::default();
     let mut total_samples: u64 = 0;
+    let mut root_match_seen = false;
+    let mut paths_to_match_seen = false;
 
     for handle in args.filter_args.threads(profile) {
         accumulate_with_root(
@@ -118,7 +124,31 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             &paths_to,
             &mut root,
             &mut total_samples,
+            &mut root_match_seen,
+            &mut paths_to_match_seen,
         );
+    }
+
+    // If the user pinned the tree to a specific function (root_function or
+    // paths_to) and no stack matched, fall through with a `FunctionNotFound`
+    // so the LLM gets nearest-name suggestions instead of a silent
+    // `tree: null`. We attribute the miss to whichever matcher was set;
+    // when both are set, root_function wins (it's the more restrictive cut).
+    if let Some(m) = &root_matcher
+        && !root_match_seen
+    {
+        return Err(ToolError::FunctionNotFound {
+            function: matcher_to_string(m),
+            nearest_matches: nearest_function_names(profile, m),
+        });
+    }
+    if let Some(m) = &paths_to
+        && !paths_to_match_seen
+    {
+        return Err(ToolError::FunctionNotFound {
+            function: matcher_to_string(m),
+            nearest_matches: nearest_function_names(profile, m),
+        });
     }
 
     let mut tree = build_node(&root, total_samples, "ROOT".into(), None, args, 0);
@@ -151,6 +181,7 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn accumulate_with_root(
     profile: &Profile,
     handle: ThreadHandle,
@@ -159,6 +190,8 @@ fn accumulate_with_root(
     paths_to_matcher: &Option<FunctionMatcher>,
     root: &mut AggNode,
     total_samples: &mut u64,
+    root_match_seen: &mut bool,
+    paths_to_match_seen: &mut bool,
 ) {
     let raw = profile.raw_thread(handle);
     for &stack_opt in &raw.samples.stack {
@@ -168,14 +201,16 @@ fn accumulate_with_root(
             frames.reverse();
         }
         // If a paths_to matcher is set, skip stacks that don't contain a matching frame.
-        if let Some(m) = paths_to_matcher
-            && !frames.iter().any(|&f| {
+        if let Some(m) = paths_to_matcher {
+            let hit = frames.iter().any(|&f| {
                 profile
                     .frame_info(handle, f)
                     .is_some_and(|i| m.matches(i.function_name))
-            })
-        {
-            continue;
+            });
+            if !hit {
+                continue;
+            }
+            *paths_to_match_seen = true;
         }
         // If a root matcher is set, find the frame that matches and trim the prefix.
         if let Some(m) = root_matcher {
@@ -187,6 +222,7 @@ fn accumulate_with_root(
             match pos {
                 Some(p) => {
                     frames.drain(..p);
+                    *root_match_seen = true;
                 }
                 None => continue, // skip this stack entirely
             };
@@ -199,7 +235,10 @@ fn accumulate_with_root(
                 Some(fi) => fi,
                 None => continue,
             };
-            let key = (info.function_name.to_owned(), info.module_name.map(str::to_owned));
+            let key = (
+                info.function_name.to_owned(),
+                info.module_name.map(str::to_owned),
+            );
             node = node.children.entry(key).or_default();
             node.total_samples += 1;
             if i + 1 == len {
@@ -224,7 +263,9 @@ fn build_node(
     }
     if depth > args.max_depth {
         return Some(Node::Truncated {
-            truncated: TruncatedSummary { deepest_descendant_pct: total_pct },
+            truncated: TruncatedSummary {
+                deepest_descendant_pct: total_pct,
+            },
         });
     }
 
@@ -233,8 +274,8 @@ fn build_node(
     child_entries.sort_by(|a, b| {
         b.1.total_samples
             .cmp(&a.1.total_samples)
-            .then_with(|| a.0 .0.cmp(&b.0 .0))
-            .then_with(|| a.0 .1.cmp(&b.0 .1))
+            .then_with(|| a.0.0.cmp(&b.0.0))
+            .then_with(|| a.0.1.cmp(&b.0.1))
     });
 
     let mut children = Vec::new();
@@ -315,29 +356,32 @@ fn compress_chains(node: &mut Node) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{raw::RawProfile, Profile};
+    use crate::profile::{Profile, raw::RawProfile};
 
     fn fixture() -> Profile {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/two_functions.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         Profile::from_raw(raw)
     }
 
     #[test]
     fn builds_tree_with_two_top_level_functions() {
         let p = fixture();
-        let tree = call_tree(&p, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
+        let tree = call_tree(
+            &p,
+            &Args {
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(tree.tree.is_some());
     }
 
     #[test]
     fn root_function_restricts_tree() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/two_functions.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         let profile = Profile::from_raw(raw);
         let tree = call_tree(
             &profile,
@@ -361,10 +405,8 @@ mod tests {
 
     #[test]
     fn paths_to_keeps_only_matching_stacks() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/paths_to.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/paths_to.json")).unwrap();
         let profile = Profile::from_raw(raw);
         let tree = call_tree(
             &profile,
@@ -380,12 +422,17 @@ mod tests {
 
     #[test]
     fn single_root_hoisted() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/linear_chain.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
         let profile = Profile::from_raw(raw);
-        let tree = call_tree(&profile, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
+        let tree = call_tree(
+            &profile,
+            &Args {
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         if let Some(Node::Frame(f)) = tree.tree {
             assert_eq!(f.function, "a");
         } else {
@@ -394,13 +441,53 @@ mod tests {
     }
 
     #[test]
+    fn unknown_root_function_returns_function_not_found() {
+        let p = fixture();
+        let err = call_tree(
+            &p,
+            &Args {
+                root_function: Some("definitely_not_in_profile".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        match err {
+            ToolError::FunctionNotFound { function, .. } => {
+                assert_eq!(function, "definitely_not_in_profile");
+            }
+            other => panic!("expected FunctionNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_paths_to_returns_function_not_found() {
+        let p = fixture();
+        let err = call_tree(
+            &p,
+            &Args {
+                paths_to: Some("definitely_not_in_profile".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        assert!(matches!(err, ToolError::FunctionNotFound { .. }));
+    }
+
+    #[test]
     fn collapses_linear_chain() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/linear_chain.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
         let profile = Profile::from_raw(raw);
-        let tree = call_tree(&profile, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
+        let tree = call_tree(
+            &profile,
+            &Args {
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         let root = tree.tree.unwrap();
         if let Node::Frame(f) = root {
             assert_eq!(f.function, "a");

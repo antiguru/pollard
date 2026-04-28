@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::FunctionMatcher;
+use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
 use crate::profile::Profile;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -56,12 +56,10 @@ pub struct SourceLine {
     pub code: String,
 }
 
-pub fn source_for_function(
-    profile: &Profile,
-    args: &Args,
-) -> Result<SourceListing, ToolError> {
-    let matcher = FunctionMatcher::new(&args.function)
-        .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+pub fn source_for_function(profile: &Profile, args: &Args) -> Result<SourceListing, ToolError> {
+    let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+        message: e.to_string(),
+    })?;
     let (file, _samples_per_line, _total) = attribute(profile, &matcher, args.module.as_deref())?;
     let resolved = fetch_source(profile, &file)?;
     build_listing(
@@ -90,7 +88,9 @@ fn attribute(
         for &stack_opt in &raw.samples.stack {
             let Some(stack_idx) = stack_opt else { continue };
             for frame_idx in profile.walk_stack(handle, stack_idx) {
-                let Some(info) = profile.frame_info(handle, frame_idx) else { continue };
+                let Some(info) = profile.frame_info(handle, frame_idx) else {
+                    continue;
+                };
                 if !matcher.matches(info.function_name) {
                     continue;
                 }
@@ -128,37 +128,12 @@ fn attribute(
     Ok((file, samples_per_line, total))
 }
 
-fn matcher_to_string(matcher: &FunctionMatcher) -> String {
-    match matcher {
-        FunctionMatcher::Substring(s) => s.clone(),
-        FunctionMatcher::Regex(r) => format!("re:{}", r.as_str()),
-    }
-}
-
-fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> Vec<String> {
-    let mut candidates: Vec<String> = Vec::new();
-    for thread in profile.threads() {
-        let raw = thread.raw();
-        for func_idx in 0..raw.func_table.length {
-            if let Some(s_idx) = raw.func_table.name.get(func_idx)
-                && let Some(s) = raw.string_array.get(*s_idx)
-            {
-                candidates.push(s.clone());
-            }
-        }
-    }
-    candidates.sort();
-    candidates.dedup();
-    let needle = matcher_to_string(matcher);
-    candidates.sort_by_key(|c| if c.contains(&needle) { 0 } else { c.len().abs_diff(needle.len()) });
-    candidates.into_iter().take(5).collect()
-}
-
 fn fetch_source(_profile: &Profile, file: &str) -> Result<ResolvedSource, ToolError> {
     let path = std::path::Path::new(file);
     if path.is_absolute() && path.exists() {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+        let content = std::fs::read_to_string(path).map_err(|e| ToolError::Internal {
+            message: e.to_string(),
+        })?;
         let language = match path.extension().and_then(|e| e.to_str()) {
             Some("rs") => Some("rust".to_owned()),
             Some("c") => Some("c".to_owned()),
@@ -166,7 +141,11 @@ fn fetch_source(_profile: &Profile, file: &str) -> Result<ResolvedSource, ToolEr
             Some("py") => Some("python".to_owned()),
             _ => None,
         };
-        Ok(ResolvedSource { file: file.to_owned(), language, content })
+        Ok(ResolvedSource {
+            file: file.to_owned(),
+            language,
+            content,
+        })
     } else {
         Err(ToolError::Internal {
             message: format!("source file unavailable: {}", file),
@@ -183,8 +162,9 @@ pub fn build_listing(
     whole_file: bool,
 ) -> Result<SourceListing, ToolError> {
     // Re-attribute samples for this listing.
-    let matcher = FunctionMatcher::new(function)
-        .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+    let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
+        message: e.to_string(),
+    })?;
     let (_file, samples_per_line, total) = attribute(profile, &matcher, module)?;
 
     let total_lines: Vec<(u32, String)> = resolved
@@ -215,7 +195,11 @@ pub fn build_listing(
             SourceLine {
                 line: n,
                 samples: s,
-                samples_pct: if total > 0 { Some(100.0 * s as f32 / total_f) } else { None },
+                samples_pct: if total > 0 {
+                    Some(100.0 * s as f32 / total_f)
+                } else {
+                    None
+                },
                 code,
             }
         })
@@ -241,18 +225,18 @@ pub fn build_listing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::raw::RawProfile;
     use crate::profile::Profile;
+    use crate::profile::raw::RawProfile;
 
     #[test]
     fn returns_per_line_samples() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/source_attribution.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
         let profile = Profile::from_raw(raw);
 
-        let source = "fn process_request() {\n    let x = parse();\n    validate(x);\n    return;\n}\n";
+        let source =
+            "fn process_request() {\n    let x = parse();\n    validate(x);\n    return;\n}\n";
         let listing = build_listing(
             &profile,
             "process_request",
@@ -274,10 +258,8 @@ mod tests {
     #[test]
     fn function_present_without_line_info_returns_internal_not_function_not_found() {
         // two_functions.json has frames for `hot` but no per-frame line numbers.
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/two_functions.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         let profile = Profile::from_raw(raw);
 
         let err = build_listing(
@@ -308,10 +290,8 @@ mod tests {
 
     #[test]
     fn truly_absent_function_returns_function_not_found() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/two_functions.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         let profile = Profile::from_raw(raw);
 
         let err = build_listing(
