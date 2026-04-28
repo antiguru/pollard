@@ -1,6 +1,5 @@
 ---
 source: tests/snapshot.rs
-assertion_line: 27
 expression: desc
 ---
 {
@@ -13,78 +12,72 @@ expression: desc
   "unsymbolicated_pct": "[pct]",
   "processes": [
     {
-      "pid": 50258,
+      "pid": 1969186,
       "name": "",
-      "thread_count": 12,
+      "thread_count": 11,
       "threads": [
         {
-          "tid": 27367466,
+          "tid": 1969186,
+          "name": "samply",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 1969186,
           "name": "rustfmt",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367480,
-          "name": "Thread <27367480>",
+          "tid": 1969260,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367481,
-          "name": "Thread <27367481>",
+          "tid": 1969261,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367482,
-          "name": "tokio-runtime-worker",
+          "tid": 1969262,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367483,
-          "name": "tokio-runtime-worker",
+          "tid": 1969263,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367484,
-          "name": "tokio-runtime-worker",
+          "tid": 1969264,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367485,
-          "name": "tokio-runtime-worker",
+          "tid": 1969265,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367486,
-          "name": "tokio-runtime-worker",
+          "tid": 1969266,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367487,
-          "name": "tokio-runtime-worker",
+          "tid": 1969267,
+          "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
         },
         {
-          "tid": 27367488,
-          "name": "tokio-runtime-worker",
-          "samples": "[n]",
-          "duration_ms": "[dur]"
-        },
-        {
-          "tid": 27367489,
-          "name": "tokio-runtime-worker",
-          "samples": "[n]",
-          "duration_ms": "[dur]"
-        },
-        {
-          "tid": 27367490,
+          "tid": 1969186,
           "name": "rustfmt",
           "samples": "[n]",
           "duration_ms": "[dur]"
