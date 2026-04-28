@@ -23,7 +23,7 @@
 #[path = "helpers/mod.rs"]
 mod helpers;
 
-use helpers::synthetic::{build_simple_profile, SampleSpec};
+use helpers::synthetic::{SampleSpec, build_simple_profile};
 use std::fs;
 
 const FIXTURES_DIR: &str = "tests/fixtures";
@@ -331,7 +331,7 @@ fn build_source_attribution() {
 #[test]
 #[ignore]
 fn build_tiny() {
-    use flate2::{read::GzDecoder, write::GzEncoder, Compression};
+    use flate2::{Compression, read::GzDecoder, write::GzEncoder};
     use std::io::{Read, Write};
     use std::process::Command;
 
@@ -367,7 +367,8 @@ fn build_tiny() {
     let path = format!("{}/tiny.json.gz", FIXTURES_DIR);
     let f = fs::File::create(&path).unwrap();
     let mut gz = GzEncoder::new(f, Compression::default());
-    gz.write_all(&serde_json::to_vec(&profile).unwrap()).unwrap();
+    gz.write_all(&serde_json::to_vec(&profile).unwrap())
+        .unwrap();
     gz.finish().unwrap();
     eprintln!("wrote {}", path);
 }

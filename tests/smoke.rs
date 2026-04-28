@@ -60,10 +60,7 @@ async fn lists_all_nine_tools() {
     }
     let v = tools_resp.expect("never received tools/list reply");
     let tools = v["result"]["tools"].as_array().unwrap();
-    let names: Vec<&str> = tools
-        .iter()
-        .map(|t| t["name"].as_str().unwrap())
-        .collect();
+    let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
 
     for expected in &[
         "load_profile",

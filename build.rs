@@ -5,7 +5,13 @@ fn main() {
         return;
     }
     let status = Command::new("cc")
-        .args(["-O1", "-g", "tests/fixtures/tiny_program.c", "-o", "target/tiny_program"])
+        .args([
+            "-O1",
+            "-g",
+            "tests/fixtures/tiny_program.c",
+            "-o",
+            "target/tiny_program",
+        ])
         .status()
         .expect("cc must be on PATH for e2e tests");
     assert!(status.success());

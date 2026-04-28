@@ -30,7 +30,9 @@ fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Err
             let base = s.split('.').next().unwrap_or(&s);
             base.parse::<u64>().map_err(D::Error::custom)
         }
-        other => Err(D::Error::custom(format!("expected number or string, got {other}"))),
+        other => Err(D::Error::custom(format!(
+            "expected number or string, got {other}"
+        ))),
     }
 }
 
@@ -117,7 +119,7 @@ pub struct RawFuncTable {
     pub is_js: Vec<bool>,
     #[serde(rename = "relevantForJS")]
     pub relevant_for_js: Vec<bool>,
-    pub resource: Vec<i32>, // -1 if no resource
+    pub resource: Vec<i32>,            // -1 if no resource
     pub file_name: Vec<Option<usize>>, // string-array index
     pub line_number: Vec<Option<u32>>,
     pub column_number: Vec<Option<u32>>,

@@ -53,7 +53,10 @@ impl Profile {
         // Top-level threads belong to the implicit "root" process.
         for (i, _) in raw.threads.iter().enumerate() {
             threads.push(ThreadHandle {
-                process: ProcessHandle { pid: 0, process_idx: None },
+                process: ProcessHandle {
+                    pid: 0,
+                    process_idx: None,
+                },
                 thread_idx: i,
             });
         }
@@ -77,7 +80,10 @@ impl Profile {
     }
 
     pub fn threads(&self) -> impl Iterator<Item = ThreadView<'_>> + '_ {
-        self.threads.iter().map(move |&h| ThreadView { profile: self, handle: h })
+        self.threads.iter().map(move |&h| ThreadView {
+            profile: self,
+            handle: h,
+        })
     }
 
     pub fn duration_ms(&self) -> f64 {
@@ -109,7 +115,12 @@ impl Profile {
         let func_name_idx = *thread.func_table.name.get(func_idx)?;
         let function_name = thread.string_array.get(func_name_idx)?.as_str();
 
-        let resource_idx = thread.func_table.resource.get(func_idx).copied().unwrap_or(-1);
+        let resource_idx = thread
+            .func_table
+            .resource
+            .get(func_idx)
+            .copied()
+            .unwrap_or(-1);
         let module_name = if resource_idx >= 0 {
             let r = thread.resource_table.lib.get(resource_idx as usize)?;
             r.and_then(|li| self.lib(li))
@@ -118,16 +129,25 @@ impl Profile {
             None
         };
 
-        let file = thread.func_table.file_name.get(func_idx).and_then(|opt| {
-            opt.and_then(|si| thread.string_array.get(si).map(String::as_str))
-        });
+        let file = thread
+            .func_table
+            .file_name
+            .get(func_idx)
+            .and_then(|opt| opt.and_then(|si| thread.string_array.get(si).map(String::as_str)));
 
         let line = thread.frame_table.line.get(frame_idx).copied().flatten();
         let column = thread.frame_table.column.get(frame_idx).copied().flatten();
         let address = thread.frame_table.address.get(frame_idx).copied();
         let address = address.filter(|&a| a >= 0);
 
-        Some(FrameInfo { function_name, module_name, file, line, column, address })
+        Some(FrameInfo {
+            function_name,
+            module_name,
+            file,
+            line,
+            column,
+            address,
+        })
     }
 
     /// Walk the frame indices for a stack from leaf to root.
@@ -179,10 +199,9 @@ mod tests {
     use crate::profile::raw::RawProfile;
 
     fn fixture() -> Profile {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/minimal_profile.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimal_profile.json"))
+                .unwrap();
         Profile::from_raw(raw)
     }
 

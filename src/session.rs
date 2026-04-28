@@ -18,14 +18,16 @@ pub struct ProfileSession {
 #[allow(dead_code)]
 impl ProfileSession {
     pub async fn load(path: &Path, name: Option<&str>) -> Result<Self, ToolError> {
-        let abs = path
-            .canonicalize()
-            .map_err(|_| ToolError::FileNotFound { path: path.to_path_buf() })?;
+        let abs = path.canonicalize().map_err(|_| ToolError::FileNotFound {
+            path: path.to_path_buf(),
+        })?;
 
         let mut raw = load_from_path(&abs)?;
         // Best-effort symbolication: resolve unsymbolicated frames (e.g. from
         // macOS samply recordings) before constructing the read-only Profile.
-        crate::profile::symbolicate::symbolicate(&mut raw).await.ok();
+        crate::profile::symbolicate::symbolicate(&mut raw)
+            .await
+            .ok();
         let profile = Arc::new(Profile::from_raw(raw));
 
         // For v1 we treat the profile as already-symbolicated by samply itself
@@ -35,14 +37,12 @@ impl ProfileSession {
         let unsymbolicated_pct = compute_unsymbolicated_pct(&profile);
 
         let id = profile_id_from_path(&abs);
-        let name = name
-            .map(str::to_owned)
-            .unwrap_or_else(|| {
-                abs.file_stem()
-                    .and_then(|s| s.to_str())
-                    .map(|s| s.trim_end_matches(".json").to_owned())
-                    .unwrap_or_else(|| id.clone())
-            });
+        let name = name.map(str::to_owned).unwrap_or_else(|| {
+            abs.file_stem()
+                .and_then(|s| s.to_str())
+                .map(|s| s.trim_end_matches(".json").to_owned())
+                .unwrap_or_else(|| id.clone())
+        });
 
         Ok(Self {
             id,
@@ -131,7 +131,9 @@ mod tests {
         let raw_json = include_str!("../tests/fixtures/minimal_profile.json");
         let tmp = tempfile::NamedTempFile::with_suffix(".json").unwrap();
         std::fs::write(tmp.path(), raw_json).unwrap();
-        let session = ProfileSession::load(tmp.path(), Some("test")).await.unwrap();
+        let session = ProfileSession::load(tmp.path(), Some("test"))
+            .await
+            .unwrap();
         assert_eq!(session.name(), "test");
         assert!(session.profile().threads().count() >= 1);
     }

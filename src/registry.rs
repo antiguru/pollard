@@ -63,8 +63,12 @@ impl SessionRegistry {
         // Evict until under capacity.
         let mut evicted = Vec::new();
         while inner.sessions.len() >= self.capacity {
-            let Some(victim_id) = inner.order.pop_front() else { break };
-            let Some(s) = inner.sessions.remove(&victim_id) else { continue };
+            let Some(victim_id) = inner.order.pop_front() else {
+                break;
+            };
+            let Some(s) = inner.sessions.remove(&victim_id) else {
+                continue;
+            };
             let entry = EvictedSession {
                 profile_id: victim_id.clone(),
                 name: s.name().to_owned(),
@@ -103,7 +107,9 @@ impl SessionRegistry {
                 original_path: e.path.clone(),
             });
         }
-        Err(ToolError::ProfileNotFound { profile_id: id.to_owned() })
+        Err(ToolError::ProfileNotFound {
+            profile_id: id.to_owned(),
+        })
     }
 
     pub async fn unload(&self, id: &str) -> bool {
@@ -149,18 +155,27 @@ mod tests {
     async fn evicts_oldest_when_capacity_exceeded() {
         let registry = SessionRegistry::new(1);
         let (id1, evicted_first) = registry
-            .load(std::path::Path::new("tests/fixtures/minimal_profile.json"), Some("first"))
+            .load(
+                std::path::Path::new("tests/fixtures/minimal_profile.json"),
+                Some("first"),
+            )
             .await
             .unwrap();
         assert!(evicted_first.is_empty());
         let (id2, evicted_second) = registry
-            .load(std::path::Path::new("tests/fixtures/two_functions.json"), Some("second"))
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                Some("second"),
+            )
             .await
             .unwrap();
         assert_eq!(evicted_second.len(), 1);
         assert_eq!(evicted_second[0].profile_id, id1);
         assert_eq!(evicted_second[0].name, "first");
-        assert!(registry.get(&id1).await.is_none(), "first should have been evicted");
+        assert!(
+            registry.get(&id1).await.is_none(),
+            "first should have been evicted"
+        );
         assert!(registry.get(&id2).await.is_some());
 
         // The evicted entry is queryable via list_evicted so the LLM can re-load.

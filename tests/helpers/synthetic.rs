@@ -2,8 +2,8 @@
 //! serialize+deserialize them through our raw types.
 
 use fxprof_processed_profile::{
-    CategoryHandle, CpuDelta, Frame, FrameFlags, FrameInfo, Profile as FxProfile,
-    SamplingInterval, Timestamp,
+    CategoryHandle, CpuDelta, Frame, FrameFlags, FrameInfo, Profile as FxProfile, SamplingInterval,
+    Timestamp,
 };
 use std::time::SystemTime;
 
@@ -20,8 +20,7 @@ pub fn build_simple_profile(name: &str, samples: &[SampleSpec<'_>]) -> String {
         SystemTime::UNIX_EPOCH.into(),
         SamplingInterval::from_millis(1),
     );
-    let process =
-        profile.add_process("Main", 1, Timestamp::from_millis_since_reference(0.0));
+    let process = profile.add_process("Main", 1, Timestamp::from_millis_since_reference(0.0));
     let thread = profile.add_thread(
         process,
         1,

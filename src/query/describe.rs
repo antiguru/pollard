@@ -42,7 +42,11 @@ pub fn describe(
     unsymbolicated_pct: f32,
 ) -> ProfileDescription {
     let interval_ms = profile.meta().interval;
-    let sample_rate_hz = if interval_ms > 0.0 { 1000.0 / interval_ms } else { 0.0 };
+    let sample_rate_hz = if interval_ms > 0.0 {
+        1000.0 / interval_ms
+    } else {
+        0.0
+    };
 
     // Group threads by pid.
     let mut by_pid: std::collections::BTreeMap<u64, Vec<ThreadDescription>> =
@@ -55,12 +59,15 @@ pub fn describe(
         let dur = times.last().copied().unwrap_or(0.0) - times.first().copied().unwrap_or(0.0);
         let samples = raw.samples.length as u64;
         total_samples += samples;
-        by_pid.entry(thread.pid()).or_default().push(ThreadDescription {
-            tid: thread.tid(),
-            name: thread.name().unwrap_or("").to_owned(),
-            samples,
-            duration_ms: dur,
-        });
+        by_pid
+            .entry(thread.pid())
+            .or_default()
+            .push(ThreadDescription {
+                tid: thread.tid(),
+                name: thread.name().unwrap_or("").to_owned(),
+                samples,
+                duration_ms: dur,
+            });
     }
 
     let processes = by_pid
@@ -92,10 +99,9 @@ mod tests {
 
     #[test]
     fn describes_minimal_profile() {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/minimal_profile.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimal_profile.json"))
+                .unwrap();
         let profile = Profile::from_raw(raw);
         let desc = describe(&profile, "id1", "name1", "/tmp/p.json", 0.0);
         assert_eq!(desc.profile_id, "id1");

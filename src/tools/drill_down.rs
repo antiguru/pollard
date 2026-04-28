@@ -40,7 +40,10 @@ pub struct AsmForFunctionArgs {
 
 #[tool_router(router = drill_down_router, vis = "pub(crate)")]
 impl PollardServer {
-    #[tool(name = "source_for_function", description = "Source listing with per-line sample counts.")]
+    #[tool(
+        name = "source_for_function",
+        description = "Source listing with per-line sample counts."
+    )]
     pub async fn source_for_function(
         &self,
         Parameters(args): Parameters<SourceForFunctionArgs>,
@@ -56,7 +59,10 @@ impl PollardServer {
         Ok(Json(result))
     }
 
-    #[tool(name = "asm_for_function", description = "Disassembly with per-instruction sample counts.")]
+    #[tool(
+        name = "asm_for_function",
+        description = "Disassembly with per-instruction sample counts."
+    )]
     pub async fn asm_for_function(
         &self,
         Parameters(args): Parameters<AsmForFunctionArgs>,

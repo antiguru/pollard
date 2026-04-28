@@ -72,7 +72,10 @@ impl Filter {
             ThreadFilter::Tid(t) => t.to_string(),
             ThreadFilter::Name(n) => n.clone(),
         };
-        Err(ToolError::ThreadNotFound { thread, available_threads })
+        Err(ToolError::ThreadNotFound {
+            thread,
+            available_threads,
+        })
     }
 
     /// Clamp a time range to the profile's actual duration; emit no error.
@@ -97,13 +100,12 @@ impl Filter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{raw::RawProfile, Profile};
+    use crate::profile::{Profile, raw::RawProfile};
 
     fn fixture() -> Profile {
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/minimal_profile.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/minimal_profile.json"))
+                .unwrap();
         Profile::from_raw(raw)
     }
 

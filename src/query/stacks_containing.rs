@@ -47,8 +47,9 @@ const DEFAULT_LIMIT: usize = 20;
 
 pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     args.filter_args.validate_thread(profile)?;
-    let matcher = FunctionMatcher::new(&args.function)
-        .map_err(|e| ToolError::Internal { message: e.to_string() })?;
+    let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+        message: e.to_string(),
+    })?;
 
     type StackKey = Vec<(String, Option<String>, bool)>;
     let mut counts: HashMap<StackKey, u64> = HashMap::new();
@@ -96,7 +97,11 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
     });
 
     let unique_stacks_total = entries.len();
-    let limit = if args.limit == 0 { DEFAULT_LIMIT } else { args.limit };
+    let limit = if args.limit == 0 {
+        DEFAULT_LIMIT
+    } else {
+        args.limit
+    };
     let total = total_samples.max(1) as f32;
     let stacks: Vec<StackOutput> = entries
         .into_iter()
@@ -106,7 +111,11 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
             pct: 100.0 * samples as f32 / total,
             frames: frames
                 .into_iter()
-                .map(|(function, module, matched)| FrameOutput { function, module, matched })
+                .map(|(function, module, matched)| FrameOutput {
+                    function,
+                    module,
+                    matched,
+                })
                 .collect(),
         })
         .collect();
@@ -124,22 +133,29 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{raw::RawProfile, Profile};
+    use crate::profile::{Profile, raw::RawProfile};
 
     #[test]
     fn returns_distinct_stacks_with_matched_flag() {
         // Fixture has 3 distinct stacks. Two contain "alloc"; one does not.
-        let raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/stacks_containing.json"
-        ))
-        .unwrap();
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/stacks_containing.json"))
+                .unwrap();
         let profile = Profile::from_raw(raw);
         let result = stacks_containing(
             &profile,
-            &Args { function: "alloc".into(), ..Default::default() },
+            &Args {
+                function: "alloc".into(),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(result.unique_stacks_total, 2);
-        assert!(result.stacks.iter().all(|s| s.frames.iter().any(|f| f.matched)));
+        assert!(
+            result
+                .stacks
+                .iter()
+                .all(|s| s.frames.iter().any(|f| f.matched))
+        );
     }
 }

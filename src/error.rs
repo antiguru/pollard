@@ -11,17 +11,47 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "error", rename_all = "snake_case")]
 pub enum ToolError {
-    FileNotFound { path: PathBuf },
-    NotAProfile { path: PathBuf, details: String },
-    UnsupportedProfileFormat { path: PathBuf, version: String },
-    FunctionNotFound { function: String, nearest_matches: Vec<String> },
-    FunctionAmbiguous { function: String, candidates: Vec<FunctionCandidate> },
-    ThreadNotFound { thread: String, available_threads: Vec<ThreadRef> },
-    ProcessNotFound { process: String, available_processes: Vec<ProcessRef> },
-    OutOfBounds { original_range: [f64; 2], clamped_range: [f64; 2] },
-    ProfileNotFound { profile_id: String },
-    ProfileEvicted { profile_id: String, original_path: PathBuf },
-    Internal { message: String },
+    FileNotFound {
+        path: PathBuf,
+    },
+    NotAProfile {
+        path: PathBuf,
+        details: String,
+    },
+    UnsupportedProfileFormat {
+        path: PathBuf,
+        version: String,
+    },
+    FunctionNotFound {
+        function: String,
+        nearest_matches: Vec<String>,
+    },
+    FunctionAmbiguous {
+        function: String,
+        candidates: Vec<FunctionCandidate>,
+    },
+    ThreadNotFound {
+        thread: String,
+        available_threads: Vec<ThreadRef>,
+    },
+    ProcessNotFound {
+        process: String,
+        available_processes: Vec<ProcessRef>,
+    },
+    OutOfBounds {
+        original_range: [f64; 2],
+        clamped_range: [f64; 2],
+    },
+    ProfileNotFound {
+        profile_id: String,
+    },
+    ProfileEvicted {
+        profile_id: String,
+        original_path: PathBuf,
+    },
+    Internal {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]

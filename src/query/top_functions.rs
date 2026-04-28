@@ -57,9 +57,9 @@ struct Counts {
 pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     args.filter_args.validate_thread(profile)?;
     let matcher = match args.filter.as_deref() {
-        Some(p) => Some(
-            FunctionMatcher::new(p).map_err(|e| ToolError::Internal { message: e.to_string() })?,
-        ),
+        Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
+            message: e.to_string(),
+        })?),
         None => None,
     };
 
@@ -67,7 +67,14 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
     let mut total_samples: u64 = 0;
 
     for handle in args.filter_args.threads(profile) {
-        accumulate_thread(profile, handle, args.sort_by, &matcher, &mut counts, &mut total_samples);
+        accumulate_thread(
+            profile,
+            handle,
+            args.sort_by,
+            &matcher,
+            &mut counts,
+            &mut total_samples,
+        );
     }
 
     // Build output
@@ -86,7 +93,11 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
             .then_with(|| a.0.1.cmp(&b.0.1))
     });
 
-    let limit = if args.limit == 0 { DEFAULT_LIMIT } else { args.limit };
+    let limit = if args.limit == 0 {
+        DEFAULT_LIMIT
+    } else {
+        args.limit
+    };
     let total = total_samples.max(1) as f32;
     let functions: Vec<_> = entries
         .into_iter()
@@ -133,20 +144,28 @@ fn accumulate_thread(
             Default::default();
         if let Some(leaf_frame_idx) = frames.next()
             && let Some(info) = profile.frame_info(handle, leaf_frame_idx)
-            && matcher.as_ref().is_none_or(|m| m.matches(info.function_name))
+            && matcher
+                .as_ref()
+                .is_none_or(|m| m.matches(info.function_name))
         {
-            let key =
-                (info.function_name.to_owned(), info.module_name.map(str::to_owned));
+            let key = (
+                info.function_name.to_owned(),
+                info.module_name.map(str::to_owned),
+            );
             counts.entry(key.clone()).or_default().self_samples += 1;
             counts.entry(key.clone()).or_default().total_samples += 1;
             seen_in_stack.insert(key);
         }
         for frame_idx in frames {
             if let Some(info) = profile.frame_info(handle, frame_idx)
-                && matcher.as_ref().is_none_or(|m| m.matches(info.function_name))
+                && matcher
+                    .as_ref()
+                    .is_none_or(|m| m.matches(info.function_name))
             {
-                let key =
-                    (info.function_name.to_owned(), info.module_name.map(str::to_owned));
+                let key = (
+                    info.function_name.to_owned(),
+                    info.module_name.map(str::to_owned),
+                );
                 if seen_in_stack.insert(key.clone()) {
                     counts.entry(key).or_default().total_samples += 1;
                 }
@@ -158,7 +177,7 @@ fn accumulate_thread(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::{raw::RawProfile, Profile};
+    use crate::profile::{Profile, raw::RawProfile};
 
     fn raw_with_two_functions() -> RawProfile {
         serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap()
@@ -177,8 +196,14 @@ mod tests {
     #[test]
     fn limit_truncates() {
         let profile = Profile::from_raw(raw_with_two_functions());
-        let result =
-            top_functions(&profile, &Args { limit: 1, ..Default::default() }).unwrap();
+        let result = top_functions(
+            &profile,
+            &Args {
+                limit: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert_eq!(result.functions.len(), 1);
     }
 
@@ -187,7 +212,10 @@ mod tests {
         let profile = Profile::from_raw(raw_with_two_functions());
         let result = top_functions(
             &profile,
-            &Args { filter: Some("hot".into()), ..Default::default() },
+            &Args {
+                filter: Some("hot".into()),
+                ..Default::default()
+            },
         )
         .unwrap();
         assert_eq!(result.functions.len(), 1);

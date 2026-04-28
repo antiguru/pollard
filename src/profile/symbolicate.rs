@@ -80,7 +80,11 @@ async fn symbolicate_thread(
         }
         let func_idx = thread.frame_table.func[frame_idx];
         let name_str_idx = thread.func_table.name[func_idx];
-        let name = thread.string_array.get(name_str_idx).map(String::as_str).unwrap_or("");
+        let name = thread
+            .string_array
+            .get(name_str_idx)
+            .map(String::as_str)
+            .unwrap_or("");
         if !is_unsymbolicated(name) {
             continue; // already symbolicated
         }
@@ -106,9 +110,13 @@ async fn symbolicate_thread(
     // Load symbol maps for all libs needed by this thread.
     let lib_indices_needed: Vec<usize> = {
         let mut seen = std::collections::HashSet::new();
-        work.iter().filter_map(|&(_, _, li, _)| {
-            if seen.insert(li) { Some(li) } else { None }
-        }).collect()
+        work.iter()
+            .filter_map(
+                |&(_, _, li, _)| {
+                    if seen.insert(li) { Some(li) } else { None }
+                },
+            )
+            .collect()
     };
 
     for &lib_idx in &lib_indices_needed {
@@ -153,7 +161,11 @@ async fn symbolicate_thread(
         thread.func_table.name[func_idx] = new_name_idx;
 
         if let Some(frame) = outer {
-            if let Some(file) = frame.file_path.as_ref().map(|p| p.display_path().to_owned()) {
+            if let Some(file) = frame
+                .file_path
+                .as_ref()
+                .map(|p| p.display_path().to_owned())
+            {
                 let file_idx = intern_string(&mut thread.string_array, &file);
                 thread.func_table.file_name[func_idx] = Some(file_idx);
             }
@@ -175,9 +187,10 @@ async fn load_symbol_map_for_lib(
     let path = Path::new(path_str);
 
     // Derive a MultiArchDisambiguator from the arch field if present (macOS fat binaries).
-    let disambiguator = lib.arch.as_ref().map(|arch| {
-        wholesym::MultiArchDisambiguator::Arch(arch.clone())
-    });
+    let disambiguator = lib
+        .arch
+        .as_ref()
+        .map(|arch| wholesym::MultiArchDisambiguator::Arch(arch.clone()));
 
     match symbol_manager
         .load_symbol_map_for_binary_at_path(path, disambiguator)
@@ -185,10 +198,7 @@ async fn load_symbol_map_for_lib(
     {
         Ok(map) => Some(map),
         Err(e) => {
-            eprintln!(
-                "pollard: could not load symbols for {:?}: {}",
-                path_str, e
-            );
+            eprintln!("pollard: could not load symbols for {:?}: {}", path_str, e);
             None
         }
     }

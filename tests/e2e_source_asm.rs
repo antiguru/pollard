@@ -32,7 +32,11 @@ async fn source_for_inner_loop() {
         .status()
         .unwrap_or_else(|e| panic!("failed to launch samply: {}", e));
 
-    assert!(status.success(), "samply record exited with status {}", status);
+    assert!(
+        status.success(),
+        "samply record exited with status {}",
+        status
+    );
 
     let registry = pollard::registry::SessionRegistry::new(1);
     let (id, _evicted) = registry.load(out.path(), None).await.unwrap();
@@ -78,7 +82,11 @@ async fn asm_for_inner_loop() {
         .status()
         .unwrap_or_else(|e| panic!("failed to launch samply: {}", e));
 
-    assert!(status.success(), "samply record exited with status {}", status);
+    assert!(
+        status.success(),
+        "samply record exited with status {}",
+        status
+    );
 
     let registry = pollard::registry::SessionRegistry::new(1);
     let (id, _evicted) = registry.load(out.path(), None).await.unwrap();

@@ -15,4 +15,4 @@ pub mod symbolicate;
 
 pub use load::load_from_path;
 #[allow(unused_imports)]
-pub use parsed::{Profile, ProcessHandle, ThreadHandle};
+pub use parsed::{ProcessHandle, Profile, ThreadHandle};

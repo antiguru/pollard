@@ -32,7 +32,11 @@ impl Server {
         let stdout = child.stdout.take().unwrap();
         let reader = BufReader::new(stdout).lines();
 
-        let mut server = Self { child, stdin, reader };
+        let mut server = Self {
+            child,
+            stdin,
+            reader,
+        };
 
         // Send initialize and wait for the response before returning.
         let init = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"integration","version":"0.1"}}}"#;
@@ -56,7 +60,8 @@ impl Server {
                 .await
                 .expect("IO error reading from server")
                 .expect("EOF before expected response");
-            let v: serde_json::Value = serde_json::from_str(&line).expect("invalid JSON from server");
+            let v: serde_json::Value =
+                serde_json::from_str(&line).expect("invalid JSON from server");
             if v.get("id").and_then(serde_json::Value::as_i64) == Some(id) {
                 return v;
             }
@@ -113,7 +118,9 @@ fn fixture(name: &str) -> String {
 async fn load_profile_returns_id_and_description() {
     let mut srv = Server::spawn().await;
     let path = fixture("two_functions.json");
-    let resp = srv.call_tool(1, "load_profile", serde_json::json!({ "path": path })).await;
+    let resp = srv
+        .call_tool(1, "load_profile", serde_json::json!({ "path": path }))
+        .await;
 
     let sc = &resp["result"]["structuredContent"];
     let pid = sc["profile_id"].as_str().expect("profile_id missing");
@@ -133,7 +140,11 @@ async fn unload_profile_frees() {
     let pid = srv.load_fixture(1, &path).await;
 
     let resp = srv
-        .call_tool(2, "unload_profile", serde_json::json!({ "profile_id": pid }))
+        .call_tool(
+            2,
+            "unload_profile",
+            serde_json::json!({ "profile_id": pid }),
+        )
         .await;
     let freed = resp["result"]["structuredContent"]["freed"]
         .as_bool()
@@ -149,13 +160,20 @@ async fn list_profiles_after_load() {
     let path = fixture("minimal_profile.json");
     let pid = srv.load_fixture(1, &path).await;
 
-    let resp = srv.call_tool(2, "list_profiles", serde_json::json!({})).await;
+    let resp = srv
+        .call_tool(2, "list_profiles", serde_json::json!({}))
+        .await;
     let profiles = resp["result"]["structuredContent"]["profiles"]
         .as_array()
         .expect("profiles missing");
 
-    let found = profiles.iter().any(|p| p["profile_id"].as_str() == Some(&pid));
-    assert!(found, "loaded profile not found in list_profiles; list={profiles:?}");
+    let found = profiles
+        .iter()
+        .any(|p| p["profile_id"].as_str() == Some(&pid));
+    assert!(
+        found,
+        "loaded profile not found in list_profiles; list={profiles:?}"
+    );
 
     srv.kill().await;
 }
@@ -167,7 +185,11 @@ async fn describe_profile_returns_processes() {
     let pid = srv.load_fixture(1, &path).await;
 
     let resp = srv
-        .call_tool(2, "describe_profile", serde_json::json!({ "profile_id": pid }))
+        .call_tool(
+            2,
+            "describe_profile",
+            serde_json::json!({ "profile_id": pid }),
+        )
         .await;
     let sc = &resp["result"]["structuredContent"];
     let procs = sc["processes"].as_array().expect("processes missing");
@@ -176,7 +198,10 @@ async fn describe_profile_returns_processes() {
     // Main thread should be present.
     let threads = procs[0]["threads"].as_array().expect("threads missing");
     let has_main = threads.iter().any(|t| t["name"].as_str() == Some("Main"));
-    assert!(has_main, "thread 'Main' not found in describe_profile response");
+    assert!(
+        has_main,
+        "thread 'Main' not found in describe_profile response"
+    );
 
     srv.kill().await;
 }
@@ -223,7 +248,10 @@ async fn call_tree_returns_tree() {
 
     // tree is a single root node (Option<Node> serialized as the node or null).
     let tree = &sc["tree"];
-    assert!(tree.is_object(), "call_tree tree should be an object; got {tree}");
+    assert!(
+        tree.is_object(),
+        "call_tree tree should be an object; got {tree}"
+    );
     assert_eq!(
         tree["function"].as_str(),
         Some("a"),
@@ -250,7 +278,11 @@ async fn stacks_containing_returns_distinct_stacks() {
 
     // Fixture has alloc_buf and alloc_str — two distinct stacks.
     let stacks = sc["stacks"].as_array().expect("stacks missing");
-    assert_eq!(stacks.len(), 2, "expected 2 distinct stacks containing 'alloc'; got {stacks:?}");
+    assert_eq!(
+        stacks.len(),
+        2,
+        "expected 2 distinct stacks containing 'alloc'; got {stacks:?}"
+    );
 
     // Both stacks should have a frame with matched=true.
     for stack in stacks {
@@ -368,12 +400,17 @@ async fn top_functions_with_unknown_thread_returns_thread_not_found() {
     );
 
     // available_threads should be populated.
-    let threads = data["available_threads"].as_array().expect("available_threads missing");
+    let threads = data["available_threads"]
+        .as_array()
+        .expect("available_threads missing");
     assert!(!threads.is_empty(), "available_threads should not be empty");
 
     // Should contain the "Main" thread from the fixture.
     let has_main = threads.iter().any(|t| t["name"].as_str() == Some("Main"));
-    assert!(has_main, "expected 'Main' in available_threads; got {threads:?}");
+    assert!(
+        has_main,
+        "expected 'Main' in available_threads; got {threads:?}"
+    );
 
     srv.kill().await;
 }

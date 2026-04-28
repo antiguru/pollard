@@ -1,8 +1,8 @@
 //! Query MCP tools: top_functions, call_tree, stacks_containing.
 
 use crate::error::ToolError;
-use crate::query::{call_tree, stacks_containing, top_functions};
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
+use crate::query::{call_tree, stacks_containing, top_functions};
 use crate::tools::PollardServer;
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -56,7 +56,11 @@ fn parse_filter(args: &CommonFilterArgs) -> Filter {
         }
         ProcessFilter::Name(p.to_owned())
     });
-    Filter { thread, process, time_range: args.time_range }
+    Filter {
+        thread,
+        process,
+        time_range: args.time_range,
+    }
 }
 
 // ---------------------------------------------------------------------------
