@@ -67,8 +67,11 @@ pub fn matcher_to_string(matcher: &FunctionMatcher) -> String {
 ///   needle (or vice versa) as a literal substring, it ranks above any
 ///   non-containing candidate. This preserves the obvious case
 ///   (`Vec::push` → `<alloc::vec::Vec<T>>::push`).
-/// * **Jaro–Winkler similarity** on lowercased forms (fallback): rewards
-///   shared prefixes, which suits namespaced identifiers and typos.
+/// * **Sørensen–Dice bigram overlap** (fallback): rewards shared character
+///   pairs regardless of position, so insertions like `cols_third` →
+///   `simd_cols_3rd` still surface near the top. Jaro–Winkler was too
+///   prefix-biased for this case and let unrelated symbols outrank obvious
+///   typos.
 ///
 /// Comparison is case-insensitive. Regex matchers are scored against the
 /// regex source text, which is a coarse approximation but better than
@@ -134,7 +137,7 @@ pub fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> V
             } else if needle_lc.contains(&name_lc) {
                 1.5 - (needle.len() as f64 - name.len() as f64).abs() / 1024.0
             } else {
-                strsim::jaro_winkler(&needle_lc, &name_lc)
+                strsim::sorensen_dice(&needle_lc, &name_lc)
             };
 
             heap.push(Reverse((Score(score), name.clone())));
@@ -266,6 +269,27 @@ mod tests {
         let matcher = FunctionMatcher::new("memcyp").unwrap();
         let near = nearest_function_names(&p, &matcher);
         assert_eq!(near[0], "memcpy");
+    }
+
+    #[test]
+    fn nearest_outranks_unrelated_on_insertion_typo() {
+        // Real-world report: needle `cols_third` should suggest
+        // `simd_cols_3rd` over unrelated symbols like `EntryPoint` /
+        // `_GI_execve` that share no bigrams with the needle.
+        let p = profile_with_funcs(&[
+            "EntryPoint",
+            "_GI_execve",
+            "simd::main",
+            "int_realloc",
+            "dl_start",
+            "simd_cols_3rd",
+        ]);
+        let matcher = FunctionMatcher::new("cols_third").unwrap();
+        let near = nearest_function_names(&p, &matcher);
+        assert_eq!(
+            near[0], "simd_cols_3rd",
+            "expected simd_cols_3rd to outrank unrelated symbols, got {near:?}"
+        );
     }
 
     #[test]

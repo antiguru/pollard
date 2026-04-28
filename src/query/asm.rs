@@ -19,7 +19,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{FunctionCandidate, ToolError};
 use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
 use crate::profile::Profile;
 use schemars::JsonSchema;
@@ -66,16 +66,33 @@ struct FunctionLocation {
     frame_counts: HashMap<u32, u64>,
 }
 
+/// Outcome of walking the profile for a function pattern.
+///
+/// `Ambiguous` means the matcher hit multiple distinct (function, module)
+/// pairs and the caller should disambiguate. We don't merge their addresses,
+/// because that produces a disassembly window spanning unrelated functions
+/// and corrupts sample attribution.
+enum ResolveResult {
+    NotFound,
+    Single(FunctionLocation),
+    Ambiguous(Vec<FunctionCandidate>),
+}
+
 /// Walk every sample/frame and resolve the function to a `FunctionLocation`.
 ///
-/// Returns `None` (indicating "function not found") if no matching frame is
-/// found.  If found, returns the location and accumulated per-address sample
-/// counts.
+/// Returns:
+///
+/// * [`ResolveResult::NotFound`] when no frame matches.
+/// * [`ResolveResult::Single`] with the location when exactly one
+///   (function, module) pair matches.
+/// * [`ResolveResult::Ambiguous`] with ranked candidates when multiple
+///   distinct pairs match — the caller is expected to retry with a more
+///   specific function name or `module` filter.
 fn resolve_function(
     profile: &Profile,
     matcher: &FunctionMatcher,
     module_filter: Option<&str>,
-) -> Option<FunctionLocation> {
+) -> ResolveResult {
     // --- pass 1: collect matching (frame_idx, native_symbol_idx?, rel_addr, lib_idx) per thread
 
     // We aggregate globally across threads.
@@ -85,6 +102,7 @@ fn resolve_function(
     let mut addr_min: Option<u32> = None;
     let mut addr_max: Option<u32> = None;
     let mut found_lib_idx: Option<usize> = None;
+    let mut matched_pairs: HashMap<(String, String), u64> = HashMap::new();
 
     for thread in profile.threads() {
         let handle = thread.handle();
@@ -104,6 +122,12 @@ fn resolve_function(
                 {
                     continue;
                 }
+                *matched_pairs
+                    .entry((
+                        info.function_name.to_owned(),
+                        info.module_name.unwrap_or("").to_owned(),
+                    ))
+                    .or_default() += 1;
 
                 // Get the relative address for this frame.
                 let Some(rel_addr_i64) = info.address else {
@@ -160,11 +184,20 @@ fn resolve_function(
         }
     }
 
-    if frame_counts.is_empty() && native_loc.is_none() {
-        return None;
+    if matched_pairs.is_empty() {
+        return ResolveResult::NotFound;
+    }
+    if matched_pairs.len() > 1 {
+        return ResolveResult::Ambiguous(rank_candidates(matched_pairs));
     }
 
-    let lib_idx = native_loc.map(|(_, _, li)| li).or(found_lib_idx)?;
+    // Exactly one (function, module) pair matched — proceed to assemble a
+    // location from nativeSymbols (preferred) or sampled-address span
+    // (fallback).
+    let lib_idx = match native_loc.map(|(_, _, li)| li).or(found_lib_idx) {
+        Some(li) => li,
+        None => return ResolveResult::NotFound,
+    };
 
     let (start_rel, size_bytes) = if let Some((start, size, _)) = native_loc {
         (start, size.max(1))
@@ -177,12 +210,23 @@ fn resolve_function(
         (min, estimated)
     };
 
-    Some(FunctionLocation {
+    ResolveResult::Single(FunctionLocation {
         start_rel,
         size_bytes,
         lib_idx,
         frame_counts,
     })
+}
+
+/// Sort matched (function, module) pairs by sample count desc and convert to
+/// the API-facing [`FunctionCandidate`] shape used by `FunctionAmbiguous`.
+fn rank_candidates(pairs: HashMap<(String, String), u64>) -> Vec<FunctionCandidate> {
+    let mut entries: Vec<((String, String), u64)> = pairs.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.0.cmp(&b.0.0)));
+    entries
+        .into_iter()
+        .map(|((function, module), _)| FunctionCandidate { function, module })
+        .collect()
 }
 
 // ─── disassembly via wholesym/samply-api ────────────────────────────────────
@@ -396,12 +440,21 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
         message: e.to_string(),
     })?;
 
-    let loc = resolve_function(profile, &matcher, args.module.as_deref()).ok_or_else(|| {
-        ToolError::FunctionNotFound {
-            function: matcher_to_string(&matcher),
-            nearest_matches: nearest_function_names(profile, &matcher),
+    let loc = match resolve_function(profile, &matcher, args.module.as_deref()) {
+        ResolveResult::Single(loc) => loc,
+        ResolveResult::NotFound => {
+            return Err(ToolError::FunctionNotFound {
+                function: matcher_to_string(&matcher),
+                nearest_matches: nearest_function_names(profile, &matcher),
+            });
         }
-    })?;
+        ResolveResult::Ambiguous(candidates) => {
+            return Err(ToolError::FunctionAmbiguous {
+                function: matcher_to_string(&matcher),
+                candidates,
+            });
+        }
+    };
 
     // Look up the lib.  We search top-level libs first, then sub-process libs.
     let lib = profile
@@ -425,4 +478,40 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
         arch,
         instructions,
     })
+}
+
+impl std::fmt::Debug for ResolveResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ResolveResult::NotFound => write!(f, "NotFound"),
+            ResolveResult::Single(_) => write!(f, "Single(..)"),
+            ResolveResult::Ambiguous(c) => write!(f, "Ambiguous({c:?})"),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::profile::Profile;
+    use crate::profile::raw::RawProfile;
+
+    #[test]
+    fn ambiguous_substring_returns_ambiguous() {
+        // two_functions.json has both `hot` and `cold` — substring "o"
+        // hits both. resolve_function must surface ambiguity instead of
+        // merging their addresses into a single disassembly window.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let matcher = FunctionMatcher::new("o").unwrap();
+        match resolve_function(&profile, &matcher, None) {
+            ResolveResult::Ambiguous(candidates) => {
+                let names: Vec<&str> = candidates.iter().map(|c| c.function.as_str()).collect();
+                assert!(names.contains(&"hot"), "expected `hot` in {names:?}");
+                assert!(names.contains(&"cold"), "expected `cold` in {names:?}");
+            }
+            other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
 }

@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{FunctionCandidate, ToolError};
 use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
 use crate::profile::Profile;
 use schemars::JsonSchema;
@@ -80,7 +80,10 @@ fn attribute(
     let mut samples_per_line: HashMap<u32, u64> = HashMap::new();
     let mut total: u64 = 0;
     let mut file: Option<String> = None;
-    let mut any_match = false;
+    // Track which distinct (function, module) pairs the matcher hit, so we
+    // can surface ambiguity instead of silently merging samples across
+    // unrelated functions that happen to share a substring.
+    let mut matched_pairs: HashMap<(String, String), u64> = HashMap::new();
 
     for thread in profile.threads() {
         let handle = thread.handle();
@@ -99,7 +102,11 @@ fn attribute(
                 {
                     continue;
                 }
-                any_match = true;
+                let key = (
+                    info.function_name.to_owned(),
+                    info.module_name.unwrap_or("").to_owned(),
+                );
+                *matched_pairs.entry(key).or_default() += 1;
                 if file.is_none() {
                     file = info.file.map(str::to_owned);
                 }
@@ -111,10 +118,16 @@ fn attribute(
         }
     }
 
-    if !any_match {
+    if matched_pairs.is_empty() {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(matcher),
             nearest_matches: nearest_function_names(profile, matcher),
+        });
+    }
+    if matched_pairs.len() > 1 {
+        return Err(ToolError::FunctionAmbiguous {
+            function: matcher_to_string(matcher),
+            candidates: rank_candidates(matched_pairs),
         });
     }
     let file = file.ok_or_else(|| ToolError::Internal {
@@ -126,6 +139,17 @@ fn attribute(
         ),
     })?;
     Ok((file, samples_per_line, total))
+}
+
+/// Sort matched (function, module) pairs by sample count desc and convert
+/// into the API-facing [`FunctionCandidate`] shape.
+fn rank_candidates(pairs: HashMap<(String, String), u64>) -> Vec<FunctionCandidate> {
+    let mut entries: Vec<((String, String), u64)> = pairs.into_iter().collect();
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.0.cmp(&b.0.0)));
+    entries
+        .into_iter()
+        .map(|((function, module), _)| FunctionCandidate { function, module })
+        .collect()
 }
 
 fn fetch_source(_profile: &Profile, file: &str) -> Result<ResolvedSource, ToolError> {
@@ -313,5 +337,37 @@ mod tests {
             "expected FunctionNotFound, got {:?}",
             err
         );
+    }
+
+    #[test]
+    fn ambiguous_substring_returns_function_ambiguous() {
+        // two_functions.json has both `hot` and `cold` — substring "o" hits
+        // both. Without ambiguity detection, samples would silently merge
+        // across the two functions.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+
+        let err = source_for_function(
+            &profile,
+            &Args {
+                function: "o".to_owned(),
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+
+        match err {
+            ToolError::FunctionAmbiguous {
+                function,
+                candidates,
+            } => {
+                assert_eq!(function, "o");
+                let names: Vec<&str> = candidates.iter().map(|c| c.function.as_str()).collect();
+                assert!(names.contains(&"hot"), "expected `hot` in {names:?}");
+                assert!(names.contains(&"cold"), "expected `cold` in {names:?}");
+            }
+            other => panic!("expected FunctionAmbiguous, got {other:?}"),
+        }
     }
 }
