@@ -12,7 +12,7 @@
 
 #![allow(dead_code)]
 
-use crate::profile::raw::{Pid, RawLib, RawProfile, RawThread};
+use crate::profile::raw::{InlineFrame, Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
     raw: RawProfile,
@@ -107,6 +107,17 @@ impl Profile {
     /// Look up the lib for a `RawResourceTable.lib` index.
     pub(crate) fn lib(&self, idx: usize) -> Option<&RawLib> {
         self.raw.libs.get(idx)
+    }
+
+    /// Inline-call chain attached to a native frame (innermost-first).
+    /// Empty when the frame has no DWARF inline records or symbolication
+    /// hasn't run yet.
+    pub fn inline_chain(&self, handle: ThreadHandle, frame_idx: usize) -> &[InlineFrame] {
+        self.raw_thread(handle)
+            .inline_chains
+            .get(frame_idx)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Look up frame info for a given thread + frame index.

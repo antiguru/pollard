@@ -123,6 +123,12 @@ pub struct CallTreeArgs {
     /// Maximum child breadth per node (default 5).
     #[serde(default)]
     pub max_breadth: Option<u32>,
+    /// When true, expand each native frame into its DWARF inline chain so
+    /// heavily-inlined hot paths (e.g. stdlib calls inlined into a Rust
+    /// benchmark) appear as a sequence of virtual call-tree nodes.
+    /// Off by default to keep the historical tree shape.
+    #[serde(default)]
+    pub expand_inlines: Option<bool>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -215,6 +221,7 @@ impl PollardServer {
             min_samples: args.min_samples,
             max_depth: args.max_depth.unwrap_or(defaults.max_depth),
             max_breadth: args.max_breadth.unwrap_or(defaults.max_breadth),
+            expand_inlines: args.expand_inlines.unwrap_or(defaults.expand_inlines),
         };
         let result = call_tree::call_tree(session.profile(), &q_args)?;
         Ok(Json(result))

@@ -129,6 +129,18 @@ pub struct RawLib {
     pub arch: Option<String>,
 }
 
+/// A single DWARF inline-frame record attached to a native frame address.
+/// Pollard captures these from `wholesym::AddressInfo.frames[..len-1]`
+/// during symbolication, indexed parallel to [`RawFrameTable`] so the
+/// query layer can fan out a single profile-level frame into the chain
+/// of inlined call sites it represents.
+#[derive(Debug, Clone, Default)]
+pub struct InlineFrame {
+    pub function: String,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawThread {
@@ -152,6 +164,13 @@ pub struct RawThread {
     pub resource_table: RawResourceTable,
     #[serde(default)]
     pub native_symbols: Option<RawNativeSymbols>,
+    /// Per-frame inline-call chain (innermost-first), populated by
+    /// [`crate::profile::symbolicate`]. Index parallel to [`RawFrameTable`];
+    /// empty Vec when no inline records exist or symbolication wasn't run.
+    /// Not part of the Firefox processed-profile schema — pollard-internal,
+    /// hence skipped during deserialization.
+    #[serde(skip)]
+    pub inline_chains: Vec<Vec<InlineFrame>>,
 }
 
 #[derive(Debug, Deserialize)]

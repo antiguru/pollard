@@ -14,7 +14,7 @@ use std::path::Path;
 
 use wholesym::{LookupAddress, SymbolManager, SymbolManagerConfig, SymbolMap};
 
-use crate::profile::raw::{RawProfile, RawThread};
+use crate::profile::raw::{InlineFrame, RawProfile, RawThread};
 
 /// Returns true if the function name looks unsymbolicated.
 fn is_unsymbolicated(name: &str) -> bool {
@@ -107,6 +107,14 @@ async fn symbolicate_thread(
         return;
     }
 
+    // Pre-size the parallel inline-chain table so per-frame writes below
+    // can index directly. Empty Vec for frames without inline records.
+    if thread.inline_chains.len() < thread.frame_table.length {
+        thread
+            .inline_chains
+            .resize_with(thread.frame_table.length, Vec::new);
+    }
+
     // Load symbol maps for all libs needed by this thread.
     let lib_indices_needed: Vec<usize> = {
         let mut seen = std::collections::HashSet::new();
@@ -172,6 +180,28 @@ async fn symbolicate_thread(
             if let Some(line) = frame.line_number {
                 thread.frame_table.line[frame_idx] = Some(line);
             }
+        }
+
+        // Capture the inner inline frames (everything except `frames.last()`,
+        // which is the enclosing native function we already wrote above).
+        // `addr_info.frames` is innermost-first per samply-symbols, so
+        // `frames[0]` is the deepest inlined callee and we slice off the
+        // outer entry from the tail.
+        if let Some(frames) = addr_info.frames.as_ref()
+            && frames.len() > 1
+        {
+            let inner = &frames[..frames.len() - 1];
+            thread.inline_chains[frame_idx] = inner
+                .iter()
+                .map(|f| InlineFrame {
+                    function: f.function.clone().unwrap_or_default(),
+                    file: f
+                        .file_path
+                        .as_ref()
+                        .map(|p| p.display_path().to_owned()),
+                    line: f.line_number,
+                })
+                .collect();
         }
     }
 }

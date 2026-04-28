@@ -23,6 +23,11 @@ pub struct Args {
     pub min_samples: Option<u64>,
     pub max_depth: u32,
     pub max_breadth: u32,
+    /// When true, fan each native frame out into its DWARF inline chain
+    /// (outer-to-inner) so heavily-inlined hot paths show as a sequence of
+    /// virtual call-tree nodes instead of collapsing onto the enclosing
+    /// function.
+    pub expand_inlines: bool,
 }
 
 impl Default for Args {
@@ -36,6 +41,7 @@ impl Default for Args {
             min_samples: None,
             max_depth: 8,
             max_breadth: 5,
+            expand_inlines: false,
         }
     }
 }
@@ -127,6 +133,7 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             profile,
             handle,
             args.inverted,
+            args.expand_inlines,
             &root_matcher,
             &paths_to,
             &mut root,
@@ -194,6 +201,7 @@ fn accumulate_with_root(
     profile: &Profile,
     handle: ThreadHandle,
     inverted: bool,
+    expand_inlines: bool,
     root_matcher: &Option<FunctionMatcher>,
     paths_to_matcher: &Option<FunctionMatcher>,
     root: &mut AggNode,
@@ -204,17 +212,32 @@ fn accumulate_with_root(
     let raw = profile.raw_thread(handle);
     for &stack_opt in &raw.samples.stack {
         let Some(stack_idx) = stack_opt else { continue };
-        let mut frames: Vec<usize> = profile.walk_stack(handle, stack_idx).collect();
-        if !inverted {
+        // Resolve every native frame and (when expand_inlines is set) fan
+        // each one out into its DWARF inline chain. Build root-to-leaf,
+        // reverse once at the end if inverted is requested.
+        let native: Vec<usize> = profile.walk_stack(handle, stack_idx).collect();
+        let mut frames: Vec<(String, Option<String>)> = Vec::with_capacity(native.len());
+        // walk_stack iterates leaf-to-root; reverse to get root-to-leaf.
+        for &fi in native.iter().rev() {
+            let Some(info) = profile.frame_info(handle, fi) else {
+                continue;
+            };
+            let module = info.module_name.map(str::to_owned);
+            frames.push((info.function_name.to_owned(), module.clone()));
+            if expand_inlines {
+                // Inline chain is innermost-first; emit outer-to-inner so
+                // the deepest inline ends up at the leaf side of the tree.
+                for inl in profile.inline_chain(handle, fi).iter().rev() {
+                    frames.push((inl.function.clone(), module.clone()));
+                }
+            }
+        }
+        if inverted {
             frames.reverse();
         }
         // If a paths_to matcher is set, skip stacks that don't contain a matching frame.
         if let Some(m) = paths_to_matcher {
-            let hit = frames.iter().any(|&f| {
-                profile
-                    .frame_info(handle, f)
-                    .is_some_and(|i| m.matches(i.function_name))
-            });
+            let hit = frames.iter().any(|(name, _)| m.matches(name));
             if !hit {
                 continue;
             }
@@ -222,11 +245,7 @@ fn accumulate_with_root(
         }
         // If a root matcher is set, find the frame that matches and trim the prefix.
         if let Some(m) = root_matcher {
-            let pos = frames.iter().position(|&f| {
-                profile
-                    .frame_info(handle, f)
-                    .is_some_and(|i| m.matches(i.function_name))
-            });
+            let pos = frames.iter().position(|(name, _)| m.matches(name));
             match pos {
                 Some(p) => {
                     frames.drain(..p);
@@ -238,15 +257,8 @@ fn accumulate_with_root(
         *total_samples += 1;
         let mut node: &mut AggNode = root;
         let len = frames.len();
-        for (i, frame_idx) in frames.iter().enumerate() {
-            let info = match profile.frame_info(handle, *frame_idx) {
-                Some(fi) => fi,
-                None => continue,
-            };
-            let key = (
-                info.function_name.to_owned(),
-                info.module_name.map(str::to_owned),
-            );
+        for (i, (function, module)) in frames.iter().enumerate() {
+            let key = (function.clone(), module.clone());
             node = node.children.entry(key).or_default();
             node.total_samples += 1;
             if i + 1 == len {
@@ -420,11 +432,71 @@ mod tests {
         let mut out = Vec::new();
         if let Some(Node::Frame(f)) = node {
             out.push(f.function.clone());
+            // compress_chains may have collapsed a linear sub-chain into the
+            // parent's `chain` field — pick those names up too.
+            if let Some(chain) = &f.chain {
+                out.extend(chain.iter().cloned());
+            }
             for c in &f.children {
                 out.extend(collect_frame_names(Some(c)));
             }
         }
         out
+    }
+
+    #[test]
+    fn expand_inlines_fans_out_native_frame_into_chain() {
+        // linear_chain.json: a → b → c → d, all 100 samples on leaf `d`.
+        // We inject one inline record onto the leaf so wholesym lookups
+        // would have produced [leaf_inline (innermost), d (outer)].
+        // With expand_inlines=true the tree becomes a→b→c→d→leaf_inline
+        // and `leaf_inline` gets the self_samples.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains
+            .resize_with(t.frame_table.length, Vec::new);
+        // frame_table.func = [0,1,2,3]; index 3 is `d` (the leaf).
+        t.inline_chains[3] = vec![InlineFrame {
+            function: "leaf_inline".into(),
+            file: None,
+            line: None,
+        }];
+        let profile = Profile::from_raw(raw);
+
+        // Without expansion: deepest function in the tree is `d`.
+        let plain = call_tree(
+            &profile,
+            &Args {
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(!frame_names_contain(&plain.tree, "leaf_inline"));
+
+        // With expansion: `leaf_inline` appears as a child of `d`.
+        let expanded = call_tree(
+            &profile,
+            &Args {
+                min_pct: 0.0,
+                expand_inlines: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            frame_names_contain(&expanded.tree, "leaf_inline"),
+            "expected `leaf_inline` in expanded tree, got: {:?}",
+            collect_frame_names(expanded.tree.as_ref())
+        );
+    }
+
+    fn frame_names_contain(tree: &Option<Node>, target: &str) -> bool {
+        collect_frame_names(tree.as_ref())
+            .into_iter()
+            .any(|n| n == target)
     }
 
     #[test]
