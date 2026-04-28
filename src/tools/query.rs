@@ -71,7 +71,12 @@ fn parse_filter(args: &CommonFilterArgs) -> Filter {
 pub struct TopFunctionsArgs {
     /// Profile ID returned by load_profile.
     pub profile_id: String,
-    /// Optional substring / glob / regex to restrict to matching function names.
+    /// Optional filter on the **demangled function name**. Literal
+    /// case-sensitive substring by default — e.g. `"simd_cols_3rd"` matches,
+    /// `"simd"` matches `"simd_cols_3rd"` but NOT `"SIMD"` or `"simdcols"`.
+    /// Prefix with `re:` for a regex (`"re:simd.*cols"`). Not a topic /
+    /// fuzzy / token search; for "anything related to X" use multiple narrow
+    /// substring queries or a regex with alternation.
     #[serde(default)]
     pub filter: Option<String>,
     /// Maximum number of results to return. Defaults to 30.
