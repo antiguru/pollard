@@ -9,4 +9,10 @@
 //! Markers, counters, profiler config, and other top-level fields are skipped.
 
 pub mod load;
+pub mod parsed;
 pub mod raw;
+
+#[allow(unused_imports)]
+pub use load::load_from_path;
+#[allow(unused_imports)]
+pub use parsed::{Profile, ProcessHandle, ThreadHandle};
