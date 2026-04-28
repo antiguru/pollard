@@ -3,9 +3,10 @@
 #![allow(dead_code)]
 
 use crate::profile::Profile;
+use schemars::JsonSchema;
 use serde::Serialize;
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, JsonSchema, Debug)]
 pub struct ProfileDescription {
     pub profile_id: String,
     pub name: String,
@@ -17,7 +18,7 @@ pub struct ProfileDescription {
     pub processes: Vec<ProcessDescription>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, JsonSchema, Debug)]
 pub struct ProcessDescription {
     pub pid: u64,
     pub name: String,
@@ -25,7 +26,7 @@ pub struct ProcessDescription {
     pub threads: Vec<ThreadDescription>,
 }
 
-#[derive(Serialize, Debug)]
+#[derive(Serialize, JsonSchema, Debug)]
 pub struct ThreadDescription {
     pub tid: u64,
     pub name: String,
