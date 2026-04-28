@@ -23,6 +23,13 @@ Early development. Not yet published to crates.io.
 * **Drill-down:** `source_for_function`, `asm_for_function`,
   `address_to_function`
 
+`top_functions`, `call_tree`, and `compare_profiles` accept an optional
+`event` argument: omit it to aggregate the default samples track
+(cycles, in samply's perf recorder) or pass a marker name like
+`cache-misses`, `branch-misses`, or `instructions` to aggregate that
+hardware counter instead.
+`top_groups` currently aggregates samples only.
+
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
 
 ## Install

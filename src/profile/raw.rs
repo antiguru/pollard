@@ -164,6 +164,13 @@ pub struct RawThread {
     pub resource_table: RawResourceTable,
     #[serde(default)]
     pub native_symbols: Option<RawNativeSymbols>,
+    /// Per-thread marker stream. samply uses this to land non-cycles
+    /// hardware counter samples (cache-misses, branch-misses,
+    /// instructions, …); each such marker carries a `data.cause.stack`
+    /// pointing into the same stack table the samples track uses.
+    /// `default` so older fixtures without a markers field still parse.
+    #[serde(default)]
+    pub markers: RawMarkerTable,
     /// Per-frame inline-call chain (innermost-first), populated by
     /// [`crate::profile::symbolicate`]. Index parallel to [`RawFrameTable`];
     /// empty Vec when no inline records exist or symbolication wasn't run.
@@ -252,6 +259,49 @@ impl RawSampleTable {
     }
 }
 
+/// Per-thread marker stream. The Firefox schema uses this for arbitrary
+/// point-or-range events; samply lands secondary perf events
+/// (cache-misses, branch-misses, instructions) here when the recorder is
+/// asked to produce more than one event per sample.
+///
+/// Pollard models only what its query layer needs:
+///   * `name[i]` → string-array index, resolves to the marker's event
+///     name (e.g. `"cache-misses"`).
+///   * `data[i]` → optional payload; the resolver pulls `cause.stack`
+///     out so the same stack-walking code as the samples track can
+///     attribute the event to a function.
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RawMarkerTable {
+    pub length: usize,
+    /// Parallel to `length`. Entries may be `null` for markers without
+    /// structured data (e.g. text-only annotations); we keep them as
+    /// `None` so the index alignment with `name`/`startTime` survives.
+    pub data: Vec<Option<RawMarkerData>>,
+    /// String-array indices. Resolve via `thread.string_array[name[i]]`.
+    pub name: Vec<usize>,
+    pub start_time: Vec<f64>,
+    pub end_time: Vec<f64>,
+    pub phase: Vec<u8>,
+    pub category: Vec<usize>,
+}
+
+/// Marker payload subset. Only `cause.stack` is consumed; other fields
+/// (`type`, text, timestamps embedded in the payload) are ignored.
+/// Defaulting `cause` to `None` keeps us forward-compatible with text or
+/// log-style markers that the Firefox schema also permits.
+#[derive(Debug, Deserialize, Default)]
+pub struct RawMarkerData {
+    #[serde(default)]
+    pub cause: Option<MarkerCause>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct MarkerCause {
+    /// Stack-table index. Same shape as `samples.stack[i]`.
+    pub stack: usize,
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RawResourceTable {
@@ -303,6 +353,34 @@ mod tests {
         let p: RawProfile = serde_json::from_str(MINIMAL).unwrap();
         assert_eq!(p.threads.len(), 1);
         assert_eq!(p.threads[0].name.as_deref(), Some("Main"));
+    }
+
+    #[test]
+    fn deserializes_marker_table() {
+        let with_markers = MINIMAL.replace(
+            r#""markers": {"length": 0, "data": [], "name": [], "startTime": [], "endTime": [], "phase": [], "category": []}"#,
+            r#""markers": {
+                "length": 2,
+                "data": [{"type": "Other event", "cause": {"stack": 7}}, null],
+                "name": [1, 1],
+                "startTime": [0.0, 1.0],
+                "endTime": [0.0, 1.0],
+                "phase": [0, 0],
+                "category": [0, 0]
+            }"#,
+        );
+        let p: RawProfile = serde_json::from_str(&with_markers).unwrap();
+        let m = &p.threads[0].markers;
+        assert_eq!(m.length, 2);
+        assert_eq!(m.name, vec![1, 1]);
+        assert_eq!(
+            m.data[0]
+                .as_ref()
+                .and_then(|d| d.cause.as_ref())
+                .map(|c| c.stack),
+            Some(7)
+        );
+        assert!(m.data[1].is_none());
     }
 
     #[test]

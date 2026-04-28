@@ -15,6 +15,7 @@
 
 use crate::error::ToolError;
 use crate::profile::Profile;
+use crate::query::event::EventSource;
 use crate::query::filters::Filter;
 use crate::query::top_functions::{Counts, aggregate_functions};
 use schemars::JsonSchema;
@@ -40,6 +41,13 @@ pub struct Args {
     /// drops the module so two binaries with different names but the same
     /// function set align.
     pub align_by: AlignBy,
+    /// Which per-sample event drives the diff. Default
+    /// [`EventSource::Samples`] (cycles in samply); pass
+    /// [`EventSource::Marker`] to diff a hardware-counter event such as
+    /// `cache-misses`. The `*_ms` columns are populated only for the
+    /// time-shaped default — for marker events they are emitted as
+    /// `null` because count × sampling-interval has no meaningful unit.
+    pub event: EventSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -111,6 +119,10 @@ pub struct Output {
     pub b_total_samples: u64,
     pub filter: Option<String>,
     pub sort_by: &'static str,
+    /// Echo of the resolved event source — `"samples"` or the marker
+    /// name (e.g. `"cache-misses"`). Lets the caller verify which
+    /// counter the pct columns are percentages of.
+    pub event: String,
     pub functions: Vec<DiffEntry>,
 }
 
@@ -140,31 +152,55 @@ pub struct DiffEntry {
     /// Per-side wall-time estimate: `samples * meta.interval_ms`. Pct
     /// columns shift when total profile time changes; ms columns don't —
     /// they answer "did this function take more or less time" directly.
-    /// Caveat: across N sampled threads, samples sum across threads, so
-    /// the value is closer to summed-CPU-time than wall time when
-    /// multiple threads are profiled.
-    pub a_self_ms: f64,
-    pub b_self_ms: f64,
-    pub a_total_ms: f64,
-    pub b_total_ms: f64,
+    /// `None` (and omitted from JSON output) when the chosen `event` is
+    /// not time-shaped — multiplying a marker's event count by the
+    /// sampling interval produces a meaningless unit.
+    /// Caveat for the time-shaped case: across N sampled threads,
+    /// samples sum across threads, so the value is closer to summed-
+    /// CPU-time than wall time when multiple threads are profiled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub a_self_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_self_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub a_total_ms: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_total_ms: Option<f64>,
     /// `b_self_ms - a_self_ms`. Positive = function spent more time in B.
-    pub delta_self_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_self_ms: Option<f64>,
     /// `b_total_ms - a_total_ms`.
-    pub delta_total_ms: f64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub delta_total_ms: Option<f64>,
 }
 
 pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output, ToolError> {
+    // sort_by="delta_ms" is only defined for time-shaped events.
+    // Refuse the combination loudly rather than silently sorting on a
+    // null column.
+    if matches!(args.sort_by, SortBy::DeltaMs) && !args.event.is_time_shaped() {
+        return Err(ToolError::Internal {
+            message: format!(
+                "sort_by=\"delta_ms\" is only valid for time-shaped events; \
+                 event {label:?} has no millisecond interpretation. Try sort_by=\"delta\".",
+                label = args.event.label(),
+            ),
+        });
+    }
+
     let (counts_a, total_a) = aggregate_functions(
         a,
         args.filter.as_deref(),
         &args.filter_args,
         args.expand_inlines,
+        &args.event,
     )?;
     let (counts_b, total_b) = aggregate_functions(
         b,
         args.filter.as_deref(),
         &args.filter_args,
         args.expand_inlines,
+        &args.event,
     )?;
 
     // Outer-join. Every key in either side gets a row; missing-side counts
@@ -189,6 +225,7 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
     let denom_b = total_b.max(1) as f32;
     let interval_a = a.meta().interval;
     let interval_b = b.meta().interval;
+    let time_shaped = args.event.is_time_shaped();
 
     let mut rows: Vec<DiffEntry> = joined
         .into_iter()
@@ -197,10 +234,23 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
             let b_self_pct = 100.0 * cb.self_samples as f32 / denom_b;
             let a_total_pct = 100.0 * ca.total_samples as f32 / denom_a;
             let b_total_pct = 100.0 * cb.total_samples as f32 / denom_b;
-            let a_self_ms = ca.self_samples as f64 * interval_a;
-            let b_self_ms = cb.self_samples as f64 * interval_b;
-            let a_total_ms = ca.total_samples as f64 * interval_a;
-            let b_total_ms = cb.total_samples as f64 * interval_b;
+            let (a_self_ms, b_self_ms, a_total_ms, b_total_ms, delta_self_ms, delta_total_ms) =
+                if time_shaped {
+                    let a_self = ca.self_samples as f64 * interval_a;
+                    let b_self = cb.self_samples as f64 * interval_b;
+                    let a_total = ca.total_samples as f64 * interval_a;
+                    let b_total = cb.total_samples as f64 * interval_b;
+                    (
+                        Some(a_self),
+                        Some(b_self),
+                        Some(a_total),
+                        Some(b_total),
+                        Some(b_self - a_self),
+                        Some(b_total - a_total),
+                    )
+                } else {
+                    (None, None, None, None, None, None)
+                };
             DiffEntry {
                 rank: 0,
                 function,
@@ -221,8 +271,8 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
                 b_self_ms,
                 a_total_ms,
                 b_total_ms,
-                delta_self_ms: b_self_ms - a_self_ms,
-                delta_total_ms: b_total_ms - a_total_ms,
+                delta_self_ms,
+                delta_total_ms,
             }
         })
         .collect();
@@ -260,6 +310,7 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
             SortBy::A => "a",
             SortBy::B => "b",
         },
+        event: args.event.label().to_owned(),
         functions: rows,
     })
 }
@@ -267,7 +318,12 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
 fn sort_key(r: &DiffEntry, by: SortBy) -> f64 {
     match by {
         SortBy::Delta => r.delta_self_pct.abs() as f64,
-        SortBy::DeltaMs => r.delta_self_ms.abs(),
+        // The `compare_profiles` entry point rejects DeltaMs unless the
+        // event is time-shaped, so `delta_self_ms` is guaranteed Some here.
+        SortBy::DeltaMs => r
+            .delta_self_ms
+            .expect("DeltaMs sort gated on time-shaped event")
+            .abs(),
         SortBy::A => r.a_self_pct as f64,
         SortBy::B => r.b_self_pct as f64,
     }
@@ -384,7 +440,10 @@ mod tests {
         .unwrap();
         assert_eq!(out.sort_by, "delta_ms");
         assert_eq!(out.functions[0].function, "hot");
-        assert!(out.functions[0].delta_self_ms.abs() > out.functions[1].delta_self_ms.abs());
+        assert!(
+            out.functions[0].delta_self_ms.unwrap().abs()
+                > out.functions[1].delta_self_ms.unwrap().abs()
+        );
     }
 
     #[test]
@@ -418,8 +477,8 @@ mod tests {
         // pct rose...
         assert!(hot.delta_self_pct > 0.0, "{hot:?}");
         // ...but ms fell by exactly 30 (90 → 60 samples * 1ms interval).
-        assert!(hot.delta_self_ms < 0.0, "{hot:?}");
-        assert!((hot.delta_self_ms + 30.0).abs() < 1e-9, "{hot:?}");
+        assert!(hot.delta_self_ms.unwrap() < 0.0, "{hot:?}");
+        assert!((hot.delta_self_ms.unwrap() + 30.0).abs() < 1e-9, "{hot:?}");
     }
 
     #[test]
@@ -506,6 +565,62 @@ mod tests {
             assert!(row.a_self_samples > 0 || row.a_total_samples > 0);
             assert!(row.b_self_samples > 0 || row.b_total_samples > 0);
         }
+    }
+
+    #[test]
+    fn compare_profiles_with_marker_event() {
+        // A: cache-misses on hot stack (1 marker) + cold stack (1 marker).
+        // B: same fixture but the first cache-miss marker is repointed
+        // from the hot stack (idx 0) to the cold stack (idx 1). Cold
+        // gains one cache-miss in B; hot loses one. Cycles distribution
+        // is unchanged.
+        use crate::profile::raw::{MarkerCause, RawMarkerData};
+        let raw_a: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        let mut raw_b: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        raw_b.threads[0].markers.data[0] = Some(RawMarkerData {
+            cause: Some(MarkerCause { stack: 1 }),
+        });
+
+        let a = Profile::from_raw(raw_a);
+        let b = Profile::from_raw(raw_b);
+
+        let out = compare_profiles(
+            &a,
+            &b,
+            &Args {
+                event: EventSource::Marker("cache-misses".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(out.event, "cache-misses");
+        let cold = out.functions.iter().find(|r| r.function == "cold").unwrap();
+        assert_eq!(cold.delta_self_samples, 1, "{cold:?}");
+        // Marker events are not time-shaped — ms columns must be None.
+        assert!(cold.delta_self_ms.is_none(), "{cold:?}");
+        assert!(cold.a_self_ms.is_none(), "{cold:?}");
+    }
+
+    #[test]
+    fn delta_ms_sort_with_marker_event_errors() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        let p = Profile::from_raw(raw);
+        let err = compare_profiles(
+            &p,
+            &p,
+            &Args {
+                event: EventSource::Marker("cache-misses".into()),
+                sort_by: SortBy::DeltaMs,
+                ..Default::default()
+            },
+        )
+        .unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("delta_ms"), "{msg}");
+        assert!(msg.contains("cache-misses"), "{msg}");
     }
 
     /// Build a `two_functions` profile with a single library named

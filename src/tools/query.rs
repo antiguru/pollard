@@ -93,6 +93,13 @@ pub struct TopFunctionsArgs {
     /// the bencher harness that inlined it). Off by default.
     #[serde(default)]
     pub expand_inlines: Option<bool>,
+    /// Event source: omit (or empty string) for the default samples track —
+    /// cycles, in samply's perf recorder. Pass a marker name like
+    /// `"cache-misses"`, `"branch-misses"`, or `"instructions"` to
+    /// aggregate that hardware counter instead. The error lists known
+    /// events when the name doesn't match.
+    #[serde(default)]
+    pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -135,6 +142,11 @@ pub struct CallTreeArgs {
     /// Off by default to keep the historical tree shape.
     #[serde(default)]
     pub expand_inlines: Option<bool>,
+    /// Event source: omit for the default samples track. Pass a marker
+    /// name (`"cache-misses"`, `"branch-misses"`, `"instructions"`) to
+    /// build the tree from a hardware-counter event instead.
+    #[serde(default)]
+    pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -235,6 +247,13 @@ pub struct CompareProfilesArgs {
     /// profiles come from differently-named binaries).
     #[serde(default)]
     pub align_by: Option<String>,
+    /// Event source: omit for the default samples track. Pass a marker
+    /// name (`"cache-misses"`, `"branch-misses"`, `"instructions"`) to
+    /// diff a hardware-counter event instead. Resolved against profile
+    /// A; the `*_ms` columns are omitted from each row when the event
+    /// is not time-shaped.
+    #[serde(default)]
+    pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -264,13 +283,14 @@ pub struct StacksContainingArgs {
 impl PollardServer {
     #[tool(
         name = "top_functions",
-        description = "Top-N functions by self or total samples."
+        description = "Top-N functions by self or total samples. Pass `event=\"<name>\"` (e.g. `cache-misses`, `branch-misses`, `instructions`) to aggregate hardware-counter markers instead of the default samples track; pct columns then mean \"% of <event>\"."
     )]
     pub async fn top_functions(
         &self,
         Parameters(args): Parameters<TopFunctionsArgs>,
     ) -> Result<Json<top_functions::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
+        let event = crate::query::event::resolve(session.profile(), args.event.as_deref())?;
         let q_args = top_functions::Args {
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
@@ -281,6 +301,7 @@ impl PollardServer {
             },
             filter_args: parse_filter(&args.common),
             expand_inlines: args.expand_inlines.unwrap_or(false),
+            event,
         };
         let result = top_functions::top_functions(session.profile(), &q_args)?;
         Ok(Json(result))
@@ -319,13 +340,14 @@ impl PollardServer {
 
     #[tool(
         name = "call_tree",
-        description = "Hierarchical call tree, pruned for LLM consumption."
+        description = "Hierarchical call tree, pruned for LLM consumption. Pass `event=\"<name>\"` to build the tree from a marker-backed counter (cache-misses, branch-misses, instructions, …) instead of the default samples track."
     )]
     pub async fn call_tree(
         &self,
         Parameters(args): Parameters<CallTreeArgs>,
     ) -> Result<Json<call_tree::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
+        let event = crate::query::event::resolve(session.profile(), args.event.as_deref())?;
         let defaults = call_tree::Args::default();
         let q_args = call_tree::Args {
             filter_args: parse_filter(&args.common),
@@ -337,6 +359,7 @@ impl PollardServer {
             max_depth: args.max_depth.unwrap_or(defaults.max_depth),
             max_breadth: args.max_breadth.unwrap_or(defaults.max_breadth),
             expand_inlines: args.expand_inlines.unwrap_or(defaults.expand_inlines),
+            event,
         };
         let result = call_tree::call_tree(session.profile(), &q_args)?;
         Ok(Json(result))
@@ -361,7 +384,7 @@ impl PollardServer {
 
     #[tool(
         name = "compare_profiles",
-        description = "Per-function delta between two loaded profiles, aligned by (function, module) by default. Cargo's 16-hex build-hash suffix on module names is stripped before keying, so two builds of the same binary align. Pass `align_by=\"function\"` to drop module from the key entirely (e.g. cross-binary comparisons). Each row reports both share-of-profile (`*_pct`) and wall-time-ish (`*_ms`, computed as `samples * meta.interval`) columns — `delta_self_ms` answers \"did this function take more or less time\" directly, while `delta_self_pct` is share-only and can mislead when total runtime changes. For fixed-workload programs (same input, same iteration count) `delta_self_ms` cleanly reads as \"got faster/slower\"; if A and B do different amounts of work, both columns mix workload-size and per-call-cost effects. Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
+        description = "Per-function delta between two loaded profiles, aligned by (function, module) by default. Cargo's 16-hex build-hash suffix on module names is stripped before keying, so two builds of the same binary align. Pass `align_by=\"function\"` to drop module from the key entirely (e.g. cross-binary comparisons). Each row reports both share-of-profile (`*_pct`) and wall-time-ish (`*_ms`, computed as `samples * meta.interval`) columns — `delta_self_ms` answers \"did this function take more or less time\" directly, while `delta_self_pct` is share-only and can mislead when total runtime changes. For fixed-workload programs (same input, same iteration count) `delta_self_ms` cleanly reads as \"got faster/slower\"; if A and B do different amounts of work, both columns mix workload-size and per-call-cost effects. The `event=` arg works the same way as on `top_functions` (e.g. `event=\"cache-misses\"` to diff cache-miss attribution); the `*_ms` columns are omitted from rows when the event is not time-shaped because count × sampling-interval has no meaningful unit there. Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
     )]
     pub async fn compare_profiles(
         &self,
@@ -369,6 +392,10 @@ impl PollardServer {
     ) -> Result<Json<compare::Output>, ErrorData> {
         let session_a = get_session(self, &args.profile_id_a).await?;
         let session_b = get_session(self, &args.profile_id_b).await?;
+        // Resolve the event against profile A. Profiles recorded together
+        // share the same event set; rejecting on B-only events is the
+        // strict and useful semantic when the two profiles disagree.
+        let event = crate::query::event::resolve(session_a.profile(), args.event.as_deref())?;
         let q_args = compare::Args {
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
@@ -385,6 +412,7 @@ impl PollardServer {
                 Some("function") => compare::AlignBy::Function,
                 _ => compare::AlignBy::FunctionAndModule,
             },
+            event,
         };
         let result = compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
         Ok(Json(result))

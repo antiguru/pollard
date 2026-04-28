@@ -5,6 +5,7 @@
 use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::Profile;
+use crate::query::event::{self, EventSource};
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -20,6 +21,11 @@ pub struct Args {
     /// (innermost-first when walking leaf-to-root), so self-time attributes
     /// to the deepest inlined callee instead of the enclosing function.
     pub expand_inlines: bool,
+    /// Which per-sample event drives the aggregation. Default
+    /// [`EventSource::Samples`] (samply puts cycles there); pass
+    /// [`EventSource::Marker`] to drill into hardware-counter markers
+    /// like `cache-misses`.
+    pub event: EventSource,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -40,6 +46,10 @@ pub struct Output {
     pub total_samples: u64,
     pub filter: Option<String>,
     pub sort_by: &'static str,
+    /// Echo of the resolved event source — `"samples"` for the default
+    /// track or the marker name (e.g. `"cache-misses"`). The pct
+    /// columns are percentages of this event's total count.
+    pub event: String,
     pub functions: Vec<FunctionEntry>,
 }
 
@@ -70,10 +80,16 @@ pub(crate) fn aggregate_functions(
     filter: Option<&str>,
     filter_args: &Filter,
     expand_inlines: bool,
+    event: &EventSource,
 ) -> Result<(HashMap<(String, Option<String>), Counts>, u64), ToolError> {
-    aggregate_grouped(profile, filter, filter_args, expand_inlines, |f, m, _| {
-        Some((f.to_owned(), m.map(str::to_owned)))
-    })
+    aggregate_grouped(
+        profile,
+        filter,
+        filter_args,
+        expand_inlines,
+        event,
+        |f, m, _| Some((f.to_owned(), m.map(str::to_owned))),
+    )
 }
 
 /// Aggregate self/total sample counts under a caller-provided key extractor.
@@ -83,11 +99,18 @@ pub(crate) fn aggregate_functions(
 /// The matcher in `filter` still applies to the function name regardless of
 /// what's used as the grouping key, so callers can scope a group-by-module
 /// query to only the functions they care about.
+///
+/// `event` selects which per-sample stream to walk: the default samples
+/// track (cycles) or a name-filtered slice of the marker stream
+/// (cache-misses, branch-misses, instructions, …). Both shapes go through
+/// the same outer loop because [`event::stack_indices`] yields the same
+/// `Option<usize>` shape as `samples.stack` directly.
 pub(crate) fn aggregate_grouped<K, F>(
     profile: &Profile,
     filter: Option<&str>,
     filter_args: &Filter,
     expand_inlines: bool,
+    event: &EventSource,
     mut key_fn: F,
 ) -> Result<(HashMap<K, Counts>, u64), ToolError>
 where
@@ -106,8 +129,7 @@ where
     let mut total_samples: u64 = 0;
 
     for handle in filter_args.threads(profile) {
-        let raw = profile.raw_thread(handle);
-        for &stack_opt in &raw.samples.stack {
+        for stack_opt in event::stack_indices(profile, handle, event) {
             let Some(stack_idx) = stack_opt else { continue };
             total_samples += 1;
 
@@ -164,6 +186,7 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
         args.filter.as_deref(),
         &args.filter_args,
         args.expand_inlines,
+        &args.event,
     )?;
 
     // Build output
@@ -211,6 +234,7 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
             SortBy::TotalTime => "total",
             SortBy::Descendants => "descendants",
         },
+        event: args.event.label().to_owned(),
         functions,
     })
 }
@@ -325,6 +349,48 @@ mod tests {
                 .map(|e| &e.function)
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn aggregates_marker_event_by_name() {
+        // two_events.json: 2 cache-miss markers — one on hot's stack,
+        // one on cold's. With event=cache-misses each function should
+        // own one self_sample and total=2.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let result = top_functions(
+            &profile,
+            &Args {
+                event: EventSource::Marker("cache-misses".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.event, "cache-misses");
+        assert_eq!(result.total_samples, 2);
+        let hot = result
+            .functions
+            .iter()
+            .find(|f| f.function == "hot")
+            .unwrap();
+        let cold = result
+            .functions
+            .iter()
+            .find(|f| f.function == "cold")
+            .unwrap();
+        assert_eq!(hot.self_samples, 1);
+        assert_eq!(cold.self_samples, 1);
+    }
+
+    #[test]
+    fn defaults_to_samples_event() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let result = top_functions(&profile, &Args::default()).unwrap();
+        assert_eq!(result.event, "samples");
+        assert_eq!(result.total_samples, 4);
     }
 
     #[test]
