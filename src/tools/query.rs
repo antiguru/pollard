@@ -2,7 +2,7 @@
 
 use crate::error::ToolError;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
-use crate::query::{call_tree, compare, folded, stacks_containing, top_functions};
+use crate::query::{call_tree, compare, folded, stacks_containing, top_functions, top_groups};
 use crate::tools::PollardServer;
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -163,6 +163,43 @@ pub struct FoldedStacksOutput {
 }
 
 // ---------------------------------------------------------------------------
+// top_groups args
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+pub struct TopGroupsArgs {
+    pub profile_id: String,
+    /// Grouping axis: `"function"`, `"module"`, `"file"`, or
+    /// `"directory"`. Defaults to `"function"` (which matches
+    /// `top_functions` modulo the module disambiguation column).
+    #[serde(default)]
+    pub group_by: Option<String>,
+    /// Optional substring/regex filter on function names — same matcher
+    /// syntax as `top_functions`. Filters frames *before* grouping, so a
+    /// `group_by="module"` query with `filter="hot"` only counts frames
+    /// whose function names match `hot`.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Maximum number of rows to return. Defaults to 30.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Sort order: `"self"` (default), `"total"`, or `"descendants"`.
+    #[serde(default)]
+    pub sort_by: Option<String>,
+    /// Path-component depth for `group_by="directory"`. Omit for the
+    /// full parent directory; `1` truncates to the first component
+    /// (`/home/foo/bar.rs` → `/home`), `2` keeps two (`/home/foo`).
+    #[serde(default)]
+    pub directory_depth: Option<u32>,
+    /// When true, expand each native frame into its DWARF inline chain
+    /// before grouping — same semantics as `top_functions`.
+    #[serde(default)]
+    pub expand_inlines: Option<bool>,
+    #[serde(flatten)]
+    pub common: CommonFilterArgs,
+}
+
+// ---------------------------------------------------------------------------
 // compare_profiles args
 // ---------------------------------------------------------------------------
 
@@ -238,6 +275,37 @@ impl PollardServer {
             expand_inlines: args.expand_inlines.unwrap_or(false),
         };
         let result = top_functions::top_functions(session.profile(), &q_args)?;
+        Ok(Json(result))
+    }
+
+    #[tool(
+        name = "top_groups",
+        description = "Top-N aggregation under a caller-chosen group key (function, module, file, or directory prefix). Same self/total accounting as `top_functions`; useful when you want hot directories or libraries rather than hot functions."
+    )]
+    pub async fn top_groups(
+        &self,
+        Parameters(args): Parameters<TopGroupsArgs>,
+    ) -> Result<Json<top_groups::Output>, ErrorData> {
+        let session = get_session(self, &args.profile_id).await?;
+        let q_args = top_groups::Args {
+            group_by: match args.group_by.as_deref() {
+                Some("module") => top_groups::GroupBy::Module,
+                Some("file") => top_groups::GroupBy::File,
+                Some("directory") => top_groups::GroupBy::Directory,
+                _ => top_groups::GroupBy::Function,
+            },
+            filter: args.filter.clone(),
+            limit: args.limit.unwrap_or(0),
+            sort_by: match args.sort_by.as_deref() {
+                Some("total") => top_groups::SortBy::TotalTime,
+                Some("descendants") => top_groups::SortBy::Descendants,
+                _ => top_groups::SortBy::SelfTime,
+            },
+            filter_args: parse_filter(&args.common),
+            expand_inlines: args.expand_inlines.unwrap_or(false),
+            directory_depth: args.directory_depth,
+        };
+        let result = top_groups::top_groups(session.profile(), &q_args)?;
         Ok(Json(result))
     }
 

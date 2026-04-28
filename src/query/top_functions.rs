@@ -4,7 +4,7 @@
 
 use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
-use crate::profile::{Profile, ThreadHandle};
+use crate::profile::Profile;
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -71,6 +71,29 @@ pub(crate) fn aggregate_functions(
     filter_args: &Filter,
     expand_inlines: bool,
 ) -> Result<(HashMap<(String, Option<String>), Counts>, u64), ToolError> {
+    aggregate_grouped(profile, filter, filter_args, expand_inlines, |f, m, _| {
+        Some((f.to_owned(), m.map(str::to_owned)))
+    })
+}
+
+/// Aggregate self/total sample counts under a caller-provided key extractor.
+/// Returning `None` from `key_fn` skips the frame — used by groupings (e.g.
+/// `file`, `directory`) where some frames lack the underlying metadata.
+///
+/// The matcher in `filter` still applies to the function name regardless of
+/// what's used as the grouping key, so callers can scope a group-by-module
+/// query to only the functions they care about.
+pub(crate) fn aggregate_grouped<K, F>(
+    profile: &Profile,
+    filter: Option<&str>,
+    filter_args: &Filter,
+    expand_inlines: bool,
+    mut key_fn: F,
+) -> Result<(HashMap<K, Counts>, u64), ToolError>
+where
+    K: std::hash::Hash + Eq + Clone,
+    F: FnMut(&str, Option<&str>, Option<&str>) -> Option<K>,
+{
     filter_args.validate_thread(profile)?;
     let matcher = match filter {
         Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
@@ -79,19 +102,57 @@ pub(crate) fn aggregate_functions(
         None => None,
     };
 
-    let mut counts: HashMap<(String, Option<String>), Counts> = HashMap::new();
+    let mut counts: HashMap<K, Counts> = HashMap::new();
     let mut total_samples: u64 = 0;
 
     for handle in filter_args.threads(profile) {
-        accumulate_thread(
-            profile,
-            handle,
-            SortBy::SelfTime,
-            expand_inlines,
-            &matcher,
-            &mut counts,
-            &mut total_samples,
-        );
+        let raw = profile.raw_thread(handle);
+        for &stack_opt in &raw.samples.stack {
+            let Some(stack_idx) = stack_opt else { continue };
+            total_samples += 1;
+
+            // Build the leaf-to-root chain. When expand_inlines is set, fan
+            // each native frame out into its DWARF inline chain
+            // innermost-first BEFORE the native name, so the deepest
+            // inlined callee becomes the leaf and gets self-time.
+            let mut entries: Vec<(String, Option<String>, Option<String>)> = Vec::new();
+            for frame_idx in profile.walk_stack(handle, stack_idx) {
+                let Some(info) = profile.frame_info(handle, frame_idx) else {
+                    continue;
+                };
+                let module = info.module_name.map(str::to_owned);
+                if expand_inlines {
+                    for inl in profile.inline_chain(handle, frame_idx) {
+                        entries.push((inl.function.clone(), module.clone(), inl.file.clone()));
+                    }
+                }
+                entries.push((
+                    info.function_name.to_owned(),
+                    module,
+                    info.file.map(str::to_owned),
+                ));
+            }
+
+            let mut iter = entries.into_iter();
+            let mut seen_in_stack: std::collections::HashSet<K> = Default::default();
+            if let Some((func, module, file)) = iter.next()
+                && matcher.as_ref().is_none_or(|m| m.matches(&func))
+                && let Some(k) = key_fn(&func, module.as_deref(), file.as_deref())
+            {
+                let entry = counts.entry(k.clone()).or_default();
+                entry.self_samples += 1;
+                entry.total_samples += 1;
+                seen_in_stack.insert(k);
+            }
+            for (func, module, file) in iter {
+                if matcher.as_ref().is_none_or(|m| m.matches(&func))
+                    && let Some(k) = key_fn(&func, module.as_deref(), file.as_deref())
+                    && seen_in_stack.insert(k.clone())
+                {
+                    counts.entry(k).or_default().total_samples += 1;
+                }
+            }
+        }
     }
 
     Ok((counts, total_samples))
@@ -152,58 +213,6 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
         },
         functions,
     })
-}
-
-fn accumulate_thread(
-    profile: &Profile,
-    handle: ThreadHandle,
-    _sort_by: SortBy,
-    expand_inlines: bool,
-    matcher: &Option<FunctionMatcher>,
-    counts: &mut HashMap<(String, Option<String>), Counts>,
-    total_samples: &mut u64,
-) {
-    let raw = profile.raw_thread(handle);
-    for &stack_opt in &raw.samples.stack {
-        let Some(stack_idx) = stack_opt else { continue };
-        *total_samples += 1;
-
-        // Build the leaf-to-root chain. When expand_inlines is set we emit
-        // each native frame's DWARF inline chain innermost-first BEFORE the
-        // native name, so the deepest inlined callee at the leaf becomes
-        // index 0 (and gets self-time attribution).
-        let mut entries: Vec<(String, Option<String>)> = Vec::new();
-        for frame_idx in profile.walk_stack(handle, stack_idx) {
-            let Some(info) = profile.frame_info(handle, frame_idx) else {
-                continue;
-            };
-            let module = info.module_name.map(str::to_owned);
-            if expand_inlines {
-                for inl in profile.inline_chain(handle, frame_idx) {
-                    entries.push((inl.function.clone(), module.clone()));
-                }
-            }
-            entries.push((info.function_name.to_owned(), module));
-        }
-
-        let mut iter = entries.into_iter();
-        let mut seen_in_stack: std::collections::HashSet<(String, Option<String>)> =
-            Default::default();
-        if let Some(leaf) = iter.next()
-            && matcher.as_ref().is_none_or(|m| m.matches(&leaf.0))
-        {
-            counts.entry(leaf.clone()).or_default().self_samples += 1;
-            counts.entry(leaf.clone()).or_default().total_samples += 1;
-            seen_in_stack.insert(leaf);
-        }
-        for entry in iter {
-            if matcher.as_ref().is_none_or(|m| m.matches(&entry.0))
-                && seen_in_stack.insert(entry.clone())
-            {
-                counts.entry(entry).or_default().total_samples += 1;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
