@@ -98,7 +98,7 @@ struct AggNode {
 
 pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     args.filter_args.validate_thread(profile)?;
-    let _root_matcher = args
+    let root_matcher = args
         .root_function
         .as_deref()
         .map(FunctionMatcher::new)
@@ -115,7 +115,14 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     let mut total_samples: u64 = 0;
 
     for handle in args.filter_args.threads(profile) {
-        accumulate(profile, handle, args.inverted, &mut root, &mut total_samples);
+        accumulate_with_root(
+            profile,
+            handle,
+            args.inverted,
+            &root_matcher,
+            &mut root,
+            &mut total_samples,
+        );
     }
 
     let mut tree = build_node(&root, total_samples, "ROOT".into(), None, args, 0);
@@ -135,21 +142,36 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     })
 }
 
-fn accumulate(
+fn accumulate_with_root(
     profile: &Profile,
     handle: ThreadHandle,
     inverted: bool,
+    root_matcher: &Option<FunctionMatcher>,
     root: &mut AggNode,
     total_samples: &mut u64,
 ) {
     let raw = profile.raw_thread(handle);
     for &stack_opt in &raw.samples.stack {
         let Some(stack_idx) = stack_opt else { continue };
-        *total_samples += 1;
         let mut frames: Vec<usize> = profile.walk_stack(handle, stack_idx).collect();
         if !inverted {
             frames.reverse();
         }
+        // If a root matcher is set, find the frame that matches and trim the prefix.
+        if let Some(m) = root_matcher {
+            let pos = frames.iter().position(|&f| {
+                profile
+                    .frame_info(handle, f)
+                    .is_some_and(|i| m.matches(i.function_name))
+            });
+            match pos {
+                Some(p) => {
+                    frames.drain(..p);
+                }
+                None => continue, // skip this stack entirely
+            };
+        }
+        *total_samples += 1;
         let mut node: &mut AggNode = root;
         let len = frames.len();
         for (i, frame_idx) in frames.iter().enumerate() {
@@ -288,6 +310,35 @@ mod tests {
         let p = fixture();
         let tree = call_tree(&p, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
         assert!(tree.tree.is_some());
+    }
+
+    #[test]
+    fn root_function_restricts_tree() {
+        let raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/two_functions.json"
+        ))
+        .unwrap();
+        let profile = Profile::from_raw(raw);
+        let tree = call_tree(
+            &profile,
+            &Args {
+                root_function: Some("hot".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let root = tree.tree.expect("tree present");
+        if let Node::Frame(f) = root {
+            // Task 18: root_function="hot" trims to stacks containing "hot".
+            // Only the [hot] stack survives → synthetic ROOT has 1 child "hot",
+            // which compresses into ROOT's chain. After Task 20 hoists, this
+            // assertion will be updated to f.function == "hot".
+            assert_eq!(f.chain.as_deref(), Some(&["hot".to_owned()][..]));
+            assert_eq!(tree.total_samples, 90);
+        } else {
+            panic!("expected frame root");
+        }
     }
 
     #[test]
