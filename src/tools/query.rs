@@ -217,7 +217,9 @@ pub struct CompareProfilesArgs {
     #[serde(default)]
     pub limit: Option<usize>,
     /// Sort order: "delta" (default — `|b_self_pct - a_self_pct|`
-    /// descending), "a" (A's self-pct), or "b" (B's self-pct).
+    /// descending), "delta_ms" (`|delta_self_ms|` descending — robust to
+    /// changes in total profile duration), "a" (A's self-pct), or "b"
+    /// (B's self-pct).
     #[serde(default)]
     pub sort_by: Option<String>,
     /// Drop rows whose absolute self-pct delta is below this threshold.
@@ -227,6 +229,12 @@ pub struct CompareProfilesArgs {
     /// Forwarded to the per-profile aggregator on both sides.
     #[serde(default)]
     pub expand_inlines: Option<bool>,
+    /// Join-key shape: "function_and_module" (default — joins on
+    /// `(function, module)` after stripping cargo's 16-hex build hash) or
+    /// "function" (drops module from the key, useful when the two
+    /// profiles come from differently-named binaries).
+    #[serde(default)]
+    pub align_by: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
 }
@@ -353,7 +361,7 @@ impl PollardServer {
 
     #[tool(
         name = "compare_profiles",
-        description = "Per-function delta between two loaded profiles, aligned by (function, module). Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
+        description = "Per-function delta between two loaded profiles, aligned by (function, module) by default. Cargo's 16-hex build-hash suffix on module names is stripped before keying, so two builds of the same binary align. Pass `align_by=\"function\"` to drop module from the key entirely (e.g. cross-binary comparisons). Each row reports both share-of-profile (`*_pct`) and wall-time-ish (`*_ms`, computed as `samples * meta.interval`) columns — `delta_self_ms` answers \"did this function take more or less time\" directly, while `delta_self_pct` is share-only and can mislead when total runtime changes. For fixed-workload programs (same input, same iteration count) `delta_self_ms` cleanly reads as \"got faster/slower\"; if A and B do different amounts of work, both columns mix workload-size and per-call-cost effects. Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
     )]
     pub async fn compare_profiles(
         &self,
@@ -367,11 +375,16 @@ impl PollardServer {
             sort_by: match args.sort_by.as_deref() {
                 Some("a") => compare::SortBy::A,
                 Some("b") => compare::SortBy::B,
+                Some("delta_ms") => compare::SortBy::DeltaMs,
                 _ => compare::SortBy::Delta,
             },
             min_delta_pct: args.min_delta_pct,
             filter_args: parse_filter(&args.common),
             expand_inlines: args.expand_inlines.unwrap_or(false),
+            align_by: match args.align_by.as_deref() {
+                Some("function") => compare::AlignBy::Function,
+                _ => compare::AlignBy::FunctionAndModule,
+            },
         };
         let result = compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
         Ok(Json(result))
