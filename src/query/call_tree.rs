@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
+use crate::matching::{
+    DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
+};
 use crate::profile::{Profile, ThreadHandle};
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
@@ -52,6 +54,11 @@ pub struct Output {
     pub total_samples: u64,
     pub pruning: PruningKnobs,
     pub tree: Option<Node>,
+    /// Set when `root_function` or `paths_to` didn't match exactly but the
+    /// fuzzy ranker promoted a single high-confidence candidate. Surfaced
+    /// so the caller can verify the substitution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did_you_mean: Option<DidYouMean>,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Clone)]
@@ -105,6 +112,52 @@ struct AggNode {
 }
 
 pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
+    match call_tree_inner(profile, args, None) {
+        Err(ToolError::FunctionNotFound {
+            function: needle,
+            nearest_matches: _,
+        }) => {
+            // Identify which arg threw so we know which one to substitute.
+            // matcher_to_string() returns the un-prefixed pattern for
+            // substring matchers, so equality works for the typical case.
+            let mut promoted_args = args.clone();
+            let target_field = if args.root_function.as_deref() == Some(needle.as_str()) {
+                &mut promoted_args.root_function
+            } else if args.paths_to.as_deref() == Some(needle.as_str()) {
+                &mut promoted_args.paths_to
+            } else {
+                // Couldn't tie the error back to a specific arg (e.g. regex
+                // matcher rendered with `re:` prefix). Re-raise.
+                return Err(ToolError::FunctionNotFound {
+                    function: needle,
+                    nearest_matches: vec![],
+                });
+            };
+
+            let matcher = FunctionMatcher::new(&needle).map_err(|e| ToolError::Internal {
+                message: e.to_string(),
+            })?;
+            let scored = nearest_function_scored(profile, &matcher);
+            let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
+                return Err(ToolError::FunctionNotFound {
+                    function: needle,
+                    nearest_matches: scored.into_iter().map(|(n, _)| n).collect(),
+                });
+            };
+
+            *target_field = Some(resolved.clone());
+            let dym = DidYouMean { needle, resolved };
+            call_tree_inner(profile, &promoted_args, Some(dym))
+        }
+        other => other,
+    }
+}
+
+fn call_tree_inner(
+    profile: &Profile,
+    args: &Args,
+    did_you_mean: Option<DidYouMean>,
+) -> Result<Output, ToolError> {
     args.filter_args.validate_thread(profile)?;
     let root_matcher = args
         .root_function
@@ -153,7 +206,10 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(m),
-            nearest_matches: nearest_function_names(profile, m),
+            nearest_matches: nearest_function_scored(profile, m)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
         });
     }
     if let Some(m) = &paths_to
@@ -161,7 +217,10 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(m),
-            nearest_matches: nearest_function_names(profile, m),
+            nearest_matches: nearest_function_scored(profile, m)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
         });
     }
 
@@ -193,6 +252,7 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             max_breadth: args.max_breadth,
         },
         tree,
+        did_you_mean,
     })
 }
 
@@ -425,7 +485,10 @@ mod tests {
         // Walk the tree; `cold` must not appear, `hot` must.
         let names = collect_frame_names(tree.tree.as_ref());
         assert!(names.contains(&"hot".to_owned()), "missing hot: {names:?}");
-        assert!(!names.contains(&"cold".to_owned()), "cold not pruned: {names:?}");
+        assert!(
+            !names.contains(&"cold".to_owned()),
+            "cold not pruned: {names:?}"
+        );
     }
 
     fn collect_frame_names(node: Option<&Node>) -> Vec<String> {
@@ -455,8 +518,7 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
         let t = &mut raw.threads[0];
-        t.inline_chains
-            .resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         // frame_table.func = [0,1,2,3]; index 3 is `d` (the leaf).
         t.inline_chains[3] = vec![InlineFrame {
             function: "leaf_inline".into(),
@@ -559,6 +621,59 @@ mod tests {
         } else {
             panic!("expected frame root");
         }
+    }
+
+    #[test]
+    fn auto_promotes_high_confidence_fuzzy_paths_to() {
+        // Issue #21: when `Vec::push` doesn't literally appear but a single
+        // demangled symbol scores high in the tokenizer tier, run the query
+        // against that resolved name and surface the substitution via
+        // `did_you_mean`.
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        raw.threads[0].string_array[3] = "<alloc::vec::Vec<T,A>>::push".to_owned();
+        let profile = Profile::from_raw(raw);
+
+        let result = call_tree(
+            &profile,
+            &Args {
+                paths_to: Some("Vec::push".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let dym = result
+            .did_you_mean
+            .expect("auto-promote should have populated did_you_mean");
+        assert_eq!(dym.needle, "Vec::push");
+        assert_eq!(dym.resolved, "<alloc::vec::Vec<T,A>>::push");
+    }
+
+    #[test]
+    fn auto_promotes_high_confidence_fuzzy_root_function() {
+        // Same setup as the paths_to test, but pinning root_function — we
+        // need to confirm both arg fields are eligible for promotion.
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        raw.threads[0].string_array[0] = "<alloc::vec::Vec<T,A>>::push".to_owned();
+        let profile = Profile::from_raw(raw);
+
+        let result = call_tree(
+            &profile,
+            &Args {
+                root_function: Some("Vec::push".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let dym = result
+            .did_you_mean
+            .expect("auto-promote should have populated did_you_mean");
+        assert_eq!(dym.resolved, "<alloc::vec::Vec<T,A>>::push");
     }
 
     #[test]
