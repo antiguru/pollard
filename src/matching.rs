@@ -60,6 +60,82 @@ pub fn matcher_to_string(matcher: &FunctionMatcher) -> String {
     }
 }
 
+/// Splits an identifier into lowercase tokens for fuzzy matching.
+///
+/// Splits on `::`, angle brackets, parentheses, brackets, commas,
+/// underscores, ampersands, asterisks, dots, quotes, and whitespace, plus
+/// camelCase boundaries (`getElement` → `get`, `element`). Empty fragments
+/// are dropped.
+pub fn tokenize_identifier(s: &str) -> Vec<String> {
+    let separators = [
+        ':', '<', '>', '(', ')', '[', ']', ',', '_', '&', '*', '.', ' ', '\t', '\'', '"',
+    ];
+    let mut tokens: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut prev_lower = false;
+    for ch in s.chars() {
+        if separators.contains(&ch) {
+            if !current.is_empty() {
+                tokens.push(std::mem::take(&mut current));
+            }
+            prev_lower = false;
+            continue;
+        }
+        if ch.is_uppercase() && prev_lower {
+            tokens.push(std::mem::take(&mut current));
+            current.push(ch);
+            prev_lower = false;
+            continue;
+        }
+        current.push(ch);
+        prev_lower = ch.is_lowercase();
+    }
+    if !current.is_empty() {
+        tokens.push(current);
+    }
+    tokens.iter_mut().for_each(|t| *t = t.to_lowercase());
+    tokens.retain(|t| !t.is_empty());
+    tokens
+}
+
+/// Length of the longest in-order subsequence of `needle` tokens that appear
+/// (in order, possibly with gaps) inside `cand`. Used to reward candidates
+/// that contain every needle token in the right order, even when generic
+/// arguments or namespace fragments sit between them.
+fn token_lcs_len(needle: &[String], cand: &[String]) -> usize {
+    if needle.is_empty() || cand.is_empty() {
+        return 0;
+    }
+    let mut prev = vec![0_usize; cand.len() + 1];
+    let mut curr = vec![0_usize; cand.len() + 1];
+    for i in 1..=needle.len() {
+        for j in 1..=cand.len() {
+            curr[j] = if needle[i - 1] == cand[j - 1] {
+                prev[j - 1] + 1
+            } else {
+                curr[j - 1].max(prev[j])
+            };
+        }
+        std::mem::swap(&mut prev, &mut curr);
+        curr.iter_mut().for_each(|x| *x = 0);
+    }
+    prev[cand.len()]
+}
+
+/// Fraction of `needle` tokens that occur anywhere in `cand` (needle-coverage,
+/// not symmetric Jaccard — partial-needle matches still get partial credit).
+fn token_set_coverage(needle: &[String], cand: &[String]) -> f64 {
+    if needle.is_empty() {
+        return 0.0;
+    }
+    let cand_set: std::collections::HashSet<&str> = cand.iter().map(String::as_str).collect();
+    let matched = needle
+        .iter()
+        .filter(|t| cand_set.contains(t.as_str()))
+        .count();
+    matched as f64 / needle.len() as f64
+}
+
 /// Up to [`NEAREST_K`] candidate function names ranked by fuzzy similarity to
 /// the matcher's pattern. The score combines:
 ///
@@ -67,6 +143,11 @@ pub fn matcher_to_string(matcher: &FunctionMatcher) -> String {
 ///   needle (or vice versa) as a literal substring, it ranks above any
 ///   non-containing candidate. This preserves the obvious case
 ///   (`Vec::push` → `<alloc::vec::Vec<T>>::push`).
+/// * **Token-aware overlap** (middle tier): tokenizes both sides on `::`,
+///   `<>`, `_`, and camelCase boundaries, then rewards candidates that
+///   contain every needle token in order. Catches `Vec::push` →
+///   `<alloc::vec::Vec<T,A>>::push`, where literal substring fails because
+///   the generic arguments interrupt the token sequence.
 /// * **Sørensen–Dice bigram overlap** (fallback): rewards shared character
 ///   pairs regardless of position, so insertions like `cols_third` →
 ///   `simd_cols_3rd` still surface near the top. Jaro–Winkler was too
@@ -107,6 +188,7 @@ pub fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> V
 
     let needle = matcher_to_string(matcher);
     let needle_lc = needle.to_lowercase();
+    let needle_toks = tokenize_identifier(&needle);
 
     // Min-heap of (score, name) keyed by `Reverse(score)` so the worst
     // candidate sits on top and is the one we pop when the heap exceeds K.
@@ -137,7 +219,24 @@ pub fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> V
             } else if needle_lc.contains(&name_lc) {
                 1.5 - (needle.len() as f64 - name.len() as f64).abs() / 1024.0
             } else {
-                strsim::sorensen_dice(&needle_lc, &name_lc)
+                // Token tier sits between reverse-containment (1.5) and
+                // substring (2.0): a full in-order token match scores ~1.9,
+                // partial matches blend with the bigram floor.
+                let cand_toks = tokenize_identifier(name);
+                let token_score = if !needle_toks.is_empty() && !cand_toks.is_empty() {
+                    let lcs =
+                        token_lcs_len(&needle_toks, &cand_toks) as f64 / needle_toks.len() as f64;
+                    let cov = token_set_coverage(&needle_toks, &cand_toks);
+                    if (lcs - 1.0).abs() < f64::EPSILON {
+                        1.5 + 0.4 * cov
+                    } else {
+                        0.6 * lcs + 0.4 * cov
+                    }
+                } else {
+                    0.0
+                };
+                let dice = strsim::sorensen_dice(&needle_lc, &name_lc);
+                token_score.max(dice)
             };
 
             heap.push(Reverse((Score(score), name.clone())));
@@ -290,6 +389,36 @@ mod tests {
             near[0], "simd_cols_3rd",
             "expected simd_cols_3rd to outrank unrelated symbols, got {near:?}"
         );
+    }
+
+    #[test]
+    fn nearest_token_match_beats_unrelated_when_substring_fails() {
+        // From issue #20: needle `Vec::push` should suggest the demangled
+        // form even when generic arguments break literal substring match.
+        let p = profile_with_funcs(&[
+            "<alloc::vec::Vec<T,A>>::push",
+            "memcpy",
+            "free",
+            "rustfmt::main",
+        ]);
+        let matcher = FunctionMatcher::new("Vec::push").unwrap();
+        let near = nearest_function_names(&p, &matcher);
+        assert_eq!(
+            near[0], "<alloc::vec::Vec<T,A>>::push",
+            "expected token-aware match to surface generic-laden Vec::push, got {near:?}"
+        );
+    }
+
+    #[test]
+    fn tokenize_splits_on_namespace_and_generics() {
+        let toks = tokenize_identifier("<alloc::vec::Vec<T,A>>::push");
+        assert_eq!(toks, vec!["alloc", "vec", "vec", "t", "a", "push"]);
+    }
+
+    #[test]
+    fn tokenize_splits_camelcase() {
+        let toks = tokenize_identifier("getElementByName");
+        assert_eq!(toks, vec!["get", "element", "by", "name"]);
     }
 
     #[test]
