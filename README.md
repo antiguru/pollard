@@ -18,7 +18,8 @@ Early development. Not yet published to crates.io.
 
 * **Lifecycle:** `load_profile`, `unload_profile`, `list_profiles`,
   `describe_profile`
-* **Query:** `top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`
+* **Query:** `top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`,
+  `compare_profiles`
 * **Drill-down:** `source_for_function`, `asm_for_function`,
   `address_to_function`
 

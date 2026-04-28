@@ -2,7 +2,7 @@
 
 use crate::error::ToolError;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
-use crate::query::{call_tree, folded, stacks_containing, top_functions};
+use crate::query::{call_tree, compare, folded, stacks_containing, top_functions};
 use crate::tools::PollardServer;
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -163,6 +163,38 @@ pub struct FoldedStacksOutput {
 }
 
 // ---------------------------------------------------------------------------
+// compare_profiles args
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CompareProfilesArgs {
+    /// Baseline profile ID (the "before" side of the diff).
+    pub profile_id_a: String,
+    /// Comparison profile ID (the "after" side of the diff).
+    pub profile_id_b: String,
+    /// Optional substring/regex filter on function names. Same matcher
+    /// syntax as `top_functions` — applied identically to both sides.
+    #[serde(default)]
+    pub filter: Option<String>,
+    /// Maximum number of rows to return. Defaults to 30.
+    #[serde(default)]
+    pub limit: Option<usize>,
+    /// Sort order: "delta" (default — `|b_self_pct - a_self_pct|`
+    /// descending), "a" (A's self-pct), or "b" (B's self-pct).
+    #[serde(default)]
+    pub sort_by: Option<String>,
+    /// Drop rows whose absolute self-pct delta is below this threshold.
+    /// Useful for filtering out rounding noise on long-tail functions.
+    #[serde(default)]
+    pub min_delta_pct: Option<f32>,
+    /// Forwarded to the per-profile aggregator on both sides.
+    #[serde(default)]
+    pub expand_inlines: Option<bool>,
+    #[serde(flatten)]
+    pub common: CommonFilterArgs,
+}
+
+// ---------------------------------------------------------------------------
 // stacks_containing args
 // ---------------------------------------------------------------------------
 
@@ -249,6 +281,32 @@ impl PollardServer {
         };
         let folded = folded::folded_stacks(session.profile(), &q_args)?;
         Ok(Json(FoldedStacksOutput { folded }))
+    }
+
+    #[tool(
+        name = "compare_profiles",
+        description = "Per-function delta between two loaded profiles, aligned by (function, module). Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
+    )]
+    pub async fn compare_profiles(
+        &self,
+        Parameters(args): Parameters<CompareProfilesArgs>,
+    ) -> Result<Json<compare::Output>, ErrorData> {
+        let session_a = get_session(self, &args.profile_id_a).await?;
+        let session_b = get_session(self, &args.profile_id_b).await?;
+        let q_args = compare::Args {
+            filter: args.filter.clone(),
+            limit: args.limit.unwrap_or(0),
+            sort_by: match args.sort_by.as_deref() {
+                Some("a") => compare::SortBy::A,
+                Some("b") => compare::SortBy::B,
+                _ => compare::SortBy::Delta,
+            },
+            min_delta_pct: args.min_delta_pct,
+            filter_args: parse_filter(&args.common),
+            expand_inlines: args.expand_inlines.unwrap_or(false),
+        };
+        let result = compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
+        Ok(Json(result))
     }
 
     #[tool(
