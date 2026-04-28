@@ -23,6 +23,10 @@ pub enum SortBy {
     #[default]
     SelfTime,
     TotalTime,
+    /// `total_samples - self_samples`. Surfaces wrappers and dispatchers
+    /// that aren't themselves hot but call into hot code; useful when the
+    /// self-time list is dominated by leaf allocator/syscall frames.
+    Descendants,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -79,16 +83,14 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
 
     // Build output
     let mut entries: Vec<((String, Option<String>), Counts)> = counts.into_iter().collect();
+    let key = |c: &Counts| match args.sort_by {
+        SortBy::SelfTime => c.self_samples,
+        SortBy::TotalTime => c.total_samples,
+        SortBy::Descendants => c.total_samples.saturating_sub(c.self_samples),
+    };
     entries.sort_by(|a, b| {
-        let ka = match args.sort_by {
-            SortBy::SelfTime => a.1.self_samples,
-            SortBy::TotalTime => a.1.total_samples,
-        };
-        let kb = match args.sort_by {
-            SortBy::SelfTime => b.1.self_samples,
-            SortBy::TotalTime => b.1.total_samples,
-        };
-        kb.cmp(&ka)
+        key(&b.1)
+            .cmp(&key(&a.1))
             .then_with(|| a.0.0.cmp(&b.0.0))
             .then_with(|| a.0.1.cmp(&b.0.1))
     });
@@ -122,6 +124,7 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
         sort_by: match args.sort_by {
             SortBy::SelfTime => "self",
             SortBy::TotalTime => "total",
+            SortBy::Descendants => "descendants",
         },
         functions,
     })
@@ -205,6 +208,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.functions.len(), 1);
+    }
+
+    #[test]
+    fn descendants_sort_pushes_leaf_to_bottom() {
+        // linear_chain.json: a → b → c → d, all 100 samples land on leaf `d`.
+        // self:      a=0   b=0   c=0   d=100
+        // total:     a=100 b=100 c=100 d=100
+        // descend.:  a=100 b=100 c=100 d=0
+        // The leaf must rank last under descendants sort.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let result = top_functions(
+            &profile,
+            &Args {
+                sort_by: SortBy::Descendants,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(result.sort_by, "descendants");
+        assert_eq!(
+            result.functions.last().map(|e| e.function.as_str()),
+            Some("d"),
+            "leaf must rank last under descendants sort, got {:?}",
+            result
+                .functions
+                .iter()
+                .map(|e| &e.function)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]

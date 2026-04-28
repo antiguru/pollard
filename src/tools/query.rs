@@ -77,7 +77,9 @@ pub struct TopFunctionsArgs {
     /// Maximum number of results to return. Defaults to 30.
     #[serde(default)]
     pub limit: Option<usize>,
-    /// Sort order: "self" (default) or "total".
+    /// Sort order: "self" (default), "total", or "descendants"
+    /// (`total - self`; surfaces wrappers/dispatchers that aren't themselves
+    /// hot but call into hot code).
     #[serde(default)]
     pub sort_by: Option<String>,
     #[serde(flatten)]
@@ -151,6 +153,7 @@ impl PollardServer {
             limit: args.limit.unwrap_or(0),
             sort_by: match args.sort_by.as_deref() {
                 Some("total") => top_functions::SortBy::TotalTime,
+                Some("descendants") => top_functions::SortBy::Descendants,
                 _ => top_functions::SortBy::SelfTime,
             },
             filter_args: parse_filter(&args.common),
