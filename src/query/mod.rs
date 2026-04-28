@@ -1,3 +1,4 @@
+pub mod asm;
 pub mod call_tree;
 pub mod describe;
 pub mod filters;
