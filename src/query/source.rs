@@ -93,10 +93,10 @@ fn attribute(
                 if !matcher.matches(info.function_name) {
                     continue;
                 }
-                if let Some(m) = module_filter {
-                    if info.module_name != Some(m) {
-                        continue;
-                    }
+                if let Some(m) = module_filter
+                    && info.module_name != Some(m)
+                {
+                    continue;
                 }
                 if let Some(line) = info.line {
                     *samples_per_line.entry(line).or_default() += 1;
@@ -128,10 +128,10 @@ fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> Vec<S
     for thread in profile.threads() {
         let raw = thread.raw();
         for func_idx in 0..raw.func_table.length {
-            if let Some(s_idx) = raw.func_table.name.get(func_idx) {
-                if let Some(s) = raw.string_array.get(*s_idx) {
-                    candidates.push(s.clone());
-                }
+            if let Some(s_idx) = raw.func_table.name.get(func_idx)
+                && let Some(s) = raw.string_array.get(*s_idx)
+            {
+                candidates.push(s.clone());
             }
         }
     }

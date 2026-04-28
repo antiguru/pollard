@@ -45,18 +45,18 @@ pub struct CommonFilterArgs {
 
 fn parse_filter(args: &CommonFilterArgs) -> Filter {
     let thread = args.thread.as_deref().map(|t| {
-        if let Some(rest) = t.strip_prefix("tid:") {
-            if let Ok(n) = rest.parse::<u64>() {
-                return ThreadFilter::Tid(n);
-            }
+        if let Some(rest) = t.strip_prefix("tid:")
+            && let Ok(n) = rest.parse::<u64>()
+        {
+            return ThreadFilter::Tid(n);
         }
         ThreadFilter::Name(t.to_owned())
     });
     let process = args.process.as_deref().map(|p| {
-        if let Some(rest) = p.strip_prefix("pid:") {
-            if let Ok(n) = rest.parse::<u64>() {
-                return ProcessFilter::Pid(n);
-            }
+        if let Some(rest) = p.strip_prefix("pid:")
+            && let Ok(n) = rest.parse::<u64>()
+        {
+            return ProcessFilter::Pid(n);
         }
         ProcessFilter::Name(p.to_owned())
     });

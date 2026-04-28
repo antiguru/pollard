@@ -145,15 +145,15 @@ async fn symbolicate_thread(
         thread.func_table.name[func_idx] = new_name_idx;
 
         // Backfill file and line if available.
-        if let Some(frames) = &addr_info.frames {
-            if let Some(frame) = frames.first() {
-                if let Some(file) = frame.file_path.as_ref().map(|p| p.display_path().to_owned()) {
-                    let file_idx = intern_string(&mut thread.string_array, &file);
-                    thread.func_table.file_name[func_idx] = Some(file_idx);
-                }
-                if let Some(line) = frame.line_number {
-                    thread.frame_table.line[frame_idx] = Some(line);
-                }
+        if let Some(frames) = &addr_info.frames
+            && let Some(frame) = frames.first()
+        {
+            if let Some(file) = frame.file_path.as_ref().map(|p| p.display_path().to_owned()) {
+                let file_idx = intern_string(&mut thread.string_array, &file);
+                thread.func_table.file_name[func_idx] = Some(file_idx);
+            }
+            if let Some(line) = frame.line_number {
+                thread.frame_table.line[frame_idx] = Some(line);
             }
         }
     }

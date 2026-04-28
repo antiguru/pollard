@@ -17,11 +17,11 @@ pub struct SampleSpec<'a> {
 pub fn build_simple_profile(name: &str, samples: &[SampleSpec<'_>]) -> String {
     let mut profile = FxProfile::new(
         name,
-        SystemTime::now().into(),
+        SystemTime::UNIX_EPOCH.into(),
         SamplingInterval::from_millis(1),
     );
     let process =
-        profile.add_process("test-process", 1, Timestamp::from_millis_since_reference(0.0));
+        profile.add_process("Main", 1, Timestamp::from_millis_since_reference(0.0));
     let thread = profile.add_thread(
         process,
         1,

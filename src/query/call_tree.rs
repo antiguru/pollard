@@ -168,14 +168,14 @@ fn accumulate_with_root(
             frames.reverse();
         }
         // If a paths_to matcher is set, skip stacks that don't contain a matching frame.
-        if let Some(m) = paths_to_matcher {
-            if !frames.iter().any(|&f| {
+        if let Some(m) = paths_to_matcher
+            && !frames.iter().any(|&f| {
                 profile
                     .frame_info(handle, f)
                     .is_some_and(|i| m.matches(i.function_name))
-            }) {
-                continue;
-            }
+            })
+        {
+            continue;
         }
         // If a root matcher is set, find the frame that matches and trim the prefix.
         if let Some(m) = root_matcher {

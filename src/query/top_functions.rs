@@ -131,25 +131,24 @@ fn accumulate_thread(
         let mut frames = profile.walk_stack(handle, stack_idx);
         let mut seen_in_stack: std::collections::HashSet<(String, Option<String>)> =
             Default::default();
-        if let Some(leaf_frame_idx) = frames.next() {
-            if let Some(info) = profile.frame_info(handle, leaf_frame_idx) {
-                if matcher.as_ref().is_none_or(|m| m.matches(info.function_name)) {
-                    let key =
-                        (info.function_name.to_owned(), info.module_name.map(str::to_owned));
-                    counts.entry(key.clone()).or_default().self_samples += 1;
-                    counts.entry(key.clone()).or_default().total_samples += 1;
-                    seen_in_stack.insert(key);
-                }
-            }
+        if let Some(leaf_frame_idx) = frames.next()
+            && let Some(info) = profile.frame_info(handle, leaf_frame_idx)
+            && matcher.as_ref().is_none_or(|m| m.matches(info.function_name))
+        {
+            let key =
+                (info.function_name.to_owned(), info.module_name.map(str::to_owned));
+            counts.entry(key.clone()).or_default().self_samples += 1;
+            counts.entry(key.clone()).or_default().total_samples += 1;
+            seen_in_stack.insert(key);
         }
         for frame_idx in frames {
-            if let Some(info) = profile.frame_info(handle, frame_idx) {
-                if matcher.as_ref().is_none_or(|m| m.matches(info.function_name)) {
-                    let key =
-                        (info.function_name.to_owned(), info.module_name.map(str::to_owned));
-                    if seen_in_stack.insert(key.clone()) {
-                        counts.entry(key).or_default().total_samples += 1;
-                    }
+            if let Some(info) = profile.frame_info(handle, frame_idx)
+                && matcher.as_ref().is_none_or(|m| m.matches(info.function_name))
+            {
+                let key =
+                    (info.function_name.to_owned(), info.module_name.map(str::to_owned));
+                if seen_in_stack.insert(key.clone()) {
+                    counts.entry(key).or_default().total_samples += 1;
                 }
             }
         }

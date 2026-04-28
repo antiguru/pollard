@@ -1,0 +1,331 @@
+//! Regenerate test fixtures on demand.
+//!
+//! Run:
+//!   cargo test --test build_fixtures -- --ignored
+//!
+//! Each `#[test] #[ignore]` writes one fixture to tests/fixtures/<name>.json.
+//! The `build_all` test regenerates every fixture in a single run.
+//!
+//! Notes:
+//! - `tests/fixtures/tiny.json.gz` is a real samply profile recorded with:
+//!   `samply record /Users/moritz/.cargo/bin/rustfmt --version`
+//!   It is NOT regenerated here — keep it as-is.
+//! - `tests/fixtures/tiny_program.c` is C source for an e2e test, not a JSON fixture.
+//! - `minimal_profile.json` and `source_attribution.json` are inlined JSON literals
+//!   because fxprof's `Frame::Label` doesn't carry source info, and minimal has no
+//!   samples so there's no benefit to generating it programmatically.
+
+#[path = "helpers/mod.rs"]
+mod helpers;
+
+use helpers::synthetic::{build_simple_profile, SampleSpec};
+use std::fs;
+
+const FIXTURES_DIR: &str = "tests/fixtures";
+
+fn write_fixture(name: &str, contents: &str) {
+    let path = format!("{}/{}", FIXTURES_DIR, name);
+    fs::write(&path, contents).unwrap_or_else(|e| panic!("writing {}: {}", path, e));
+    eprintln!("wrote {}", path);
+}
+
+#[test]
+#[ignore]
+fn build_minimal_profile() {
+    // Empty tables, single thread "Main" tid=1 pid=1.
+    // Hand-authored: no samples to generate programmatically.
+    let json = r#"{
+    "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+    "libs": [],
+    "threads": [{
+        "name": "Main",
+        "tid": 1,
+        "pid": 1,
+        "registerTime": 0.0,
+        "stringArray": ["foo", "bar"],
+        "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "innerWindowID": [], "implementation": [], "line": [], "column": [], "nativeSymbol": []},
+        "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+        "samples": {"length": 0, "stack": [], "time": [], "weight": null, "weightType": "samples"},
+        "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+        "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+        "markers": {"length": 0, "data": [], "name": [], "startTime": [], "endTime": [], "phase": [], "category": []},
+        "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []},
+        "processType": "default",
+        "processStartupTime": 0.0
+    }]
+}"#;
+    write_fixture("minimal_profile.json", json);
+}
+
+#[test]
+#[ignore]
+fn build_two_functions() {
+    let json = build_simple_profile(
+        "two_functions",
+        &[
+            SampleSpec {
+                stack: &[("hot", "")],
+                count: 90,
+            },
+            SampleSpec {
+                stack: &[("cold", "")],
+                count: 10,
+            },
+        ],
+    );
+    write_fixture("two_functions.json", &json);
+}
+
+#[test]
+#[ignore]
+fn build_linear_chain() {
+    let json = build_simple_profile(
+        "linear_chain",
+        &[SampleSpec {
+            stack: &[("a", ""), ("b", ""), ("c", ""), ("d", "")],
+            count: 100,
+        }],
+    );
+    write_fixture("linear_chain.json", &json);
+}
+
+#[test]
+#[ignore]
+fn build_paths_to() {
+    let json = build_simple_profile(
+        "paths_to",
+        &[
+            SampleSpec {
+                stack: &[("a", ""), ("b", ""), ("lock_acquire", "")],
+                count: 50,
+            },
+            SampleSpec {
+                stack: &[("a", ""), ("c", ""), ("work", "")],
+                count: 50,
+            },
+        ],
+    );
+    write_fixture("paths_to.json", &json);
+}
+
+#[test]
+#[ignore]
+fn build_stacks_containing() {
+    let json = build_simple_profile(
+        "stacks_containing",
+        &[
+            SampleSpec {
+                stack: &[("main", ""), ("do_work", ""), ("alloc_buf", "")],
+                count: 10,
+            },
+            SampleSpec {
+                stack: &[("main", ""), ("do_work", ""), ("alloc_str", "")],
+                count: 10,
+            },
+            SampleSpec {
+                stack: &[("main", ""), ("do_work", ""), ("compute", "")],
+                count: 10,
+            },
+        ],
+    );
+    write_fixture("stacks_containing.json", &json);
+}
+
+#[test]
+#[ignore]
+fn build_source_attribution() {
+    // Hand-authored JSON with per-frame line numbers.
+    // fxprof's Frame::Label doesn't carry source info, so we inline the JSON directly.
+    // Function "process_request" in "src/server.rs": 20 samples, 10 on line 3 and 10 on line 4.
+    let json = r#"{
+  "meta": {
+    "interval": 1.0,
+    "startTime": 0.0,
+    "product": "test"
+  },
+  "libs": [],
+  "threads": [
+    {
+      "name": "Main",
+      "tid": 1,
+      "pid": 1,
+      "registerTime": 0.0,
+      "stringArray": [
+        "process_request",
+        "src/server.rs"
+      ],
+      "frameTable": {
+        "length": 2,
+        "address": [
+          -1,
+          -1
+        ],
+        "func": [
+          0,
+          0
+        ],
+        "category": [
+          null,
+          null
+        ],
+        "subcategory": [
+          null,
+          null
+        ],
+        "innerWindowID": [
+          null,
+          null
+        ],
+        "implementation": [
+          null,
+          null
+        ],
+        "line": [
+          3,
+          4
+        ],
+        "column": [
+          null,
+          null
+        ],
+        "nativeSymbol": [
+          null,
+          null
+        ]
+      },
+      "stackTable": {
+        "length": 2,
+        "frame": [
+          0,
+          1
+        ],
+        "category": [
+          0,
+          0
+        ],
+        "subcategory": [
+          0,
+          0
+        ],
+        "prefix": [
+          null,
+          null
+        ]
+      },
+      "samples": {
+        "length": 20,
+        "stack": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1,
+          1
+        ],
+        "time": [
+          0.0,
+          1.0,
+          2.0,
+          3.0,
+          4.0,
+          5.0,
+          6.0,
+          7.0,
+          8.0,
+          9.0,
+          10.0,
+          11.0,
+          12.0,
+          13.0,
+          14.0,
+          15.0,
+          16.0,
+          17.0,
+          18.0,
+          19.0
+        ],
+        "weight": null,
+        "weightType": "samples"
+      },
+      "funcTable": {
+        "length": 1,
+        "name": [
+          0
+        ],
+        "isJS": [
+          false
+        ],
+        "relevantForJS": [
+          false
+        ],
+        "resource": [
+          -1
+        ],
+        "fileName": [
+          1
+        ],
+        "lineNumber": [
+          null
+        ],
+        "columnNumber": [
+          null
+        ]
+      },
+      "resourceTable": {
+        "length": 0,
+        "lib": [],
+        "name": [],
+        "host": [],
+        "type": []
+      },
+      "markers": {
+        "length": 0,
+        "data": [],
+        "name": [],
+        "startTime": [],
+        "endTime": [],
+        "phase": [],
+        "category": []
+      },
+      "nativeSymbols": {
+        "length": 0,
+        "libIndex": [],
+        "address": [],
+        "name": [],
+        "functionSize": []
+      },
+      "processType": "default",
+      "processStartupTime": 0.0
+    }
+  ]
+}"#;
+    write_fixture("source_attribution.json", json);
+}
+
+/// Regenerate all fixtures in one run.
+///
+/// Equivalent to: `cargo test --test build_fixtures -- --ignored`
+#[test]
+#[ignore]
+fn build_all() {
+    build_minimal_profile();
+    build_two_functions();
+    build_linear_chain();
+    build_paths_to();
+    build_stacks_containing();
+    build_source_attribution();
+}
