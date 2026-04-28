@@ -314,7 +314,7 @@ async fn refine_bounds_via_symbol_map(
     Some((info.symbol.address, info.symbol.size))
 }
 
-fn build_library_info(lib: &crate::profile::raw::RawLib) -> wholesym::LibraryInfo {
+pub(crate) fn build_library_info(lib: &crate::profile::raw::RawLib) -> wholesym::LibraryInfo {
     use std::str::FromStr;
     wholesym::LibraryInfo {
         name: lib.name.clone(),

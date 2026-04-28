@@ -55,7 +55,7 @@ impl PollardServer {
             with_samples: args.with_samples.unwrap_or(true),
             whole_file: args.whole_file.unwrap_or(false),
         };
-        let result = source::source_for_function(session.profile(), &q_args)?;
+        let result = source::source_for_function(session.profile(), &q_args).await?;
         Ok(Json(result))
     }
 

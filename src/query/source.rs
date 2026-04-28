@@ -5,6 +5,7 @@
 use crate::error::{FunctionCandidate, ToolError};
 use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
 use crate::profile::Profile;
+use crate::profile::raw::RawLib;
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -34,6 +35,20 @@ pub struct ResolvedSource {
     pub content: String,
 }
 
+/// Carries the bits needed to resolve source via samply-api `/source/v1`:
+/// the lib's debug identity (debug_name + breakpad_id) and an address inside
+/// the matched function (so the API can map back to the file).
+#[derive(Debug, Clone)]
+struct FetchContext {
+    file: String,
+    /// Library-relative offset of any sample inside the matched function.
+    /// `None` means we can't make the API call and must rely on disk fallback.
+    module_offset: Option<u32>,
+    /// Lib metadata (debug_name + breakpad_id). Cloned so the context can
+    /// outlive the borrow of `Profile`.
+    lib: Option<RawLib>,
+}
+
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct SourceListing {
     pub function: String,
@@ -56,12 +71,15 @@ pub struct SourceLine {
     pub code: String,
 }
 
-pub fn source_for_function(profile: &Profile, args: &Args) -> Result<SourceListing, ToolError> {
+pub async fn source_for_function(
+    profile: &Profile,
+    args: &Args,
+) -> Result<SourceListing, ToolError> {
     let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
         message: e.to_string(),
     })?;
-    let (file, _samples_per_line, _total) = attribute(profile, &matcher, args.module.as_deref())?;
-    let resolved = fetch_source(profile, &file)?;
+    let (ctx, _samples_per_line, _total) = attribute(profile, &matcher, args.module.as_deref())?;
+    let resolved = fetch_source(profile, &ctx).await?;
     build_listing(
         profile,
         &args.function,
@@ -76,10 +94,12 @@ fn attribute(
     profile: &Profile,
     matcher: &FunctionMatcher,
     module_filter: Option<&str>,
-) -> Result<(String, HashMap<u32, u64>, u64), ToolError> {
+) -> Result<(FetchContext, HashMap<u32, u64>, u64), ToolError> {
     let mut samples_per_line: HashMap<u32, u64> = HashMap::new();
     let mut total: u64 = 0;
     let mut file: Option<String> = None;
+    let mut ctx_lib: Option<RawLib> = None;
+    let mut ctx_offset: Option<u32> = None;
     // Track which distinct (function, module) pairs the matcher hit, so we
     // can surface ambiguity instead of silently merging samples across
     // unrelated functions that happen to share a substring.
@@ -109,6 +129,17 @@ fn attribute(
                 *matched_pairs.entry(key).or_default() += 1;
                 if file.is_none() {
                     file = info.file.map(str::to_owned);
+                    ctx_lib = info.lib.cloned();
+                }
+                // Capture the first usable address — needed to anchor the
+                // samply-api `/source/v1` lookup. Frame addresses are stored
+                // as `i64` (negative = unknown); samply-api expects a u32
+                // library-relative offset.
+                if ctx_offset.is_none()
+                    && let Some(addr) = info.address
+                    && let Ok(off) = u32::try_from(addr)
+                {
+                    ctx_offset = Some(off);
                 }
                 if let Some(line) = info.line {
                     *samples_per_line.entry(line).or_default() += 1;
@@ -138,7 +169,12 @@ fn attribute(
             matcher_to_string(matcher),
         ),
     })?;
-    Ok((file, samples_per_line, total))
+    let ctx = FetchContext {
+        file,
+        module_offset: ctx_offset,
+        lib: ctx_lib,
+    };
+    Ok((ctx, samples_per_line, total))
 }
 
 /// Sort matched (function, module) pairs by sample count desc and convert
@@ -152,29 +188,81 @@ fn rank_candidates(pairs: HashMap<(String, String), u64>) -> Vec<FunctionCandida
         .collect()
 }
 
-fn fetch_source(_profile: &Profile, file: &str) -> Result<ResolvedSource, ToolError> {
-    let path = std::path::Path::new(file);
+async fn fetch_source(_profile: &Profile, ctx: &FetchContext) -> Result<ResolvedSource, ToolError> {
+    // Try samply-api `/source/v1` first — this is what samply itself uses to
+    // surface registry / std-lib / build-system-relative paths in the Firefox
+    // profiler UI. Falls back to local disk when the lib isn't reachable
+    // (e.g. test fixtures with stripped paths) or the API can't resolve.
+    if let Some(lib) = &ctx.lib
+        && let Some(offset) = ctx.module_offset
+        && let Some(resolved) = try_samply_source_api(lib, offset, &ctx.file).await
+    {
+        return Ok(resolved);
+    }
+
+    let path = std::path::Path::new(&ctx.file);
     if path.is_absolute() && path.exists() {
         let content = std::fs::read_to_string(path).map_err(|e| ToolError::Internal {
             message: e.to_string(),
         })?;
-        let language = match path.extension().and_then(|e| e.to_str()) {
-            Some("rs") => Some("rust".to_owned()),
-            Some("c") => Some("c".to_owned()),
-            Some("cpp" | "cc" | "cxx") => Some("cpp".to_owned()),
-            Some("py") => Some("python".to_owned()),
-            _ => None,
-        };
         Ok(ResolvedSource {
-            file: file.to_owned(),
-            language,
+            file: ctx.file.clone(),
+            language: guess_language(&ctx.file),
             content,
         })
     } else {
         Err(ToolError::Internal {
-            message: format!("source file unavailable: {}", file),
+            message: format!("source file unavailable: {}", ctx.file),
         })
     }
+}
+
+fn guess_language(file: &str) -> Option<String> {
+    let path = std::path::Path::new(file);
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => Some("rust".to_owned()),
+        Some("c") => Some("c".to_owned()),
+        Some("cpp" | "cc" | "cxx") => Some("cpp".to_owned()),
+        Some("py") => Some("python".to_owned()),
+        _ => None,
+    }
+}
+
+/// Resolve `file` via wholesym + samply-api `/source/v1`. Returns `None` on
+/// any failure (lib not loadable, address not in the symbol map, file not
+/// permitted, JSON shape unexpected) so the caller can try the disk fallback.
+async fn try_samply_source_api(
+    lib: &RawLib,
+    module_offset: u32,
+    file: &str,
+) -> Option<ResolvedSource> {
+    use wholesym::{SymbolManager, SymbolManagerConfig};
+
+    let debug_name = lib.debug_name.as_deref()?;
+    let debug_id = lib.breakpad_id.as_deref()?;
+
+    let config = SymbolManagerConfig::new().use_spotlight(true);
+    let mut manager = SymbolManager::with_config(config);
+    manager.add_known_library(crate::query::asm::build_library_info(lib));
+
+    let request = serde_json::json!({
+        "debugName": debug_name,
+        "debugId": debug_id,
+        "moduleOffset": format!("0x{module_offset:x}"),
+        "file": file,
+    })
+    .to_string();
+    let response_json = manager.query_json_api("/source/v1", &request).await;
+    let value: serde_json::Value = serde_json::from_str(&response_json).ok()?;
+    if value.get("error").is_some() {
+        return None;
+    }
+    let source = value.get("source")?.as_str()?.to_owned();
+    Some(ResolvedSource {
+        file: file.to_owned(),
+        language: guess_language(file),
+        content: source,
+    })
 }
 
 pub fn build_listing(
@@ -339,8 +427,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_substring_returns_function_ambiguous() {
+    #[tokio::test]
+    async fn ambiguous_substring_returns_function_ambiguous() {
         // two_functions.json has both `hot` and `cold` — substring "o" hits
         // both. Without ambiguity detection, samples would silently merge
         // across the two functions.
@@ -355,6 +443,7 @@ mod tests {
                 ..Default::default()
             },
         )
+        .await
         .unwrap_err();
 
         match err {

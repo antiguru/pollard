@@ -42,7 +42,6 @@ async fn source_for_inner_loop() {
     let (id, _evicted) = registry.load(out.path(), None).await.unwrap();
     let session = registry.get(&id).await.unwrap();
 
-    // source_for_function is SYNCHRONOUS — no .await.
     let listing = pollard::query::source::source_for_function(
         session.profile(),
         &pollard::query::source::Args {
@@ -50,6 +49,7 @@ async fn source_for_inner_loop() {
             ..Default::default()
         },
     )
+    .await
     .unwrap();
 
     // At least one line inside inner_loop should have nonzero samples.

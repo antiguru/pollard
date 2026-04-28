@@ -40,6 +40,7 @@ pub struct FrameInfo<'a> {
     pub line: Option<u32>,
     pub column: Option<u32>,
     pub address: Option<i64>,
+    pub lib: Option<&'a RawLib>,
 }
 
 pub struct ThreadView<'a> {
@@ -121,13 +122,18 @@ impl Profile {
             .get(func_idx)
             .copied()
             .unwrap_or(-1);
-        let module_name = if resource_idx >= 0 {
-            let r = thread.resource_table.lib.get(resource_idx as usize)?;
-            r.and_then(|li| self.lib(li))
-                .and_then(|l| l.name.as_deref())
+        let lib = if resource_idx >= 0 {
+            thread
+                .resource_table
+                .lib
+                .get(resource_idx as usize)
+                .copied()
+                .flatten()
+                .and_then(|li| self.lib(li))
         } else {
             None
         };
+        let module_name = lib.and_then(|l| l.name.as_deref());
 
         let file = thread
             .func_table
@@ -147,6 +153,7 @@ impl Profile {
             line,
             column,
             address,
+            lib,
         })
     }
 
