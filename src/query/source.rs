@@ -82,6 +82,7 @@ fn attribute(
     let mut samples_per_line: HashMap<u32, u64> = HashMap::new();
     let mut total: u64 = 0;
     let mut file: Option<String> = None;
+    let mut any_match = false;
 
     for thread in profile.threads() {
         let handle = thread.handle();
@@ -98,20 +99,31 @@ fn attribute(
                 {
                     continue;
                 }
+                any_match = true;
+                if file.is_none() {
+                    file = info.file.map(str::to_owned);
+                }
                 if let Some(line) = info.line {
                     *samples_per_line.entry(line).or_default() += 1;
                     total += 1;
-                    if file.is_none() {
-                        file = info.file.map(str::to_owned);
-                    }
                 }
             }
         }
     }
 
-    let file = file.ok_or_else(|| ToolError::FunctionNotFound {
-        function: matcher_to_string(matcher),
-        nearest_matches: nearest_function_names(profile, matcher),
+    if !any_match {
+        return Err(ToolError::FunctionNotFound {
+            function: matcher_to_string(matcher),
+            nearest_matches: nearest_function_names(profile, matcher),
+        });
+    }
+    let file = file.ok_or_else(|| ToolError::Internal {
+        message: format!(
+            "function `{}` exists in profile but has no source-line information \
+             (DWARF/dSYM not available — try rebuilding with debug info or pointing \
+             to the .dSYM bundle)",
+            matcher_to_string(matcher),
+        ),
     })?;
     Ok((file, samples_per_line, total))
 }
@@ -257,5 +269,69 @@ mod tests {
 
         // Lines 2 (parse) and 3 (validate) should have sample attributions per the fixture.
         assert!(listing.lines.iter().any(|l| l.line == 3 && l.samples > 0));
+    }
+
+    #[test]
+    fn function_present_without_line_info_returns_internal_not_function_not_found() {
+        // two_functions.json has frames for `hot` but no per-frame line numbers.
+        let raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/two_functions.json"
+        ))
+        .unwrap();
+        let profile = Profile::from_raw(raw);
+
+        let err = build_listing(
+            &profile,
+            "hot",
+            None,
+            ResolvedSource {
+                file: "x.rs".to_owned(),
+                language: None,
+                content: "// dummy\n".to_owned(),
+            },
+            true,
+            false,
+        )
+        .unwrap_err();
+
+        match err {
+            ToolError::Internal { message } => {
+                assert!(
+                    message.contains("source-line information"),
+                    "unexpected message: {}",
+                    message
+                );
+            }
+            other => panic!("expected Internal, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn truly_absent_function_returns_function_not_found() {
+        let raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/two_functions.json"
+        ))
+        .unwrap();
+        let profile = Profile::from_raw(raw);
+
+        let err = build_listing(
+            &profile,
+            "definitely_not_in_profile",
+            None,
+            ResolvedSource {
+                file: "x.rs".to_owned(),
+                language: None,
+                content: "// dummy\n".to_owned(),
+            },
+            true,
+            false,
+        )
+        .unwrap_err();
+
+        assert!(
+            matches!(err, ToolError::FunctionNotFound { .. }),
+            "expected FunctionNotFound, got {:?}",
+            err
+        );
     }
 }
