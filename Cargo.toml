@@ -17,6 +17,9 @@ path = "src/lib.rs"
 name = "pollard"
 path = "src/main.rs"
 
+[features]
+e2e = []
+
 [dependencies]
 rmcp = { version = "1.5", features = ["server", "transport-io", "macros"] }
 schemars = "1.0"

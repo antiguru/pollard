@@ -59,3 +59,21 @@ jobs:
           components: clippy
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  e2e:
+    needs: msrv
+    name: e2e on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}-latest
+    strategy:
+      matrix:
+        os:
+          - ubuntu
+    env:
+      POLLARD_E2E: "1"
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: Install samply
+        run: cargo install samply --locked
+      - name: Cargo test (e2e)
+        run: cargo test --features e2e -- --include-ignored
