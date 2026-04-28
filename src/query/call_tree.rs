@@ -127,6 +127,19 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     }
 
     let mut tree = build_node(&root, total_samples, "ROOT".into(), None, args, 0);
+    if let Some(Node::Frame(frame)) = tree.as_mut() {
+        // Hoist single real root: if synthetic ROOT has exactly one Frame child,
+        // replace ROOT with that child so it becomes the visible root.
+        let single_real_child = matches!(frame.children.as_slice(), [Node::Frame(_)]);
+        if frame.function == "ROOT" && single_real_child {
+            if let Node::Frame(child) = frame.children.remove(0) {
+                *frame = child;
+            }
+        } else if frame.function == "ROOT" && frame.children.len() > 1 {
+            // Multiple real roots — keep synthetic but rename for clarity.
+            frame.function = "<multiple roots>".to_owned();
+        }
+    }
     if let Some(node) = tree.as_mut() {
         compress_chains(node);
     }
@@ -342,11 +355,9 @@ mod tests {
         .unwrap();
         let root = tree.tree.expect("tree present");
         if let Node::Frame(f) = root {
-            // Task 18: root_function="hot" trims to stacks containing "hot".
-            // Only the [hot] stack survives → synthetic ROOT has 1 child "hot",
-            // which compresses into ROOT's chain. After Task 20 hoists, this
-            // assertion will be updated to f.function == "hot".
-            assert_eq!(f.chain.as_deref(), Some(&["hot".to_owned()][..]));
+            assert_eq!(f.function, "hot");
+            // No chain because the only stack was [hot] with no children.
+            assert!(f.chain.is_none() || f.chain.as_deref() == Some(&[][..]));
             assert_eq!(tree.total_samples, 90);
         } else {
             panic!("expected frame root");
@@ -373,6 +384,21 @@ mod tests {
     }
 
     #[test]
+    fn single_root_hoisted() {
+        let raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/linear_chain.json"
+        ))
+        .unwrap();
+        let profile = Profile::from_raw(raw);
+        let tree = call_tree(&profile, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
+        if let Some(Node::Frame(f)) = tree.tree {
+            assert_eq!(f.function, "a");
+        } else {
+            panic!("expected frame root");
+        }
+    }
+
+    #[test]
     fn collapses_linear_chain() {
         let raw: RawProfile = serde_json::from_str(include_str!(
             "../../tests/fixtures/linear_chain.json"
@@ -382,15 +408,10 @@ mod tests {
         let tree = call_tree(&profile, &Args { min_pct: 0.0, ..Default::default() }).unwrap();
         let root = tree.tree.unwrap();
         if let Node::Frame(f) = root {
-            // Task 17: compression collapses ROOT → [a, b, c, d] because every node
-            // has exactly one Frame child. Single-root hoisting (Task 20) will later
-            // change this to function="a", chain=["b","c","d"]; this assertion will
-            // be updated in that task.
+            assert_eq!(f.function, "a");
             assert_eq!(
                 f.chain.as_deref(),
-                Some(
-                    &["a".to_owned(), "b".to_owned(), "c".to_owned(), "d".to_owned()][..]
-                )
+                Some(&["b".to_owned(), "c".to_owned(), "d".to_owned()][..])
             );
         } else {
             panic!("expected frame root");
