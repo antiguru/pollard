@@ -1,11 +1,11 @@
-//! Smoke test: spawn pollard, ask for tool list, assert all 10 tools are present.
+//! Smoke test: spawn pollard, ask for tool list, assert all 11 tools are present.
 
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 
 #[tokio::test]
-async fn lists_all_ten_tools() {
+async fn lists_all_eleven_tools() {
     let bin = env!("CARGO_BIN_EXE_pollard");
     let mut child = Command::new(bin)
         .stdin(Stdio::piped())
@@ -73,6 +73,7 @@ async fn lists_all_ten_tools() {
         "folded_stacks",
         "source_for_function",
         "asm_for_function",
+        "address_to_function",
     ] {
         assert!(names.contains(expected), "missing tool: {}", expected);
     }
