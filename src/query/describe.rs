@@ -12,6 +12,9 @@ pub struct ProfileDescription {
     pub name: String,
     pub path: String,
     pub duration_ms: f64,
+    /// Sampling interval in milliseconds, as recorded in `meta.interval`.
+    pub interval_ms: f64,
+    /// Derived sampling rate: `1000.0 / interval_ms`, or 0 if interval is 0.
     pub sample_rate_hz: f64,
     pub total_samples: u64,
     pub unsymbolicated_pct: f32,
@@ -97,6 +100,7 @@ pub fn describe(
         name: name.to_owned(),
         path: path.to_owned(),
         duration_ms: profile.duration_ms(),
+        interval_ms,
         sample_rate_hz,
         total_samples,
         unsymbolicated_pct,
@@ -150,5 +154,35 @@ mod tests {
         assert_eq!(desc.processes.len(), 1);
         assert_eq!(desc.processes[0].pid, "42");
         assert_eq!(desc.processes[0].name, "rustfmt");
+    }
+
+    #[test]
+    fn surfaces_interval_and_sample_rate() {
+        // 1ms interval → 1 kHz sampling rate.
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": []
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let desc = describe(&profile, "id", "n", "/tmp/p", 0.0);
+        assert_eq!(desc.interval_ms, 1.0);
+        assert_eq!(desc.sample_rate_hz, 1000.0);
+    }
+
+    #[test]
+    fn zero_interval_yields_zero_rate() {
+        // Defensive: synthetic profile with interval=0 must not divide by zero.
+        let json = r#"{
+            "meta": {"interval": 0.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": []
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let desc = describe(&profile, "id", "n", "/tmp/p", 0.0);
+        assert_eq!(desc.interval_ms, 0.0);
+        assert_eq!(desc.sample_rate_hz, 0.0);
     }
 }

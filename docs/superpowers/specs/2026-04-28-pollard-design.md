@@ -350,6 +350,7 @@ returns every line.
   "name": "myapp-trace",
   "path": "/tmp/myapp.json.gz",
   "duration_ms": 30000,
+  "interval_ms": 1.0,
   "sample_rate_hz": 1000,
   "total_samples": 750000,
   "unsymbolicated_pct": 0.4,
