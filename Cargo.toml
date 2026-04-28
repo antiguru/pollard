@@ -24,7 +24,7 @@ e2e = []
 rmcp = { version = "1.5", features = ["server", "transport-io", "macros"] }
 schemars = "1.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "process"] }
-wholesym = "0.8"
+wholesym = { version = "0.8", features = ["api"] }
 samply-api = "0.24"
 samply-symbols = "0.24"
 fxprof-processed-profile = "0.8"

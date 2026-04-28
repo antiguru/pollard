@@ -60,18 +60,18 @@ impl PollardServer {
         Ok(Json(result))
     }
 
-    #[tool(name = "asm_for_function", description = "Disassembly with per-instruction sample counts. v1 stub.")]
+    #[tool(name = "asm_for_function", description = "Disassembly with per-instruction sample counts.")]
     pub async fn asm_for_function(
         &self,
         Parameters(args): Parameters<AsmForFunctionArgs>,
     ) -> Result<Json<asm::AsmListing>, ErrorData> {
-        let _ = session(self, &args.profile_id).await?;
+        let session = session(self, &args.profile_id).await?;
         let q_args = asm::Args {
             function: args.function,
             module: args.module,
             with_samples: args.with_samples.unwrap_or(true),
         };
-        let result = asm::asm_for_function(&q_args).await?;
+        let result = asm::asm_for_function(session.profile(), &q_args).await?;
         Ok(Json(result))
     }
 }

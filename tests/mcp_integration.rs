@@ -291,9 +291,10 @@ async fn source_for_function_with_unknown_function_returns_function_not_found() 
     srv.kill().await;
 }
 
-/// `asm_for_function` is a v1 stub — always returns an internal error.
+/// `asm_for_function` with a synthetic profile (no native addresses/libs) returns
+/// an error because the function cannot be disassembled.
 #[tokio::test]
-async fn asm_for_function_returns_stub_error() {
+async fn asm_for_function_returns_error_for_synthetic_profile() {
     let mut srv = Server::spawn().await;
     let path = fixture("two_functions.json");
     let pid = srv.load_fixture(1, &path).await;
@@ -306,14 +307,10 @@ async fn asm_for_function_returns_stub_error() {
         )
         .await;
 
-    // The stub returns ToolError::Internal; should surface as a JSON-RPC error.
+    // Synthetic fixtures have no native addresses, so the function cannot be
+    // located for disassembly — expect function_not_found or internal error.
     let err = &resp["error"];
     assert!(err.is_object(), "expected a JSON-RPC error; got {resp}");
-    let msg = err["message"].as_str().unwrap_or("");
-    assert!(
-        msg.contains("not") || msg.contains("stub") || msg.contains("implement"),
-        "unexpected error message: {msg}; full response={resp}"
-    );
 
     srv.kill().await;
 }
