@@ -7,4 +7,5 @@ pub mod filters;
 pub mod folded;
 pub mod source;
 pub mod stacks_containing;
+pub mod summary;
 pub mod top_functions;

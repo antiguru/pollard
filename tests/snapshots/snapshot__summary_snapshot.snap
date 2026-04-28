@@ -1,0 +1,232 @@
+---
+source: tests/snapshot.rs
+expression: result
+---
+{
+  "profile_id": "[id]",
+  "name": "tiny",
+  "duration_ms": "[duration]",
+  "interval_ms": 1.0,
+  "sample_rate_hz": 1000.0,
+  "total_samples": "[total]",
+  "time_range_ms": "[range]",
+  "unsymbolicated_pct": "[pct]",
+  "unsymbolicated_bracket": "0%",
+  "dominant_thread": {
+    "tid": 1969261,
+    "name": "tokio-runtime-w",
+    "pid": "1969186.1",
+    "samples": "[n]",
+    "samples_pct": "[pct]"
+  },
+  "top_modules": [
+    {
+      "rank": 1,
+      "module": "libc.so.6",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 2,
+      "module": "rustup",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 3,
+      "module": "ld-linux-x86-64.so.2",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 4,
+      "module": "[vdso]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    }
+  ],
+  "top_self_functions": [
+    {
+      "rank": 1,
+      "function": "0x114df9",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 2,
+      "function": "0x112c69",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 3,
+      "function": "0x422000",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 4,
+      "function": "0xe1cf7",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 5,
+      "function": "0x111aa7",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 6,
+      "function": "0x1478",
+      "module": "[vdso]",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 7,
+      "function": "0x23c72",
+      "module": "ld-linux-x86-64.so.2",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 8,
+      "function": "0x3a1c78",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 9,
+      "function": "0x725232",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 10,
+      "function": "0x7f2eda66bcf7",
+      "module": null,
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    }
+  ],
+  "top_total_functions": [
+    {
+      "rank": 1,
+      "function": "0x114df9",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 2,
+      "function": "0x114e07",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 3,
+      "function": "0x95da8",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 4,
+      "function": "0x6faff7",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 5,
+      "function": "0x71d579",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 6,
+      "function": "0x112c69",
+      "module": "libc.so.6",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 7,
+      "function": "0x197295",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 8,
+      "function": "0x71bc2f",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 9,
+      "function": "0x71b5c3",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 10,
+      "function": "0x726325",
+      "module": "rustup",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    }
+  ]
+}
