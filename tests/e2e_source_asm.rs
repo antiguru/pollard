@@ -1,29 +1,17 @@
 //! End-to-end: build + record + load + source_for_function.
 //!
-//! Skipped on macOS because samply records unsymbolicated profiles there
-//! (frames carry hex addresses, not function names), so `source_for_function`
-//! cannot resolve `inner_loop`. Linux CI provides real coverage.
-//!
-//! Requires (on Linux):
+//! Requires:
 //!   - `cc` on PATH
 //!   - `samply` on PATH
 //!   - `POLLARD_E2E=1` (so build.rs compiles the fixture binary)
 //!   - `--features e2e` (so this test runs instead of being ignored)
 //!
-//! Run locally on Linux:
+//! Run locally:
 //!   POLLARD_E2E=1 cargo test --features e2e -- --include-ignored
 
 #[tokio::test]
 #[cfg_attr(not(feature = "e2e"), ignore)]
 async fn source_for_inner_loop() {
-    if cfg!(target_os = "macos") {
-        eprintln!(
-            "skipping source_for_inner_loop on macOS: samply does not symbolicate here, \
-             so source_for_function cannot resolve `inner_loop`. Run this test in Linux CI."
-        );
-        return;
-    }
-
     let samply_bin = "samply";
 
     // The build.rs script compiles target/tiny_program when POLLARD_E2E is set.

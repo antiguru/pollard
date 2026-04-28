@@ -11,6 +11,7 @@
 pub mod load;
 pub mod parsed;
 pub mod raw;
+pub mod symbolicate;
 
 pub use load::load_from_path;
 #[allow(unused_imports)]

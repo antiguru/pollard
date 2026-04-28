@@ -1,6 +1,5 @@
 ---
 source: tests/snapshot.rs
-assertion_line: 52
 expression: result
 ---
 {
@@ -48,33 +47,6 @@ expression: result
     },
     {
       "rank": 5,
-      "function": "0x1b5954",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 6,
-      "function": "0x210398",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 7,
-      "function": "0x2e3a9d0",
-      "module": "librustc_driver-eea6b8737cd03a8e.dylib",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 8,
       "function": "0x4600",
       "module": "libdispatch.dylib",
       "self_samples": "[n]",
@@ -83,16 +55,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 9,
-      "function": "0x4dd62fc",
-      "module": "librustc_driver-eea6b8737cd03a8e.dylib",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 10,
+      "rank": 6,
       "function": "0x74f1c",
       "module": "dyld",
       "self_samples": "[n]",
@@ -101,7 +64,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 11,
+      "rank": 7,
       "function": "0xc34",
       "module": "libsystem_kernel.dylib",
       "self_samples": "[n]",
@@ -110,7 +73,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 12,
+      "rank": 8,
       "function": "0xc884",
       "module": "libsystem_kernel.dylib",
       "self_samples": "[n]",
@@ -119,16 +82,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 13,
-      "function": "0xd50d8",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 14,
+      "rank": 9,
       "function": "0xddd0",
       "module": "libsystem_kernel.dylib",
       "self_samples": "[n]",
@@ -137,34 +91,52 @@ expression: result
       "total_pct": "[pct]"
     },
     {
+      "rank": 10,
+      "function": "<std::io::stdio::Stdout>::lock",
+      "module": "librustc_driver-eea6b8737cd03a8e.dylib",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 11,
+      "function": "llvm::cl::opt<unsigned int, false, llvm::cl::parser<unsigned int> >::opt<char [21], llvm::cl::OptionHidden, llvm::cl::desc>()",
+      "module": "librustc_driver-eea6b8737cd03a8e.dylib",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 12,
+      "function": "regex_automata::hybrid::dfa::Lazy::init_cache",
+      "module": "rustfmt",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 13,
+      "function": "regex_syntax::ast::parse::Primitive::into_class_literal",
+      "module": "rustfmt",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 14,
+      "function": "rustfmt::main",
+      "module": "rustfmt",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
       "rank": 15,
-      "function": "0x10ab1b",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 16,
-      "function": "0x10abaf",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 17,
-      "function": "0x1277f",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 18,
       "function": "0x13573",
       "module": "libsystem_kernel.dylib",
       "self_samples": "[n]",
@@ -173,7 +145,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 19,
+      "rank": 16,
       "function": "0x14d7f",
       "module": "libcurl.4.dylib",
       "self_samples": "[n]",
@@ -182,7 +154,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 20,
+      "rank": 17,
       "function": "0x14e53",
       "module": "libcurl.4.dylib",
       "self_samples": "[n]",
@@ -191,16 +163,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 21,
-      "function": "0x16ee63",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 22,
+      "rank": 18,
       "function": "0x1712b7",
       "module": "CoreFoundation",
       "self_samples": "[n]",
@@ -209,25 +172,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 23,
-      "function": "0x1a2a83",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 24,
-      "function": "0x1b11a3",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 25,
+      "rank": 19,
       "function": "0x1b4623",
       "module": "CoreFoundation",
       "self_samples": "[n]",
@@ -236,7 +181,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 26,
+      "rank": 20,
       "function": "0x1b48cf",
       "module": "CoreFoundation",
       "self_samples": "[n]",
@@ -245,16 +190,7 @@ expression: result
       "total_pct": "[pct]"
     },
     {
-      "rank": 27,
-      "function": "0x1ba74f",
-      "module": "rustfmt",
-      "self_samples": "[n]",
-      "self_pct": "[pct]",
-      "total_samples": "[n]",
-      "total_pct": "[pct]"
-    },
-    {
-      "rank": 28,
+      "rank": 21,
       "function": "0x1c7b",
       "module": "libsystem_info.dylib",
       "self_samples": "[n]",
@@ -263,9 +199,72 @@ expression: result
       "total_pct": "[pct]"
     },
     {
+      "rank": 22,
+      "function": "0x1f1f",
+      "module": "libsystem_info.dylib",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 23,
+      "function": "0x1f2e73",
+      "module": "CoreFoundation",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 24,
+      "function": "0x1fd4b",
+      "module": "dyld",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 25,
+      "function": "0x1fda3",
+      "module": "dyld",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 26,
+      "function": "0x201b",
+      "module": "SystemConfiguration",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 27,
+      "function": "0x203ef",
+      "module": "dyld",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
+      "rank": 28,
+      "function": "0x21333",
+      "module": "dyld",
+      "self_samples": "[n]",
+      "self_pct": "[pct]",
+      "total_samples": "[n]",
+      "total_pct": "[pct]"
+    },
+    {
       "rank": 29,
-      "function": "0x1e6833",
-      "module": "rustfmt",
+      "function": "0x2137f",
+      "module": "dyld",
       "self_samples": "[n]",
       "self_pct": "[pct]",
       "total_samples": "[n]",
@@ -273,8 +272,8 @@ expression: result
     },
     {
       "rank": 30,
-      "function": "0x1e8f2b",
-      "module": "rustfmt",
+      "function": "0x2867",
+      "module": "libsystem_info.dylib",
       "self_samples": "[n]",
       "self_pct": "[pct]",
       "total_samples": "[n]",

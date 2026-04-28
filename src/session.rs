@@ -17,13 +17,15 @@ pub struct ProfileSession {
 
 #[allow(dead_code)]
 impl ProfileSession {
-    #[allow(clippy::unused_async)]
     pub async fn load(path: &Path, name: Option<&str>) -> Result<Self, ToolError> {
         let abs = path
             .canonicalize()
             .map_err(|_| ToolError::FileNotFound { path: path.to_path_buf() })?;
 
-        let raw = load_from_path(&abs)?;
+        let mut raw = load_from_path(&abs)?;
+        // Best-effort symbolication: resolve unsymbolicated frames (e.g. from
+        // macOS samply recordings) before constructing the read-only Profile.
+        crate::profile::symbolicate::symbolicate(&mut raw).await.ok();
         let profile = Arc::new(Profile::from_raw(raw));
 
         // For v1 we treat the profile as already-symbolicated by samply itself
