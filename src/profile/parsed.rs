@@ -109,6 +109,15 @@ impl Profile {
         self.raw.libs.get(idx)
     }
 
+    /// All libraries across the root profile and any sub-processes.
+    /// Order is root libs first, then per-process libs in declaration order.
+    pub fn all_libs(&self) -> impl Iterator<Item = &RawLib> + '_ {
+        self.raw
+            .libs
+            .iter()
+            .chain(self.raw.processes.iter().flat_map(|p| p.libs.iter()))
+    }
+
     /// Inline-call chain attached to a native frame (innermost-first).
     /// Empty when the frame has no DWARF inline records or symbolication
     /// hasn't run yet.

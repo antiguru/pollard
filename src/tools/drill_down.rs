@@ -1,7 +1,7 @@
 //! Drill-down MCP tools: source_for_function, asm_for_function.
 
 use crate::error::ToolError;
-use crate::query::{asm, source};
+use crate::query::{address_to_function, asm, source};
 use crate::tools::PollardServer;
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -34,6 +34,19 @@ pub struct SourceForFunctionArgs {
 }
 
 #[derive(Deserialize, JsonSchema)]
+pub struct AddressToFunctionArgs {
+    pub profile_id: String,
+    /// Library-relative address to resolve. Accepts a JSON number; for hex,
+    /// callers should pre-convert. Must fit in u32.
+    pub address: u64,
+    /// Optional substring matched against `lib.name`, `lib.debug_name`,
+    /// `lib.path`, or `lib.debug_path`. Case-sensitive. When omitted,
+    /// every loaded library is tried in order until one resolves.
+    #[serde(default)]
+    pub module: Option<String>,
+}
+
+#[derive(Deserialize, JsonSchema)]
 pub struct AsmForFunctionArgs {
     pub profile_id: String,
     pub function: String,
@@ -62,6 +75,23 @@ impl PollardServer {
             expand_inlines: args.expand_inlines.unwrap_or(false),
         };
         let result = source::source_for_function(session.profile(), &q_args).await?;
+        Ok(Json(result))
+    }
+
+    #[tool(
+        name = "address_to_function",
+        description = "Resolve a single library-relative address to a function name (and file/line where available). Diagnostic for profiles with unresolved hex offsets — wraps the same wholesym lookup pollard runs on load."
+    )]
+    pub async fn address_to_function(
+        &self,
+        Parameters(args): Parameters<AddressToFunctionArgs>,
+    ) -> Result<Json<address_to_function::Output>, ErrorData> {
+        let session = session(self, &args.profile_id).await?;
+        let q_args = address_to_function::Args {
+            address: args.address,
+            module: args.module,
+        };
+        let result = address_to_function::address_to_function(session.profile(), &q_args).await?;
         Ok(Json(result))
     }
 
