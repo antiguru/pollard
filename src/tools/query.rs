@@ -106,6 +106,12 @@ pub struct CallTreeArgs {
     /// Minimum percentage threshold for including a node (default 1.0).
     #[serde(default)]
     pub min_pct: Option<f32>,
+    /// Optional absolute-sample floor. Applied alongside `min_pct` —
+    /// a node is pruned if either threshold rejects it. Useful for flat
+    /// profiles where a percent threshold elides individually small but
+    /// collectively large contributors.
+    #[serde(default)]
+    pub min_samples: Option<u64>,
     /// Maximum tree depth (default 8).
     #[serde(default)]
     pub max_depth: Option<u32>,
@@ -178,6 +184,7 @@ impl PollardServer {
             root_function: args.root_function.clone(),
             paths_to: args.paths_to.clone(),
             min_pct: args.min_pct.unwrap_or(defaults.min_pct),
+            min_samples: args.min_samples,
             max_depth: args.max_depth.unwrap_or(defaults.max_depth),
             max_breadth: args.max_breadth.unwrap_or(defaults.max_breadth),
         };

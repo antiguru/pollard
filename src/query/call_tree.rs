@@ -17,6 +17,10 @@ pub struct Args {
     pub root_function: Option<String>,
     pub paths_to: Option<String>,
     pub min_pct: f32,
+    /// Optional absolute-sample floor applied alongside [`Self::min_pct`].
+    /// A node is pruned if *either* threshold rejects it. `None` means the
+    /// percentage threshold alone decides.
+    pub min_samples: Option<u64>,
     pub max_depth: u32,
     pub max_breadth: u32,
 }
@@ -29,6 +33,7 @@ impl Default for Args {
             root_function: None,
             paths_to: None,
             min_pct: 1.0,
+            min_samples: None,
             max_depth: 8,
             max_breadth: 5,
         }
@@ -46,6 +51,8 @@ pub struct Output {
 #[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct PruningKnobs {
     pub min_pct: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_samples: Option<u64>,
     pub max_depth: u32,
     pub max_breadth: u32,
 }
@@ -174,6 +181,7 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
         total_samples,
         pruning: PruningKnobs {
             min_pct: args.min_pct,
+            min_samples: args.min_samples,
             max_depth: args.max_depth,
             max_breadth: args.max_breadth,
         },
@@ -248,6 +256,13 @@ fn accumulate_with_root(
     }
 }
 
+/// True when either the percent threshold or the absolute-sample threshold
+/// (when set) rejects a node. Both thresholds gate independently — the node
+/// must clear *both* to be emitted.
+fn pruned(samples: u64, pct: f32, args: &Args) -> bool {
+    pct < args.min_pct || args.min_samples.is_some_and(|m| samples < m)
+}
+
 fn build_node(
     agg: &AggNode,
     total_samples: u64,
@@ -258,7 +273,7 @@ fn build_node(
 ) -> Option<Node> {
     let total = total_samples.max(1) as f32;
     let total_pct = 100.0 * agg.total_samples as f32 / total;
-    if total_pct < args.min_pct && depth > 0 {
+    if depth > 0 && pruned(agg.total_samples, total_pct, args) {
         return None;
     }
     if depth > args.max_depth {
@@ -286,7 +301,8 @@ fn build_node(
         if i as u32 >= args.max_breadth {
             emit = false;
         }
-        if 100.0 * child_agg.total_samples as f32 / total < args.min_pct {
+        let child_pct = 100.0 * child_agg.total_samples as f32 / total;
+        if pruned(child_agg.total_samples, child_pct, args) {
             emit = false;
         }
         if emit {
@@ -376,6 +392,39 @@ mod tests {
         )
         .unwrap();
         assert!(tree.tree.is_some());
+    }
+
+    #[test]
+    fn min_samples_prunes_below_floor() {
+        // two_functions.json: hot=90, cold=10. With min_samples=50, only `hot`
+        // clears the floor; `cold` is pruned even though min_pct=0 would have
+        // kept it.
+        let p = fixture();
+        let tree = call_tree(
+            &p,
+            &Args {
+                min_pct: 0.0,
+                min_samples: Some(50),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tree.pruning.min_samples, Some(50));
+        // Walk the tree; `cold` must not appear, `hot` must.
+        let names = collect_frame_names(tree.tree.as_ref());
+        assert!(names.contains(&"hot".to_owned()), "missing hot: {names:?}");
+        assert!(!names.contains(&"cold".to_owned()), "cold not pruned: {names:?}");
+    }
+
+    fn collect_frame_names(node: Option<&Node>) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(Node::Frame(f)) = node {
+            out.push(f.function.clone());
+            for c in &f.children {
+                out.extend(collect_frame_names(Some(c)));
+            }
+        }
+        out
     }
 
     #[test]
