@@ -162,6 +162,17 @@ fn token_set_coverage(needle: &[String], cand: &[String]) -> f64 {
 /// and evicts the lowest score on overflow, so a profile with millions of
 /// distinct symbols still costs the same as one with five.
 pub fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> Vec<String> {
+    nearest_function_scored(profile, matcher)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// Same ranking as [`nearest_function_names`] but exposes the raw scores so
+/// callers can apply confidence thresholds — used by [`auto_promote_match`]
+/// to decide whether a single fuzzy hit is high-confidence enough to substitute
+/// for an exact lookup.
+pub fn nearest_function_scored(profile: &Profile, matcher: &FunctionMatcher) -> Vec<(String, f64)> {
     use std::cmp::{Ordering, Reverse};
     use std::collections::BinaryHeap;
 
@@ -249,7 +260,58 @@ pub fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> V
     let mut result: Vec<(Score, String)> = heap.into_iter().map(|Reverse(t)| t).collect();
     // Sort highest score first, lexicographic tie-break.
     result.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
-    result.into_iter().map(|(_, n)| n).collect()
+    result.into_iter().map(|(s, n)| (n, s.0)).collect()
+}
+
+/// A high-confidence promotion of a fuzzy match: surfaced to the caller
+/// alongside the resolved tool output so they can verify they got the
+/// function they meant.
+#[derive(Debug, Clone, serde::Serialize, schemars::JsonSchema)]
+pub struct DidYouMean {
+    /// The function name as the caller originally typed it.
+    pub needle: String,
+    /// The fully-qualified name we matched against and used for the response.
+    pub resolved: String,
+}
+
+/// Threshold a candidate's score must clear to be promotion-eligible. 1.5 is
+/// the bottom of the token tier (full in-order token match) and the top of
+/// the reverse-containment tier — anything below is bigram noise.
+const PROMOTE_MIN_SCORE: f64 = 1.5;
+
+/// Multiplicative gap the top score must have over a contesting candidate.
+/// Only contests against other promotion-eligible scores: if the runner-up
+/// is below [`PROMOTE_MIN_SCORE`] we treat the top as uncontested. Tuned
+/// conservatively per the issue's 1.5× suggestion.
+const PROMOTE_GAP: f64 = 1.5;
+
+/// Examines a scored fuzzy ranking and returns the resolved name when the
+/// top candidate is a clear winner. Two conditions must hold:
+///
+/// * top score clears [`PROMOTE_MIN_SCORE`] (avoids promoting bigram noise);
+/// * any other candidate above the same threshold is dominated by at least
+///   [`PROMOTE_GAP`]× (avoids picking arbitrarily between two confident hits).
+///
+/// Returns `None` when the field is too crowded to safely guess. The caller
+/// is expected to surface the promotion via [`DidYouMean`] so the user can
+/// audit the substitution.
+pub fn auto_promote_match(scored: &[(String, f64)]) -> Option<&str> {
+    let (top_name, top_score) = scored.first().map(|(n, s)| (n.as_str(), *s))?;
+    if top_score < PROMOTE_MIN_SCORE {
+        return None;
+    }
+    for (_, other) in scored.iter().skip(1) {
+        // Below-floor candidates can't credibly contest the top — they live
+        // in the bigram tier and would otherwise block any single-confident
+        // hit just by existing.
+        if *other < PROMOTE_MIN_SCORE {
+            continue;
+        }
+        if top_score < PROMOTE_GAP * *other {
+            return None;
+        }
+    }
+    Some(top_name)
 }
 
 /// Maximum number of suggestions returned by [`nearest_function_names`].
@@ -419,6 +481,37 @@ mod tests {
     fn tokenize_splits_camelcase() {
         let toks = tokenize_identifier("getElementByName");
         assert_eq!(toks, vec!["get", "element", "by", "name"]);
+    }
+
+    #[test]
+    fn auto_promote_returns_top_when_clear_winner() {
+        let scored = vec![("Vec::push".to_owned(), 1.9), ("memcpy".to_owned(), 0.4)];
+        assert_eq!(auto_promote_match(&scored), Some("Vec::push"));
+    }
+
+    #[test]
+    fn auto_promote_returns_none_when_runner_up_close() {
+        // Two candidates within 1.5× — too crowded to safely guess.
+        let scored = vec![("Vec::push".to_owned(), 1.6), ("Vec::pop".to_owned(), 1.55)];
+        assert_eq!(auto_promote_match(&scored), None);
+    }
+
+    #[test]
+    fn auto_promote_returns_none_when_top_below_threshold() {
+        // Top score in bigram tier — not confident enough to promote.
+        let scored = vec![("memcpy".to_owned(), 0.7), ("memmove".to_owned(), 0.5)];
+        assert_eq!(auto_promote_match(&scored), None);
+    }
+
+    #[test]
+    fn auto_promote_returns_top_when_only_one_candidate() {
+        let scored = vec![("Vec::push".to_owned(), 1.7)];
+        assert_eq!(auto_promote_match(&scored), Some("Vec::push"));
+    }
+
+    #[test]
+    fn auto_promote_returns_none_for_empty() {
+        assert_eq!(auto_promote_match(&[]), None);
     }
 
     #[test]

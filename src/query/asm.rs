@@ -20,7 +20,9 @@
 #![allow(dead_code)]
 
 use crate::error::{FunctionCandidate, ToolError};
-use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
+use crate::matching::{
+    DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
+};
 use crate::profile::Profile;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -43,6 +45,11 @@ pub struct AsmListing {
     pub size: String,
     pub arch: String,
     pub instructions: Vec<AsmInstruction>,
+    /// Set when the requested function name didn't match exactly but the
+    /// fuzzy ranker promoted a single high-confidence candidate. Surfaced so
+    /// the caller can verify the substitution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did_you_mean: Option<DidYouMean>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -487,7 +494,36 @@ fn attribute_samples(
 // ─── public entry point ──────────────────────────────────────────────────────
 
 pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListing, ToolError> {
-    let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+    match asm_for_function_inner(profile, &args.function, args, None).await {
+        Err(ToolError::FunctionNotFound { .. }) => {
+            let matcher =
+                FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+                    message: e.to_string(),
+                })?;
+            let scored = nearest_function_scored(profile, &matcher);
+            let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
+                return Err(ToolError::FunctionNotFound {
+                    function: args.function.clone(),
+                    nearest_matches: scored.into_iter().map(|(n, _)| n).collect(),
+                });
+            };
+            let dym = DidYouMean {
+                needle: args.function.clone(),
+                resolved: resolved.clone(),
+            };
+            asm_for_function_inner(profile, &resolved, args, Some(dym)).await
+        }
+        other => other,
+    }
+}
+
+async fn asm_for_function_inner(
+    profile: &Profile,
+    function: &str,
+    args: &Args,
+    did_you_mean: Option<DidYouMean>,
+) -> Result<AsmListing, ToolError> {
+    let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
         message: e.to_string(),
     })?;
 
@@ -496,7 +532,10 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
         ResolveResult::NotFound => {
             return Err(ToolError::FunctionNotFound {
                 function: matcher_to_string(&matcher),
-                nearest_matches: nearest_function_names(profile, &matcher),
+                nearest_matches: nearest_function_scored(profile, &matcher)
+                    .into_iter()
+                    .map(|(n, _)| n)
+                    .collect(),
             });
         }
         ResolveResult::Ambiguous(candidates) => {
@@ -528,12 +567,13 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
     let instructions = attribute_samples(&decoded, start_rel, &loc.frame_counts);
 
     Ok(AsmListing {
-        function: args.function.clone(),
+        function: function.to_owned(),
         module: module_name,
         start_address: format!("0x{start_rel:x}"),
         size: format!("0x{size_bytes:x}"),
         arch,
         instructions,
+        did_you_mean,
     })
 }
 

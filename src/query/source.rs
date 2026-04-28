@@ -3,7 +3,9 @@
 #![allow(dead_code)]
 
 use crate::error::{FunctionCandidate, ToolError};
-use crate::matching::{FunctionMatcher, matcher_to_string, nearest_function_names};
+use crate::matching::{
+    DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
+};
 use crate::profile::Profile;
 use crate::profile::raw::RawLib;
 use schemars::JsonSchema;
@@ -66,6 +68,11 @@ pub struct SourceListing {
     pub total_function_samples: u64,
     pub line_range: [u32; 2],
     pub lines: Vec<SourceLine>,
+    /// Set when the requested function name didn't match exactly but the
+    /// fuzzy ranker promoted a single high-confidence candidate. Surfaced so
+    /// the caller can verify the substitution.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub did_you_mean: Option<DidYouMean>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -81,7 +88,37 @@ pub async fn source_for_function(
     profile: &Profile,
     args: &Args,
 ) -> Result<SourceListing, ToolError> {
-    let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+    match source_for_function_inner(profile, &args.function, args, None).await {
+        Err(ToolError::FunctionNotFound { .. }) => {
+            // Try once more against an auto-promoted high-confidence fuzzy hit.
+            let matcher =
+                FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
+                    message: e.to_string(),
+                })?;
+            let scored = nearest_function_scored(profile, &matcher);
+            let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
+                return Err(ToolError::FunctionNotFound {
+                    function: args.function.clone(),
+                    nearest_matches: scored.into_iter().map(|(n, _)| n).collect(),
+                });
+            };
+            let dym = DidYouMean {
+                needle: args.function.clone(),
+                resolved: resolved.clone(),
+            };
+            source_for_function_inner(profile, &resolved, args, Some(dym)).await
+        }
+        other => other,
+    }
+}
+
+async fn source_for_function_inner(
+    profile: &Profile,
+    function: &str,
+    args: &Args,
+    did_you_mean: Option<DidYouMean>,
+) -> Result<SourceListing, ToolError> {
+    let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
         message: e.to_string(),
     })?;
     let (ctx, _samples_per_line, _total) = attribute(
@@ -91,15 +128,17 @@ pub async fn source_for_function(
         args.expand_inlines,
     )?;
     let resolved = fetch_source(profile, &ctx).await?;
-    build_listing(
+    let mut listing = build_listing(
         profile,
-        &args.function,
+        function,
         args.module.as_deref(),
         resolved,
         args.with_samples,
         args.whole_file,
         args.expand_inlines,
-    )
+    )?;
+    listing.did_you_mean = did_you_mean;
+    Ok(listing)
 }
 
 /// Record one matched frame's contribution to ambiguity tracking, source
@@ -223,7 +262,10 @@ fn attribute(
     if matched_pairs.is_empty() {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(matcher),
-            nearest_matches: nearest_function_names(profile, matcher),
+            nearest_matches: nearest_function_scored(profile, matcher)
+                .into_iter()
+                .map(|(n, _)| n)
+                .collect(),
         });
     }
     if matched_pairs.len() > 1 {
@@ -403,6 +445,7 @@ pub fn build_listing(
         total_function_samples: total,
         line_range,
         lines,
+        did_you_mean: None,
     })
 }
 
@@ -422,8 +465,7 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
         let t = &mut raw.threads[0];
-        t.inline_chains
-            .resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         t.inline_chains[3] = vec![InlineFrame {
             function: "leaf_inline".into(),
             file: Some("/tmp/leaf_inline.rs".into()),
