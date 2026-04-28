@@ -11,6 +11,7 @@ categories = ["development-tools::profiling", "command-line-utilities"]
 
 [dependencies]
 rmcp = { version = "1.5", features = ["server", "transport-io", "macros"] }
+schemars = "1.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "sync", "process"] }
 wholesym = "0.8"
 samply-api = "0.24"
