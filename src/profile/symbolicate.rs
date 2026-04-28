@@ -130,24 +130,29 @@ async fn symbolicate_thread(
         let lookup = map.lookup(LookupAddress::Relative(addr)).await;
         let Some(addr_info) = lookup else { continue };
 
-        // Use the innermost frame's function name if we have full debug info,
-        // otherwise fall back to the symbol name.
-        let resolved_name = if let Some(frames) = &addr_info.frames {
-            frames
-                .first()
-                .and_then(|f| f.function.as_deref())
-                .unwrap_or(&addr_info.symbol.name)
-        } else {
-            &addr_info.symbol.name
-        };
+        // Use the OUTER inline frame for both name and source attribution.
+        //
+        // samply-symbols documents `frames` as innermost-first: `frames.first()`
+        // is the deepest inlined callee (e.g. `core::iter::Sum::sum`),
+        // `frames.last()` is the enclosing function (e.g. `simd_cols_1st`).
+        // Using `frames.last()` means:
+        //   - top_functions/call_tree see the user's function, not the inlined
+        //     stdlib call.
+        //   - source_for_function gets a `line` that points at the call-site
+        //     line within the user's source file rather than a line inside the
+        //     inlined callee's source.
+        //
+        // Inline-frame expansion (issue #7) is the long-term answer for
+        // letting users *also* drill into the inlined callee individually.
+        let outer = addr_info.frames.as_ref().and_then(|fs| fs.last());
 
+        let resolved_name = outer
+            .and_then(|f| f.function.as_deref())
+            .unwrap_or(&addr_info.symbol.name);
         let new_name_idx = intern_string(&mut thread.string_array, resolved_name);
         thread.func_table.name[func_idx] = new_name_idx;
 
-        // Backfill file and line if available.
-        if let Some(frames) = &addr_info.frames
-            && let Some(frame) = frames.first()
-        {
+        if let Some(frame) = outer {
             if let Some(file) = frame.file_path.as_ref().map(|p| p.display_path().to_owned()) {
                 let file_idx = intern_string(&mut thread.string_array, &file);
                 thread.func_table.file_name[func_idx] = Some(file_idx);
