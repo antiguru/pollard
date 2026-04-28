@@ -340,13 +340,14 @@ impl PollardServer {
 
     #[tool(
         name = "call_tree",
-        description = "Hierarchical call tree, pruned for LLM consumption."
+        description = "Hierarchical call tree, pruned for LLM consumption. Pass `event=\"<name>\"` to build the tree from a marker-backed counter (cache-misses, branch-misses, instructions, …) instead of the default samples track."
     )]
     pub async fn call_tree(
         &self,
         Parameters(args): Parameters<CallTreeArgs>,
     ) -> Result<Json<call_tree::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
+        let event = crate::query::event::resolve(session.profile(), args.event.as_deref())?;
         let defaults = call_tree::Args::default();
         let q_args = call_tree::Args {
             filter_args: parse_filter(&args.common),
@@ -358,6 +359,7 @@ impl PollardServer {
             max_depth: args.max_depth.unwrap_or(defaults.max_depth),
             max_breadth: args.max_breadth.unwrap_or(defaults.max_breadth),
             expand_inlines: args.expand_inlines.unwrap_or(defaults.expand_inlines),
+            event,
         };
         let result = call_tree::call_tree(session.profile(), &q_args)?;
         Ok(Json(result))
@@ -382,7 +384,7 @@ impl PollardServer {
 
     #[tool(
         name = "compare_profiles",
-        description = "Per-function delta between two loaded profiles, aligned by (function, module) by default. Cargo's 16-hex build-hash suffix on module names is stripped before keying, so two builds of the same binary align. Pass `align_by=\"function\"` to drop module from the key entirely (e.g. cross-binary comparisons). Each row reports both share-of-profile (`*_pct`) and wall-time-ish (`*_ms`, computed as `samples * meta.interval`) columns — `delta_self_ms` answers \"did this function take more or less time\" directly, while `delta_self_pct` is share-only and can mislead when total runtime changes. For fixed-workload programs (same input, same iteration count) `delta_self_ms` cleanly reads as \"got faster/slower\"; if A and B do different amounts of work, both columns mix workload-size and per-call-cost effects. Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
+        description = "Per-function delta between two loaded profiles, aligned by (function, module) by default. Cargo's 16-hex build-hash suffix on module names is stripped before keying, so two builds of the same binary align. Pass `align_by=\"function\"` to drop module from the key entirely (e.g. cross-binary comparisons). Each row reports both share-of-profile (`*_pct`) and wall-time-ish (`*_ms`, computed as `samples * meta.interval`) columns — `delta_self_ms` answers \"did this function take more or less time\" directly, while `delta_self_pct` is share-only and can mislead when total runtime changes. For fixed-workload programs (same input, same iteration count) `delta_self_ms` cleanly reads as \"got faster/slower\"; if A and B do different amounts of work, both columns mix workload-size and per-call-cost effects. The `event=` arg works the same way as on `top_functions` (e.g. `event=\"cache-misses\"` to diff cache-miss attribution); the `*_ms` columns are omitted from rows when the event is not time-shaped because count × sampling-interval has no meaningful unit there. Sorted by `|delta_self_pct|` descending by default — surfaces what moved most between A (before) and B (after)."
     )]
     pub async fn compare_profiles(
         &self,

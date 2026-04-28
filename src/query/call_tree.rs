@@ -7,6 +7,7 @@ use crate::matching::{
     DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
 };
 use crate::profile::{Profile, ThreadHandle};
+use crate::query::event::{self, EventSource};
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -30,6 +31,11 @@ pub struct Args {
     /// virtual call-tree nodes instead of collapsing onto the enclosing
     /// function.
     pub expand_inlines: bool,
+    /// Which per-sample event drives the tree. Default
+    /// [`EventSource::Samples`] (cycles in samply); pass
+    /// [`EventSource::Marker`] to build the tree from a hardware-counter
+    /// event such as `cache-misses`.
+    pub event: EventSource,
 }
 
 impl Default for Args {
@@ -44,6 +50,7 @@ impl Default for Args {
             max_depth: 8,
             max_breadth: 5,
             expand_inlines: false,
+            event: EventSource::Samples,
         }
     }
 }
@@ -52,6 +59,9 @@ impl Default for Args {
 pub struct Output {
     pub thread: Option<String>,
     pub total_samples: u64,
+    /// Echo of the resolved event source — `"samples"` or the marker
+    /// name. Pct columns on the tree are percentages of this event.
+    pub event: String,
     pub pruning: PruningKnobs,
     pub tree: Option<Node>,
     /// Set when `root_function` or `paths_to` didn't match exactly but the
@@ -187,6 +197,7 @@ fn call_tree_inner(
             handle,
             args.inverted,
             args.expand_inlines,
+            &args.event,
             &root_matcher,
             &paths_to,
             &mut root,
@@ -245,6 +256,7 @@ fn call_tree_inner(
     Ok(Output {
         thread: None,
         total_samples,
+        event: args.event.label().to_owned(),
         pruning: PruningKnobs {
             min_pct: args.min_pct,
             min_samples: args.min_samples,
@@ -262,6 +274,7 @@ fn accumulate_with_root(
     handle: ThreadHandle,
     inverted: bool,
     expand_inlines: bool,
+    event: &EventSource,
     root_matcher: &Option<FunctionMatcher>,
     paths_to_matcher: &Option<FunctionMatcher>,
     root: &mut AggNode,
@@ -269,8 +282,7 @@ fn accumulate_with_root(
     root_match_seen: &mut bool,
     paths_to_match_seen: &mut bool,
 ) {
-    let raw = profile.raw_thread(handle);
-    for &stack_opt in &raw.samples.stack {
+    for stack_opt in event::stack_indices(profile, handle, event) {
         let Some(stack_idx) = stack_opt else { continue };
         // Resolve every native frame and (when expand_inlines is set) fan
         // each one out into its DWARF inline chain. Build root-to-leaf,
@@ -709,6 +721,27 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ToolError::FunctionNotFound { .. }));
+    }
+
+    #[test]
+    fn call_tree_with_marker_event() {
+        // two_events.json: 2 cache-miss markers, one per leaf — the
+        // tree built from `event=cache-misses` should account for
+        // exactly 2 events.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let tree = call_tree(
+            &profile,
+            &Args {
+                event: EventSource::Marker("cache-misses".into()),
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(tree.event, "cache-misses");
+        assert_eq!(tree.total_samples, 2);
     }
 
     #[test]
