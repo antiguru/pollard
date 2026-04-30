@@ -195,10 +195,7 @@ async fn symbolicate_thread(
                 .iter()
                 .map(|f| InlineFrame {
                     function: f.function.clone().unwrap_or_default(),
-                    file: f
-                        .file_path
-                        .as_ref()
-                        .map(|p| p.display_path().to_owned()),
+                    file: f.file_path.as_ref().map(|p| p.display_path().to_owned()),
                     line: f.line_number,
                 })
                 .collect();

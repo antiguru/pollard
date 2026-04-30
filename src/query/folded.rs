@@ -86,10 +86,10 @@ mod tests {
 
     fn fixture(path: &str) -> Profile {
         let raw: RawProfile = match path {
-            "two_functions" => serde_json::from_str(include_str!(
-                "../../tests/fixtures/two_functions.json"
-            ))
-            .unwrap(),
+            "two_functions" => {
+                serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json"))
+                    .unwrap()
+            }
             "linear_chain" => {
                 serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json"))
                     .unwrap()

@@ -75,5 +75,8 @@ jobs:
       - uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: Install samply
         run: cargo install samply --locked
+      - name: Lower perf_event_paranoid so samply can record
+        if: runner.os == 'Linux'
+        run: echo '1' | sudo tee /proc/sys/kernel/perf_event_paranoid
       - name: Cargo test (e2e)
         run: cargo test --features e2e -- --include-ignored

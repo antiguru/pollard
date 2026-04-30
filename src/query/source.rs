@@ -212,13 +212,40 @@ fn attribute(
                     continue;
                 }
 
-                // Native-frame match.
+                // Native-frame match. Choose the line attribution by walking
+                // this frame's inline chain and picking the innermost frame
+                // whose `file` equals the matched outer frame's `file`; fall
+                // back to `info.line` otherwise. The chain is stored
+                // innermost-first (see `Profile::inline_chain` docs and
+                // `symbolicate.rs`), so `.find()` returns the deepest
+                // same-file inline — i.e. the hot closure body — not the
+                // outermost one.
+                //
+                // Why: the outer frame's line is the call site of any closure
+                // / inlined helper (e.g. `bencher.iter(|| { … })` at line 84).
+                // For closure-bodied benchmarks the closure subprogram appears
+                // as an inline-chain entry in the same source file at the line
+                // where the hot work actually runs (e.g. line 85). Selecting
+                // the innermost same-file frame gives that line. When no
+                // inline frame is in this file (plain straight-line code, or
+                // an inlined helper from a different module / stdlib / dep),
+                // the fallback to `info.line` reproduces today's behavior.
                 if matcher.matches(info.function_name) {
+                    // The `info.file.is_some()` guard prevents matching an
+                    // inline frame with `file: None` against a native frame
+                    // also missing its file — `Option::None == Option::None`
+                    // would otherwise pick an unfiled inline arbitrarily.
+                    let line = profile
+                        .inline_chain(handle, frame_idx)
+                        .iter()
+                        .find(|inl| info.file.is_some() && inl.file.as_deref() == info.file)
+                        .and_then(|inl| inl.line)
+                        .or(info.line);
                     record_match(
                         info.function_name,
                         module,
                         info.file,
-                        info.line,
+                        line,
                         info.lib,
                         info.address,
                         &mut matched_pairs,
@@ -493,6 +520,262 @@ mod tests {
         let line2 = listing.lines.iter().find(|l| l.line == 2).expect("line 2");
         assert_eq!(line2.samples, 100);
         assert_eq!(listing.total_function_samples, 100);
+    }
+
+    #[test]
+    fn closure_body_attribution_picks_inline_same_file_line() {
+        // source_attribution.json: 20 samples across two `process_request`
+        // frames in `src/server.rs` (frame 0 @ line 3, frame 1 @ line 4),
+        // 10 samples each. Inject an inline-chain entry on frame 0 representing
+        // the closure body, in the SAME file but at a different line (2).
+        //
+        // Default-args query (expand_inlines = false) for "process_request":
+        //   - Bug behavior: line 3 gets 10 samples (the outer frame's line).
+        //   - Fixed behavior: line 2 gets 10 samples (the same-file inline
+        //     frame's line — what the user actually wants for closures and
+        //     same-file inlined helpers).
+        // Frame 1 has no inline chain, so its 10 samples still attribute to
+        // line 4 either way.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[0] = vec![InlineFrame {
+            function: "process_request::{{closure}}".into(),
+            file: Some("src/server.rs".into()),
+            line: Some(2),
+        }];
+        let profile = Profile::from_raw(raw);
+
+        let source = "// line 1\n\
+                      // line 2 — the hot closure body line\n\
+                      // line 3 — bencher.iter(|| { ... }) outer call site\n\
+                      // line 4 — second sampled outer line\n\
+                      // line 5\n";
+        let listing = build_listing(
+            &profile,
+            "process_request",
+            None,
+            ResolvedSource {
+                file: "src/server.rs".to_owned(),
+                language: Some("rust".to_owned()),
+                content: source.to_owned(),
+            },
+            true,
+            true,  // whole_file so line 2 is included in the rendered range
+            false, // expand_inlines disabled — this is the default path
+        )
+        .unwrap();
+
+        let samples_on = |line: u32| -> u64 {
+            listing
+                .lines
+                .iter()
+                .find(|l| l.line == line)
+                .map(|l| l.samples)
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            samples_on(2),
+            10,
+            "frame-0 samples should redirect to the same-file inline line (2), got per-line: {:?}",
+            listing
+                .lines
+                .iter()
+                .map(|l| (l.line, l.samples))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(samples_on(3), 0, "outer-only line 3 must lose its samples");
+        assert_eq!(
+            samples_on(4),
+            10,
+            "frame-1 has no inline chain so it must remain on line 4"
+        );
+        assert_eq!(listing.total_function_samples, 20);
+    }
+
+    #[test]
+    fn inline_helper_in_different_file_falls_back_to_outer_line() {
+        // Same fixture, but the injected inline frame lives in a DIFFERENT
+        // file (say, an inlined stdlib helper). The same-file rule must
+        // filter it out and fall back to the outer frame's line. Without
+        // this guard the file-equality check could regress to "always pick
+        // the innermost inline frame" and silently mis-attribute samples.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[0] = vec![InlineFrame {
+            function: "stdlib_helper".into(),
+            file: Some("/rustlib/src/rust/library/core/src/iter/sum.rs".into()),
+            line: Some(99),
+        }];
+        let profile = Profile::from_raw(raw);
+
+        let source =
+            "fn process_request() {\n    let x = parse();\n    validate(x);\n    return;\n}\n";
+        let listing = build_listing(
+            &profile,
+            "process_request",
+            None,
+            ResolvedSource {
+                file: "src/server.rs".to_owned(),
+                language: Some("rust".to_owned()),
+                content: source.to_owned(),
+            },
+            true,
+            false, // whole_file — lines 3 and 4 are inside the default window
+            false, // expand_inlines disabled — exercises the native-frame path
+        )
+        .unwrap();
+
+        let samples_on = |line: u32| -> u64 {
+            listing
+                .lines
+                .iter()
+                .find(|l| l.line == line)
+                .map(|l| l.samples)
+                .unwrap_or(0)
+        };
+        // The different-file inline frame is filtered out, so frame 0's 10
+        // samples remain on the outer line 3 (today's behavior). Frame 1's
+        // 10 samples remain on line 4.
+        assert_eq!(samples_on(3), 10);
+        assert_eq!(samples_on(4), 10);
+        assert_eq!(listing.total_function_samples, 20);
+    }
+
+    #[test]
+    fn multiple_same_file_inline_frames_pick_innermost() {
+        // Inline chains are stored innermost-first, so `.find()` over a chain
+        // with several same-file entries must return the innermost (deepest)
+        // one — the closest-to-IP source location. This pins down that
+        // ordering: a future refactor that reverses iteration order, or sorts,
+        // or starts with `.last()`, would silently move attribution outward.
+        //
+        // Mirrors the realistic shape of an iterator-chain hot path:
+        // `Iter::fold` (different file, stdlib) → `closure_inner` (same file,
+        // line 5) → `closure_outer` (same file, line 2).
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[0] = vec![
+            // innermost first — the deepest closure body, in same file as outer
+            InlineFrame {
+                function: "closure_inner".into(),
+                file: Some("src/server.rs".into()),
+                line: Some(5),
+            },
+            // outer-of-inline closure layer, also in same file
+            InlineFrame {
+                function: "closure_outer".into(),
+                file: Some("src/server.rs".into()),
+                line: Some(2),
+            },
+        ];
+        let profile = Profile::from_raw(raw);
+
+        let source = "// 1\n// 2\n// 3\n// 4\n// 5 — innermost hot line\n// 6\n";
+        let listing = build_listing(
+            &profile,
+            "process_request",
+            None,
+            ResolvedSource {
+                file: "src/server.rs".to_owned(),
+                language: Some("rust".to_owned()),
+                content: source.to_owned(),
+            },
+            true,
+            true, // whole_file — line 5 in range
+            false,
+        )
+        .unwrap();
+
+        let samples_on = |line: u32| -> u64 {
+            listing
+                .lines
+                .iter()
+                .find(|l| l.line == line)
+                .map(|l| l.samples)
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            samples_on(5),
+            10,
+            "innermost same-file frame (line 5) must win over the outer same-file frame (line 2)"
+        );
+        assert_eq!(
+            samples_on(2),
+            0,
+            "outer-of-inline same-file frame must lose"
+        );
+        assert_eq!(samples_on(3), 0, "outer native line must lose");
+        assert_eq!(samples_on(4), 10, "frame-1 has no inline chain — unchanged");
+        assert_eq!(listing.total_function_samples, 20);
+    }
+
+    #[test]
+    fn same_file_rule_applies_under_expand_inlines_true() {
+        // The same-file inline-frame redirect lives in the native-frame match
+        // arm of `attribute()` and must continue to apply when `expand_inlines`
+        // is on. Use a non-name-matching inline frame (`stdlib_helper`) so the
+        // separate inline-frame match arm doesn't fire — which would otherwise
+        // raise FunctionAmbiguous because the closure subprogram name typically
+        // substring-matches the outer fn's name. With this fixture, only the
+        // native-frame match path is exercised, and it must still pick the
+        // same-file inline line.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[0] = vec![InlineFrame {
+            function: "stdlib_helper".into(),
+            file: Some("src/server.rs".into()),
+            line: Some(2),
+        }];
+        let profile = Profile::from_raw(raw);
+
+        let source = "// 1\n// 2 — hot line\n// 3\n// 4\n// 5\n";
+        let listing = build_listing(
+            &profile,
+            "process_request",
+            None,
+            ResolvedSource {
+                file: "src/server.rs".to_owned(),
+                language: Some("rust".to_owned()),
+                content: source.to_owned(),
+            },
+            true,
+            true,
+            true, // expand_inlines — the path under test
+        )
+        .unwrap();
+
+        let samples_on = |line: u32| -> u64 {
+            listing
+                .lines
+                .iter()
+                .find(|l| l.line == line)
+                .map(|l| l.samples)
+                .unwrap_or(0)
+        };
+        assert_eq!(
+            samples_on(2),
+            10,
+            "native-frame same-file rule must redirect frame-0 to line 2 even with expand_inlines=true"
+        );
+        assert_eq!(samples_on(3), 0);
+        assert_eq!(samples_on(4), 10);
+        assert_eq!(listing.total_function_samples, 20);
     }
 
     #[test]
