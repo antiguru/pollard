@@ -213,9 +213,13 @@ fn attribute(
                 }
 
                 // Native-frame match. Choose the line attribution by walking
-                // this frame's inline chain innermost-outward and picking the
-                // first frame whose `file` equals the matched outer frame's
-                // `file`; fall back to `info.line` otherwise.
+                // this frame's inline chain and picking the innermost frame
+                // whose `file` equals the matched outer frame's `file`; fall
+                // back to `info.line` otherwise. The chain is stored
+                // innermost-first (see `Profile::inline_chain` docs and
+                // `symbolicate.rs`), so `.find()` returns the deepest
+                // same-file inline — i.e. the hot closure body — not the
+                // outermost one.
                 //
                 // Why: the outer frame's line is the call site of any closure
                 // / inlined helper (e.g. `bencher.iter(|| { … })` at line 84).
