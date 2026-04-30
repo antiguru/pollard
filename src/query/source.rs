@@ -622,8 +622,8 @@ mod tests {
                 content: source.to_owned(),
             },
             true,
-            false,
-            false,
+            false, // whole_file — lines 3 and 4 are inside the default window
+            false, // expand_inlines disabled — exercises the native-frame path
         )
         .unwrap();
 
