@@ -16,8 +16,8 @@ use pollard::query::top_functions::{Args, top_functions};
 #[test]
 #[ignore]
 fn smoke_perf_counters_real_profile() {
-    let path = std::env::var("POLLARD_SMOKE_PROFILE")
-        .expect("set POLLARD_SMOKE_PROFILE to run this test");
+    let path =
+        std::env::var("POLLARD_SMOKE_PROFILE").expect("set POLLARD_SMOKE_PROFILE to run this test");
     let bytes = std::fs::read(&path).expect("read profile");
     let raw: RawProfile = serde_json::from_slice(&bytes).expect("parse profile");
     let p = Profile::from_raw(raw);
@@ -41,10 +41,7 @@ fn smoke_perf_counters_real_profile() {
             "event={:<14} total={:>8} top_self={}",
             out.event,
             out.total_samples,
-            out.functions
-                .first()
-                .map(|f| f.self_samples)
-                .unwrap_or(0),
+            out.functions.first().map(|f| f.self_samples).unwrap_or(0),
         );
         assert!(
             out.total_samples > 0,
