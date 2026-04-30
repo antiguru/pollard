@@ -537,10 +537,9 @@ mod tests {
         // Frame 1 has no inline chain, so its 10 samples still attribute to
         // line 4 either way.
         use crate::profile::raw::InlineFrame;
-        let mut raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/source_attribution.json"
-        ))
-        .unwrap();
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
         let t = &mut raw.threads[0];
         t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         t.inline_chains[0] = vec![InlineFrame {
@@ -565,7 +564,7 @@ mod tests {
                 content: source.to_owned(),
             },
             true,
-            true, // whole_file so line 2 is included in the rendered range
+            true,  // whole_file so line 2 is included in the rendered range
             false, // expand_inlines disabled — this is the default path
         )
         .unwrap();
@@ -605,10 +604,9 @@ mod tests {
         // this guard the file-equality check could regress to "always pick
         // the innermost inline frame" and silently mis-attribute samples.
         use crate::profile::raw::InlineFrame;
-        let mut raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/source_attribution.json"
-        ))
-        .unwrap();
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
         let t = &mut raw.threads[0];
         t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         t.inline_chains[0] = vec![InlineFrame {
@@ -663,10 +661,9 @@ mod tests {
         // `Iter::fold` (different file, stdlib) → `closure_inner` (same file,
         // line 5) → `closure_outer` (same file, line 2).
         use crate::profile::raw::InlineFrame;
-        let mut raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/source_attribution.json"
-        ))
-        .unwrap();
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
         let t = &mut raw.threads[0];
         t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         t.inline_chains[0] = vec![
@@ -714,7 +711,11 @@ mod tests {
             10,
             "innermost same-file frame (line 5) must win over the outer same-file frame (line 2)"
         );
-        assert_eq!(samples_on(2), 0, "outer-of-inline same-file frame must lose");
+        assert_eq!(
+            samples_on(2),
+            0,
+            "outer-of-inline same-file frame must lose"
+        );
         assert_eq!(samples_on(3), 0, "outer native line must lose");
         assert_eq!(samples_on(4), 10, "frame-1 has no inline chain — unchanged");
         assert_eq!(listing.total_function_samples, 20);
@@ -731,10 +732,9 @@ mod tests {
         // native-frame match path is exercised, and it must still pick the
         // same-file inline line.
         use crate::profile::raw::InlineFrame;
-        let mut raw: RawProfile = serde_json::from_str(include_str!(
-            "../../tests/fixtures/source_attribution.json"
-        ))
-        .unwrap();
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
+                .unwrap();
         let t = &mut raw.threads[0];
         t.inline_chains.resize_with(t.frame_table.length, Vec::new);
         t.inline_chains[0] = vec![InlineFrame {
