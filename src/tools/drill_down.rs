@@ -60,7 +60,12 @@ pub struct AsmForFunctionArgs {
 impl PollardServer {
     #[tool(
         name = "source_for_function",
-        description = "Source listing with per-line sample counts."
+        description = "Source listing with per-line sample counts. Closure-aware: \
+            for closure-bodied code (e.g. `bencher.iter(|| hot_line )`) samples \
+            attribute to the hot line inside the closure, not the call-site of \
+            the closure. Set `expand_inlines=true` to drill into a specific \
+            inlined function (e.g. `core::iter::Sum::sum`) instead of the \
+            enclosing native frame."
     )]
     pub async fn source_for_function(
         &self,
