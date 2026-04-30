@@ -590,6 +590,60 @@ mod tests {
     }
 
     #[test]
+    fn inline_helper_in_different_file_falls_back_to_outer_line() {
+        // Same fixture, but the injected inline frame lives in a DIFFERENT
+        // file (say, an inlined stdlib helper). The same-file rule must
+        // filter it out and fall back to the outer frame's line. Without
+        // this guard the file-equality check could regress to "always pick
+        // the innermost inline frame" and silently mis-attribute samples.
+        use crate::profile::raw::InlineFrame;
+        let mut raw: RawProfile = serde_json::from_str(include_str!(
+            "../../tests/fixtures/source_attribution.json"
+        ))
+        .unwrap();
+        let t = &mut raw.threads[0];
+        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
+        t.inline_chains[0] = vec![InlineFrame {
+            function: "stdlib_helper".into(),
+            file: Some("/rustlib/src/rust/library/core/src/iter/sum.rs".into()),
+            line: Some(99),
+        }];
+        let profile = Profile::from_raw(raw);
+
+        let source =
+            "fn process_request() {\n    let x = parse();\n    validate(x);\n    return;\n}\n";
+        let listing = build_listing(
+            &profile,
+            "process_request",
+            None,
+            ResolvedSource {
+                file: "src/server.rs".to_owned(),
+                language: Some("rust".to_owned()),
+                content: source.to_owned(),
+            },
+            true,
+            false,
+            false,
+        )
+        .unwrap();
+
+        let samples_on = |line: u32| -> u64 {
+            listing
+                .lines
+                .iter()
+                .find(|l| l.line == line)
+                .map(|l| l.samples)
+                .unwrap_or(0)
+        };
+        // The different-file inline frame is filtered out, so frame 0's 10
+        // samples remain on the outer line 3 (today's behavior). Frame 1's
+        // 10 samples remain on line 4.
+        assert_eq!(samples_on(3), 10);
+        assert_eq!(samples_on(4), 10);
+        assert_eq!(listing.total_function_samples, 20);
+    }
+
+    #[test]
     fn returns_per_line_samples() {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
