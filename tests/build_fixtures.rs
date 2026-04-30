@@ -327,6 +327,11 @@ fn build_source_attribution() {
 /// Requires `samply` and `rustfmt` on PATH. Sample counts and frame addresses
 /// vary per run; re-accept snapshots with `cargo insta accept` afterward.
 ///
+/// **Opt-in via `REGENERATE_FIXTURES=1`.** This test rewrites a checked-in
+/// fixture, which would invalidate the committed insta snapshots if it ran
+/// alongside them in CI under `--include-ignored`. Run manually only when
+/// you actually want to refresh the fixture.
+///
 /// Excluded from `build_all` because it shells out and depends on host tools.
 #[test]
 #[ignore]
@@ -334,6 +339,14 @@ fn build_tiny() {
     use flate2::{Compression, read::GzDecoder, write::GzEncoder};
     use std::io::{Read, Write};
     use std::process::Command;
+
+    if std::env::var("REGENERATE_FIXTURES").is_err() {
+        eprintln!(
+            "skipping build_tiny: set REGENERATE_FIXTURES=1 to regenerate \
+             tests/fixtures/tiny.json.gz (note: invalidates insta snapshots)"
+        );
+        return;
+    }
 
     let tmp = tempfile::Builder::new()
         .suffix(".json.gz")
