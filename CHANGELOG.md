@@ -11,8 +11,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- *(source_for_function)* guard None-file equality + add coverage for innermost selection / expand_inlines
-- *(source_for_function)* attribute samples to same-file inline frame for closures
+- *(source_for_function)* attribute closure-body samples to the hot line inside the closure instead of the closure call site ([#39](https://github.com/antiguru/pollard/pull/39)).
+  Bencher-style `bencher.iter(|| { ... })` benchmarks previously reported nearly all samples on the `bencher.iter(...)` line, making per-line annotation useless for closure-bodied work.
+  The matcher now walks the matched native frame's inline chain innermost-first and picks the first frame whose file equals the outer frame's file, falling back to the outer frame otherwise.
+  Plain straight-line code and inlined helpers from other modules, stdlib, or deps fall through to existing behavior.
+  `top_functions`, `call_tree`, and `resolved_name` are unaffected.
 
 ### Other
 
