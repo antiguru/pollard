@@ -2,11 +2,9 @@
 
 #![allow(dead_code)]
 
-use crate::error::{ThreadRef, ToolError};
+use crate::error::{ProcessRef, ThreadRef, ToolError};
+use crate::profile::raw::Pid;
 use crate::profile::{Profile, ThreadHandle};
-
-#[allow(unused_imports)]
-pub use crate::error::ProcessRef;
 
 #[derive(Debug, Clone, Default)]
 pub struct Filter {
@@ -23,7 +21,12 @@ pub enum ThreadFilter {
 
 #[derive(Debug, Clone)]
 pub enum ProcessFilter {
-    Pid(u64),
+    /// Numeric pid match. A [`Pid`] without `suffix` matches every thread
+    /// sharing the OS pid (i.e. ignores samply's `.N` sub-process suffix);
+    /// a [`Pid`] with `suffix` set matches only the exact sub-process.
+    Pid(Pid),
+    /// Match against [`ThreadView::process_name`] (Firefox-style schema
+    /// stores the process name on the thread, not on a separate record).
     Name(String),
 }
 
@@ -33,8 +36,14 @@ impl Filter {
         profile.threads().filter_map(move |t| {
             if let Some(pf) = &self.process {
                 let ok = match pf {
-                    ProcessFilter::Pid(p) => t.pid() == *p,
-                    ProcessFilter::Name(_) => false, // TODO: wire process names
+                    ProcessFilter::Pid(p) => match p.suffix {
+                        // Bare pid matches every thread sharing that OS pid,
+                        // regardless of the `.N` sub-process suffix.
+                        None => t.pid() == p.value,
+                        // Suffixed pid pins to the exact sub-process.
+                        Some(_) => t.pid_full() == *p,
+                    },
+                    ProcessFilter::Name(n) => t.process_name().is_some_and(|name| name == n),
                 };
                 if !ok {
                     return None;
@@ -75,6 +84,50 @@ impl Filter {
         Err(ToolError::ThreadNotFound {
             thread,
             available_threads,
+        })
+    }
+
+    /// Validate process filter; if it matches no threads, return a
+    /// `process_not_found` error listing every distinct `(pid, name)` in
+    /// the profile so the caller can pick a real one. Mirrors
+    /// [`Self::validate_thread`].
+    pub fn validate_process(&self, profile: &Profile) -> Result<(), ToolError> {
+        let Some(pf) = self.process.as_ref() else {
+            return Ok(());
+        };
+        // Only the process predicate participates in this check — a
+        // thread-filter miss must surface as `thread_not_found`, not a
+        // misleading `process_not_found`.
+        let process_only = Filter {
+            process: Some(pf.clone()),
+            ..Default::default()
+        };
+        if process_only.threads(profile).next().is_some() {
+            return Ok(());
+        }
+        let mut seen: std::collections::BTreeMap<Pid, String> = std::collections::BTreeMap::new();
+        for t in profile.threads() {
+            let entry = seen.entry(t.pid_full()).or_default();
+            if entry.is_empty()
+                && let Some(name) = t.process_name().filter(|s| !s.is_empty())
+            {
+                *entry = name.to_owned();
+            }
+        }
+        let available_processes = seen
+            .into_iter()
+            .map(|(pid, name)| ProcessRef {
+                pid: pid.to_string(),
+                name,
+            })
+            .collect();
+        let process = match pf {
+            ProcessFilter::Pid(p) => p.to_string(),
+            ProcessFilter::Name(n) => n.clone(),
+        };
+        Err(ToolError::ProcessNotFound {
+            process,
+            available_processes,
         })
     }
 
@@ -137,5 +190,110 @@ mod tests {
         };
         let kept: Vec<_> = filter.threads(&p).collect();
         assert!(kept.is_empty());
+    }
+
+    /// Two threads on the same OS pid with different `.N` suffixes (samply
+    /// emits this for parent recorder vs. forked targets) plus distinct
+    /// process names. Lets us exercise pid/sub-pid/name selection in one
+    /// fixture.
+    fn multi_process_fixture() -> Profile {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [
+                {
+                    "name": "Main",
+                    "processName": "samply",
+                    "tid": 1,
+                    "pid": 100,
+                    "registerTime": 0.0,
+                    "stringArray": [],
+                    "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                    "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                    "samples": {"length": 0, "stack": [], "time": []},
+                    "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                    "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                    "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+                },
+                {
+                    "name": "Worker",
+                    "processName": "pager-bench",
+                    "tid": 2,
+                    "pid": "100.1",
+                    "registerTime": 0.0,
+                    "stringArray": [],
+                    "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                    "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                    "samples": {"length": 0, "stack": [], "time": []},
+                    "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                    "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                    "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+                }
+            ]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        Profile::from_raw(raw)
+    }
+
+    #[test]
+    fn process_name_filter_matches_thread_processname() {
+        let p = multi_process_fixture();
+        let filter = Filter {
+            process: Some(ProcessFilter::Name("pager-bench".into())),
+            ..Default::default()
+        };
+        let kept: Vec<_> = filter.threads(&p).collect();
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn process_pid_with_suffix_distinguishes_subprocesses() {
+        let p = multi_process_fixture();
+        // Bare 100 → matches both threads (samply sub-pid suffix is informational).
+        let bare = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: None,
+            })),
+            ..Default::default()
+        };
+        assert_eq!(bare.threads(&p).count(), 2);
+
+        // 100.1 → matches only the Worker thread.
+        let suffixed = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: Some(1),
+            })),
+            ..Default::default()
+        };
+        let kept: Vec<_> = suffixed.threads(&p).collect();
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[test]
+    fn unmatched_process_returns_empty_and_validates_with_error() {
+        let p = multi_process_fixture();
+        let filter = Filter {
+            process: Some(ProcessFilter::Name("nope".into())),
+            ..Default::default()
+        };
+        assert!(filter.threads(&p).next().is_none());
+        let err = filter.validate_process(&p).unwrap_err();
+        match err {
+            ToolError::ProcessNotFound {
+                process,
+                available_processes,
+            } => {
+                assert_eq!(process, "nope");
+                let names: Vec<_> = available_processes.iter().map(|r| &r.name).collect();
+                assert!(names.iter().any(|n| n.as_str() == "samply"));
+                assert!(names.iter().any(|n| n.as_str() == "pager-bench"));
+                let pids: Vec<_> = available_processes.iter().map(|r| &r.pid).collect();
+                assert!(pids.iter().any(|s| s.as_str() == "100"));
+                assert!(pids.iter().any(|s| s.as_str() == "100.1"));
+            }
+            other => panic!("expected ProcessNotFound, got {other:?}"),
+        }
     }
 }

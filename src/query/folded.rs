@@ -24,6 +24,7 @@ pub struct Args {
 }
 
 pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError> {
+    args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
 
     let matcher = match args.function_filter.as_deref() {

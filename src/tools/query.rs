@@ -1,6 +1,7 @@
 //! Query MCP tools: top_functions, call_tree, stacks_containing.
 
 use crate::error::ToolError;
+use crate::profile::raw::Pid;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
 use crate::query::{call_tree, compare, folded, stacks_containing, top_functions, top_groups};
 use crate::tools::PollardServer;
@@ -31,12 +32,29 @@ pub struct CommonFilterArgs {
     /// Thread filter: "tid:NNN" for a numeric tid, or a thread name string.
     #[serde(default)]
     pub thread: Option<String>,
-    /// Process filter: "pid:NNN" for a numeric pid, or a process name string.
+    /// Process filter: `"pid:NNN"` (or `"pid:NNN.M"` to pin to one of
+    /// samply's `.N` sub-processes that share an OS pid), or a process
+    /// name string matched against each thread's `processName`.
     #[serde(default)]
     pub process: Option<String>,
     /// Optional time range [start_ms, end_ms].
     #[serde(default)]
     pub time_range: Option<[f64; 2]>,
+}
+
+/// Parse the `pid:` payload. Accepts `"NNN"` (suffix `None`) or
+/// `"NNN.M"` (suffix `Some(M)`). Returns `None` when the value isn't a
+/// numeric pid, in which case the caller falls back to a name match.
+fn parse_pid(rest: &str) -> Option<Pid> {
+    let mut parts = rest.splitn(2, '.');
+    let value = parts.next()?.parse::<u64>().ok()?;
+    let suffix = match parts.next() {
+        // `pid:NNN.M` — the `.M` must parse as a u32 sub-pid; bail out on
+        // garbage so the caller can treat the whole input as a name.
+        Some(s) => Some(s.parse::<u32>().ok()?),
+        None => None,
+    };
+    Some(Pid { value, suffix })
 }
 
 fn parse_filter(args: &CommonFilterArgs) -> Filter {
@@ -50,9 +68,9 @@ fn parse_filter(args: &CommonFilterArgs) -> Filter {
     });
     let process = args.process.as_deref().map(|p| {
         if let Some(rest) = p.strip_prefix("pid:")
-            && let Ok(n) = rest.parse::<u64>()
+            && let Some(pid) = parse_pid(rest)
         {
-            return ProcessFilter::Pid(n);
+            return ProcessFilter::Pid(pid);
         }
         ProcessFilter::Name(p.to_owned())
     });

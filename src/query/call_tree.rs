@@ -168,6 +168,7 @@ fn call_tree_inner(
     args: &Args,
     did_you_mean: Option<DidYouMean>,
 ) -> Result<Output, ToolError> {
+    args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
     let root_matcher = args
         .root_function
