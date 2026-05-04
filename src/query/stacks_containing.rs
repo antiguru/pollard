@@ -46,6 +46,7 @@ pub struct FrameOutput {
 const DEFAULT_LIMIT: usize = 20;
 
 pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
+    args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
     let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
         message: e.to_string(),

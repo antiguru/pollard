@@ -117,6 +117,7 @@ where
     K: std::hash::Hash + Eq + Clone,
     F: FnMut(&str, Option<&str>, Option<&str>) -> Option<K>,
 {
+    filter_args.validate_process(profile)?;
     filter_args.validate_thread(profile)?;
     let matcher = match filter {
         Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {

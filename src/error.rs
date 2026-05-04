@@ -68,7 +68,9 @@ pub struct ThreadRef {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct ProcessRef {
-    pub pid: u64,
+    /// String form to preserve samply's `.N` sub-process suffix
+    /// (e.g. `"100.1"`) — same convention as `ProcessDescription::pid`.
+    pub pid: String,
     pub name: String,
 }
 
