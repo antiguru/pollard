@@ -11,37 +11,59 @@ use crate::profile::Profile;
 /// Resolve a user-facing event string to an [`EventSource`].
 ///
 /// * `None` or empty string → [`EventSource::Samples`] (the default).
-/// * Any non-empty string → looks up a stack-bearing marker with that
-///   name in any thread of the profile; returns [`ToolError::Internal`]
-///   with the list of available marker names if the lookup fails.
+/// * A name that matches a marker carrying a `cause.stack` payload →
+///   [`EventSource::Marker`].
+/// * A name that matches a marker but the marker has no `cause.stack`
+///   (e.g. text-only `mmap` annotations) → [`ToolError::Internal`]
+///   explaining that the marker is present but isn't aggregatable.
+/// * No matching marker → [`ToolError::Internal`] with the unknown-event
+///   diagnostic and the list of stack-bearing names as suggestions.
+///
+/// The stackless-vs-unknown split lets the LLM tell "I asked for the
+/// wrong name" (try a suggestion) apart from "this marker exists but
+/// isn't aggregatable" (try a different marker entirely).
 ///
 /// We do not treat `"cycles"` or `"samples"` as aliases — samply does
 /// not emit a marker by either name, so the user must omit the arg to
-/// get the samples track. The error message lists known events, so
-/// even an unaware caller gets pointed at the right vocabulary on the
-/// first miss.
+/// get the samples track.
 pub fn resolve(profile: &Profile, event: Option<&str>) -> Result<EventSource, ToolError> {
     let raw = match event {
         None | Some("") => return Ok(EventSource::Samples),
         Some(s) => s,
     };
-    if marker_event_exists(profile, raw) {
-        Ok(EventSource::Marker(raw.to_owned()))
-    } else {
-        Err(ToolError::Internal {
+    match marker_lookup(profile, raw) {
+        MarkerLookup::StackBearing => Ok(EventSource::Marker(raw.to_owned())),
+        MarkerLookup::Stackless => Err(ToolError::Internal {
+            message: format!(
+                "marker {raw:?} is present but has no `cause.stack` payload, so it can't \
+                 be aggregated as an event; stack-bearing events: {known:?} \
+                 (omit `event` for the default samples track)",
+                known = known_marker_events(profile),
+            ),
+        }),
+        MarkerLookup::Unknown => Err(ToolError::Internal {
             message: format!(
                 "unknown event {raw:?}; known marker events: {known:?} (omit `event` for the default samples track)",
                 known = known_marker_events(profile),
             ),
-        })
+        }),
     }
 }
 
-/// True if at least one marker entry has `name == target` AND a
-/// `cause.stack` payload. The stack-bearing requirement filters out
-/// text-only markers (e.g. `mmap` annotations) that have nothing to
-/// aggregate.
-fn marker_event_exists(profile: &Profile, target: &str) -> bool {
+/// Outcome of looking a marker name up across every thread.
+///
+/// `StackBearing` wins over `Stackless` if both are present for the
+/// same name (a stack-bearing entry is enough to aggregate). `Unknown`
+/// fires only when no entry uses the name at all.
+#[derive(Debug, PartialEq, Eq)]
+enum MarkerLookup {
+    StackBearing,
+    Stackless,
+    Unknown,
+}
+
+fn marker_lookup(profile: &Profile, target: &str) -> MarkerLookup {
+    let mut seen_stackless = false;
     for thread in profile.threads() {
         let raw = thread.raw();
         for (i, &str_idx) in raw.markers.name.iter().enumerate() {
@@ -56,11 +78,17 @@ fn marker_event_exists(profile: &Profile, target: &str) -> bool {
                 .and_then(|d| d.cause.as_ref())
                 .is_some();
             if has_stack {
-                return true;
+                // Any stack-bearing entry is enough; we can short-circuit.
+                return MarkerLookup::StackBearing;
             }
+            seen_stackless = true;
         }
     }
-    false
+    if seen_stackless {
+        MarkerLookup::Stackless
+    } else {
+        MarkerLookup::Unknown
+    }
 }
 
 /// Sorted list of distinct marker names that have at least one
@@ -122,6 +150,34 @@ mod tests {
         let msg = format!("{err:?}");
         assert!(msg.contains("not-a-real-event"), "{msg}");
         assert!(msg.contains("cache-misses"), "{msg}");
+        // The "no such marker" path should not pretend the marker is
+        // stackless — that's a different (and more actionable) error.
+        assert!(!msg.contains("no `cause.stack`"), "{msg}");
+    }
+
+    #[test]
+    fn stackless_marker_errors_distinctly_from_unknown() {
+        // two_events.json carries a stackless `mmap` marker (data == null).
+        // Resolving event="mmap" must surface a *different* error from the
+        // "no such marker" path so the LLM can tell "I asked for the wrong
+        // name" apart from "this name exists but isn't aggregatable".
+        let p = fixture();
+        let err = resolve(&p, Some("mmap")).unwrap_err();
+        let msg = format!("{err:?}");
+        // The actual marker name must appear so the caller sees the match
+        // happened — distinct from the unknown-event message.
+        assert!(msg.contains("mmap"), "expected marker name in msg: {msg}");
+        // Must mention the missing-stack reason so the caller doesn't
+        // mistake this for a typo.
+        assert!(
+            msg.contains("cause.stack") || msg.contains("no stack") || msg.contains("stackless"),
+            "expected stackless explanation in msg: {msg}"
+        );
+        // Suggestions still come from the stack-bearing set.
+        assert!(
+            msg.contains("cache-misses"),
+            "expected stack-bearing suggestion in msg: {msg}"
+        );
     }
 
     #[test]
