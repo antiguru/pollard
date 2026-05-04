@@ -9,7 +9,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::FunctionMatcher;
+use crate::matching::optional_matcher;
 use crate::profile::Profile;
 use crate::query::event::EventSource;
 use crate::query::filters::Filter;
@@ -29,12 +29,7 @@ pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError
     args.filter_args.validate_thread(profile)?;
     args.filter_args.validate_time_range(profile)?;
 
-    let matcher = match args.function_filter.as_deref() {
-        Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
-            message: e.to_string(),
-        })?),
-        None => None,
-    };
+    let matcher = optional_matcher("function_filter", args.function_filter.as_deref())?;
 
     let mut counts: HashMap<String, u64> = HashMap::new();
 

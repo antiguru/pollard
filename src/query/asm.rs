@@ -22,6 +22,7 @@
 use crate::error::{FunctionCandidate, ToolError};
 use crate::matching::{
     DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
+    required_matcher,
 };
 use crate::profile::Profile;
 use schemars::JsonSchema;
@@ -496,10 +497,7 @@ fn attribute_samples(
 pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListing, ToolError> {
     match asm_for_function_inner(profile, &args.function, args, None).await {
         Err(ToolError::FunctionNotFound { .. }) => {
-            let matcher =
-                FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
-                    message: e.to_string(),
-                })?;
+            let matcher = required_matcher("function", &args.function)?;
             let scored = nearest_function_scored(profile, &matcher);
             let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
                 return Err(ToolError::FunctionNotFound {
@@ -523,9 +521,7 @@ async fn asm_for_function_inner(
     args: &Args,
     did_you_mean: Option<DidYouMean>,
 ) -> Result<AsmListing, ToolError> {
-    let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
-        message: e.to_string(),
-    })?;
+    let matcher = required_matcher("function", function)?;
 
     let loc = match resolve_function(profile, &matcher, args.module.as_deref()) {
         ResolveResult::Single(loc) => loc,
