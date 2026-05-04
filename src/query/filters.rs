@@ -148,6 +148,38 @@ impl Filter {
         };
         Some((clamped, changed))
     }
+
+    /// Validate the time-range filter. Per the design spec, partial
+    /// overlap clamps silently — only a fully-disjoint range (or an
+    /// inverted `[start > end]`) is a hard error so the LLM can correct
+    /// it. Profile bounds come from [`Profile::duration_ms`], anchored
+    /// at zero.
+    pub fn validate_time_range(&self, profile: &Profile) -> Result<(), ToolError> {
+        let Some([start, end]) = self.time_range else {
+            return Ok(());
+        };
+        let duration = profile.duration_ms();
+        let clamped = [start.max(0.0), end.min(duration)];
+        let inverted = start > end;
+        let disjoint = clamped[0] > clamped[1];
+        if inverted || disjoint {
+            return Err(ToolError::OutOfBounds {
+                original_range: [start, end],
+                clamped_range: clamped,
+            });
+        }
+        Ok(())
+    }
+
+    /// True when `time_ms` falls within the time-range filter, or when
+    /// no time-range is set. Used by per-sample iterators to gate
+    /// inclusion.
+    pub fn in_time_range(&self, time_ms: f64) -> bool {
+        match self.time_range {
+            None => true,
+            Some([s, e]) => time_ms >= s && time_ms <= e,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -295,5 +327,71 @@ mod tests {
             }
             other => panic!("expected ProcessNotFound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn validate_time_range_passes_when_unset_or_overlapping() {
+        // linear_chain.json has 100 samples at 1ms cadence, so end ≈ 99ms.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let p = Profile::from_raw(raw);
+
+        Filter::default().validate_time_range(&p).unwrap();
+        Filter {
+            time_range: Some([10.0, 20.0]),
+            ..Default::default()
+        }
+        .validate_time_range(&p)
+        .unwrap();
+        // Partial overlap (extends past end) is OK — clamp_silently handles it.
+        Filter {
+            time_range: Some([90.0, 9_999_999.0]),
+            ..Default::default()
+        }
+        .validate_time_range(&p)
+        .unwrap();
+    }
+
+    #[test]
+    fn validate_time_range_errors_when_no_overlap() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let p = Profile::from_raw(raw);
+
+        let err = Filter {
+            time_range: Some([5_000.0, 6_000.0]),
+            ..Default::default()
+        }
+        .validate_time_range(&p)
+        .unwrap_err();
+        match err {
+            ToolError::OutOfBounds {
+                original_range,
+                clamped_range,
+            } => {
+                assert_eq!(original_range, [5_000.0, 6_000.0]);
+                // No overlap → clamped is reported as the empty range
+                // [start, start] anchored at the requested start, clamped
+                // into the profile's [0, duration].
+                assert!(clamped_range[0] >= 0.0);
+                assert!(clamped_range[1] <= 100.0);
+            }
+            other => panic!("expected OutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn validate_time_range_errors_when_start_after_end() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let p = Profile::from_raw(raw);
+
+        let err = Filter {
+            time_range: Some([50.0, 10.0]),
+            ..Default::default()
+        }
+        .validate_time_range(&p)
+        .unwrap_err();
+        assert!(matches!(err, ToolError::OutOfBounds { .. }));
     }
 }

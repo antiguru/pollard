@@ -11,6 +11,7 @@
 use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::Profile;
+use crate::query::event::EventSource;
 use crate::query::filters::Filter;
 use std::collections::HashMap;
 
@@ -26,6 +27,7 @@ pub struct Args {
 pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError> {
     args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
+    args.filter_args.validate_time_range(profile)?;
 
     let matcher = match args.function_filter.as_deref() {
         Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
@@ -37,8 +39,9 @@ pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError
     let mut counts: HashMap<String, u64> = HashMap::new();
 
     for handle in args.filter_args.threads(profile) {
-        let raw = profile.raw_thread(handle);
-        for &stack_opt in &raw.samples.stack {
+        for stack_opt in
+            profile.stack_indices(handle, &EventSource::Samples, args.filter_args.time_range)
+        {
             let Some(stack_idx) = stack_opt else { continue };
             let mut frames: Vec<String> = Vec::new();
             let mut any_match = matcher.is_none();

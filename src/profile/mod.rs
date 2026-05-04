@@ -8,11 +8,13 @@
 //!
 //! Markers, counters, profiler config, and other top-level fields are skipped.
 
+pub mod event_source;
 pub mod load;
 pub mod parsed;
 pub mod raw;
 pub mod symbolicate;
 
+pub use event_source::EventSource;
 pub use load::load_from_path;
 #[allow(unused_imports)]
 pub use parsed::{ProcessHandle, Profile, ThreadHandle};

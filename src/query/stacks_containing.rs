@@ -5,6 +5,7 @@
 use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::Profile;
+use crate::query::event::EventSource;
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -48,6 +49,7 @@ const DEFAULT_LIMIT: usize = 20;
 pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
+    args.filter_args.validate_time_range(profile)?;
     let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
         message: e.to_string(),
     })?;
@@ -58,8 +60,9 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
     let mut matched_frame_samples: u64 = 0;
 
     for handle in args.filter_args.threads(profile) {
-        let raw = profile.raw_thread(handle);
-        for &stack_opt in &raw.samples.stack {
+        for stack_opt in
+            profile.stack_indices(handle, &EventSource::Samples, args.filter_args.time_range)
+        {
             let Some(stack_idx) = stack_opt else { continue };
             total_samples += 1;
             let mut frames: Vec<(String, Option<String>, bool)> = Vec::new();

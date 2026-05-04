@@ -5,7 +5,7 @@
 use crate::error::ToolError;
 use crate::matching::FunctionMatcher;
 use crate::profile::Profile;
-use crate::query::event::{self, EventSource};
+use crate::query::event::EventSource;
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -119,6 +119,7 @@ where
 {
     filter_args.validate_process(profile)?;
     filter_args.validate_thread(profile)?;
+    filter_args.validate_time_range(profile)?;
     let matcher = match filter {
         Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
             message: e.to_string(),
@@ -130,7 +131,7 @@ where
     let mut total_samples: u64 = 0;
 
     for handle in filter_args.threads(profile) {
-        for stack_opt in event::stack_indices(profile, handle, event) {
+        for stack_opt in profile.stack_indices(handle, event, filter_args.time_range) {
             let Some(stack_idx) = stack_opt else { continue };
             total_samples += 1;
 
