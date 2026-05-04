@@ -442,6 +442,65 @@ async fn describe_profile_with_unknown_id_returns_profile_not_found() {
     srv.kill().await;
 }
 
+/// `time_range` slices the profile at the sample level. linear_chain.json
+/// has 100 samples on a 1ms cadence (timestamps 0..99) all on the leaf
+/// `d`. A `[10, 19]` slice must yield exactly 10 samples there.
+#[tokio::test]
+async fn top_functions_time_range_slices_sample_count() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("linear_chain.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_functions",
+            serde_json::json!({ "profile_id": pid, "time_range": [10.0, 19.0] }),
+        )
+        .await;
+    let sc = &resp["result"]["structuredContent"];
+    let total = sc["total_samples"].as_u64().expect("total_samples missing");
+    assert_eq!(
+        total, 10,
+        "expected 10 samples in [10,19] window; got {total} (full response={resp})"
+    );
+
+    let leaf = sc["functions"]
+        .as_array()
+        .expect("functions missing")
+        .iter()
+        .find(|f| f["function"].as_str() == Some("d"))
+        .expect("'d' must appear in the slice");
+    assert_eq!(leaf["self_samples"].as_u64(), Some(10));
+
+    srv.kill().await;
+}
+
+#[tokio::test]
+async fn top_functions_time_range_outside_profile_returns_out_of_bounds() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("linear_chain.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_functions",
+            serde_json::json!({ "profile_id": pid, "time_range": [5_000.0, 6_000.0] }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(
+        data["error"].as_str(),
+        Some("out_of_bounds"),
+        "expected out_of_bounds; full response={resp}"
+    );
+    assert_eq!(data["original_range"][0].as_f64(), Some(5_000.0));
+    assert_eq!(data["original_range"][1].as_f64(), Some(6_000.0));
+
+    srv.kill().await;
+}
+
 /// Unknown `sort_by` value used to fall through to the default
 /// (`SortBy::SelfTime`). It must now hard-error so a typo doesn't
 /// silently rank by something the caller didn't ask for.
