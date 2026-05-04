@@ -556,3 +556,74 @@ async fn top_groups_unknown_group_by_returns_invalid_value() {
 
     srv.kill().await;
 }
+
+/// `pid:` is an opt-in to integer matching; a malformed payload used
+/// to silently fall back to a literal name match (`pid:abc` would
+/// look for a process literally named `pid:abc`). Reject it instead.
+#[tokio::test]
+async fn process_with_malformed_pid_prefix_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_functions",
+            serde_json::json!({ "profile_id": pid, "process": "pid:abc" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(
+        data["error"].as_str(),
+        Some("invalid_value"),
+        "expected invalid_value; full response={resp}"
+    );
+    assert_eq!(data["field"].as_str(), Some("process"));
+    assert_eq!(data["value"].as_str(), Some("pid:abc"));
+
+    srv.kill().await;
+}
+
+#[tokio::test]
+async fn thread_with_malformed_tid_prefix_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_functions",
+            serde_json::json!({ "profile_id": pid, "thread": "tid:abc" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(data["error"].as_str(), Some("invalid_value"));
+    assert_eq!(data["field"].as_str(), Some("thread"));
+    assert_eq!(data["value"].as_str(), Some("tid:abc"));
+
+    srv.kill().await;
+}
+
+/// `pid:NNN.M` (well-formed sub-pid) must still parse — only the
+/// malformed `pid:NNN.X.Y` variant is rejected.
+#[tokio::test]
+async fn process_with_extra_dot_in_pid_prefix_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_functions",
+            serde_json::json!({ "profile_id": pid, "process": "pid:1.2.3" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(data["error"].as_str(), Some("invalid_value"));
+    assert_eq!(data["field"].as_str(), Some("process"));
+
+    srv.kill().await;
+}

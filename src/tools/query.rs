@@ -44,13 +44,12 @@ pub struct CommonFilterArgs {
 
 /// Parse the `pid:` payload. Accepts `"NNN"` (suffix `None`) or
 /// `"NNN.M"` (suffix `Some(M)`). Returns `None` when the value isn't a
-/// numeric pid, in which case the caller falls back to a name match.
+/// numeric pid; the caller is expected to treat that as a hard error
+/// (the `pid:` prefix is an explicit opt-in to integer matching).
 fn parse_pid(rest: &str) -> Option<Pid> {
     let mut parts = rest.splitn(2, '.');
     let value = parts.next()?.parse::<u64>().ok()?;
     let suffix = match parts.next() {
-        // `pid:NNN.M` — the `.M` must parse as a u32 sub-pid; bail out on
-        // garbage so the caller can treat the whole input as a name.
         Some(s) => Some(s.parse::<u32>().ok()?),
         None => None,
     };
@@ -84,28 +83,55 @@ fn parse_string_enum<T: Copy>(
     })
 }
 
-fn parse_filter(args: &CommonFilterArgs) -> Filter {
-    let thread = args.thread.as_deref().map(|t| {
-        if let Some(rest) = t.strip_prefix("tid:")
-            && let Ok(n) = rest.parse::<u64>()
-        {
-            return ThreadFilter::Tid(n);
-        }
-        ThreadFilter::Name(t.to_owned())
-    });
-    let process = args.process.as_deref().map(|p| {
-        if let Some(rest) = p.strip_prefix("pid:")
-            && let Some(pid) = parse_pid(rest)
-        {
-            return ProcessFilter::Pid(pid);
-        }
-        ProcessFilter::Name(p.to_owned())
-    });
-    Filter {
+/// Convert the wire-format filter args into a [`Filter`].
+///
+/// The `tid:` / `pid:` prefixes opt into integer matching and must be
+/// followed by a well-formed numeric payload. A malformed prefix
+/// (`tid:abc`, `pid:1.2.3`) used to silently fall back to a literal
+/// name match — the resulting `thread_not_found` / `process_not_found`
+/// then echoed the original string back, which made the diagnostic
+/// confusing because the listed available threads/processes never
+/// matched. Reject malformed prefixes up front instead.
+fn parse_filter(args: &CommonFilterArgs) -> Result<Filter, ToolError> {
+    let thread = args
+        .thread
+        .as_deref()
+        .map(|t| {
+            if let Some(rest) = t.strip_prefix("tid:") {
+                let n = rest.parse::<u64>().map_err(|_| ToolError::InvalidValue {
+                    field: "thread".to_owned(),
+                    value: t.to_owned(),
+                    accepted: vec!["tid:NNN".to_owned(), "<thread name>".to_owned()],
+                })?;
+                return Ok(ThreadFilter::Tid(n));
+            }
+            Ok(ThreadFilter::Name(t.to_owned()))
+        })
+        .transpose()?;
+    let process = args
+        .process
+        .as_deref()
+        .map(|p| {
+            if let Some(rest) = p.strip_prefix("pid:") {
+                let pid = parse_pid(rest).ok_or_else(|| ToolError::InvalidValue {
+                    field: "process".to_owned(),
+                    value: p.to_owned(),
+                    accepted: vec![
+                        "pid:NNN".to_owned(),
+                        "pid:NNN.M".to_owned(),
+                        "<process name>".to_owned(),
+                    ],
+                })?;
+                return Ok(ProcessFilter::Pid(pid));
+            }
+            Ok(ProcessFilter::Name(p.to_owned()))
+        })
+        .transpose()?;
+    Ok(Filter {
         thread,
         process,
         time_range: args.time_range,
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -349,7 +375,7 @@ impl PollardServer {
                     ("descendants", top_functions::SortBy::Descendants),
                 ],
             )?,
-            filter_args: parse_filter(&args.common),
+            filter_args: parse_filter(&args.common)?,
             expand_inlines: args.expand_inlines.unwrap_or(false),
             event,
         };
@@ -390,7 +416,7 @@ impl PollardServer {
                     ("descendants", top_groups::SortBy::Descendants),
                 ],
             )?,
-            filter_args: parse_filter(&args.common),
+            filter_args: parse_filter(&args.common)?,
             expand_inlines: args.expand_inlines.unwrap_or(false),
             directory_depth: args.directory_depth,
         };
@@ -410,7 +436,7 @@ impl PollardServer {
         let event = crate::query::event::resolve(session.profile(), args.event.as_deref())?;
         let defaults = call_tree::Args::default();
         let q_args = call_tree::Args {
-            filter_args: parse_filter(&args.common),
+            filter_args: parse_filter(&args.common)?,
             inverted: args.inverted.unwrap_or(false),
             root_function: args.root_function.clone(),
             paths_to: args.paths_to.clone(),
@@ -435,7 +461,7 @@ impl PollardServer {
     ) -> Result<Json<FoldedStacksOutput>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
         let q_args = folded::Args {
-            filter_args: parse_filter(&args.common),
+            filter_args: parse_filter(&args.common)?,
             function_filter: args.function_filter.clone(),
         };
         let folded = folded::folded_stacks(session.profile(), &q_args)?;
@@ -471,7 +497,7 @@ impl PollardServer {
                 ],
             )?,
             min_delta_pct: args.min_delta_pct,
-            filter_args: parse_filter(&args.common),
+            filter_args: parse_filter(&args.common)?,
             expand_inlines: args.expand_inlines.unwrap_or(false),
             align_by: parse_string_enum(
                 "align_by",
@@ -498,7 +524,7 @@ impl PollardServer {
     ) -> Result<Json<stacks_containing::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
         let q_args = stacks_containing::Args {
-            filter_args: parse_filter(&args.common),
+            filter_args: parse_filter(&args.common)?,
             function: args.function.clone(),
             limit: args.limit.unwrap_or(0),
         };
