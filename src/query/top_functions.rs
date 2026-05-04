@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::FunctionMatcher;
+use crate::matching::optional_matcher;
 use crate::profile::Profile;
 use crate::query::event::EventSource;
 use crate::query::filters::Filter;
@@ -120,12 +120,7 @@ where
     filter_args.validate_process(profile)?;
     filter_args.validate_thread(profile)?;
     filter_args.validate_time_range(profile)?;
-    let matcher = match filter {
-        Some(p) => Some(FunctionMatcher::new(p).map_err(|e| ToolError::Internal {
-            message: e.to_string(),
-        })?),
-        None => None,
-    };
+    let matcher = optional_matcher("filter", filter)?;
 
     let mut counts: HashMap<K, Counts> = HashMap::new();
     let mut total_samples: u64 = 0;

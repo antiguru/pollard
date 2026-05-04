@@ -3,7 +3,7 @@
 #![allow(dead_code)]
 
 use crate::error::ToolError;
-use crate::matching::FunctionMatcher;
+use crate::matching::required_matcher;
 use crate::profile::Profile;
 use crate::query::event::EventSource;
 use crate::query::filters::Filter;
@@ -50,9 +50,7 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
     args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
     args.filter_args.validate_time_range(profile)?;
-    let matcher = FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
-        message: e.to_string(),
-    })?;
+    let matcher = required_matcher("function", &args.function)?;
 
     type StackKey = Vec<(String, Option<String>, bool)>;
     let mut counts: HashMap<StackKey, u64> = HashMap::new();

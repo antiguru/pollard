@@ -627,3 +627,109 @@ async fn process_with_extra_dot_in_pid_prefix_returns_invalid_value() {
 
     srv.kill().await;
 }
+
+/// Empty `function` on tools that require a function pattern used to
+/// silently match every frame because `"".contains("")` is always
+/// true — `stacks_containing` would return the entire profile keyed
+/// as if every frame matched. Reject it as `invalid_value` so the
+/// caller sees the accepted-pattern syntax.
+#[tokio::test]
+async fn stacks_containing_empty_function_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "stacks_containing",
+            serde_json::json!({ "profile_id": pid, "function": "" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(
+        data["error"].as_str(),
+        Some("invalid_value"),
+        "expected invalid_value; full response={resp}"
+    );
+    assert_eq!(data["field"].as_str(), Some("function"));
+    assert_eq!(data["value"].as_str(), Some(""));
+    let accepted = data["accepted"].as_array().expect("accepted list missing");
+    assert!(
+        !accepted.is_empty(),
+        "accepted list should describe the syntax"
+    );
+
+    srv.kill().await;
+}
+
+/// `re:` with no body still produces an empty regex that matches
+/// every position; same rejection path.
+#[tokio::test]
+async fn stacks_containing_empty_regex_body_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "stacks_containing",
+            serde_json::json!({ "profile_id": pid, "function": "re:" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(data["error"].as_str(), Some("invalid_value"));
+    assert_eq!(data["field"].as_str(), Some("function"));
+
+    srv.kill().await;
+}
+
+/// `call_tree.root_function` is optional but only meaningful when
+/// narrowing — empty must not silently defeat the narrowing.
+#[tokio::test]
+async fn call_tree_empty_root_function_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("linear_chain.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "call_tree",
+            serde_json::json!({ "profile_id": pid, "root_function": "" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(data["error"].as_str(), Some("invalid_value"));
+    assert_eq!(data["field"].as_str(), Some("root_function"));
+
+    srv.kill().await;
+}
+
+/// The genuinely-optional `filter` field on `top_functions` must keep
+/// treating empty as "no filter" — that's what callers mean when they
+/// "leave blank". The rejection only fires for required / narrowing
+/// pattern arguments.
+#[tokio::test]
+async fn top_functions_empty_filter_is_treated_as_no_filter() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_functions",
+            serde_json::json!({ "profile_id": pid, "filter": "" }),
+        )
+        .await;
+    let sc = &resp["result"]["structuredContent"];
+    let fns = sc["functions"].as_array().expect("functions missing");
+    assert!(
+        !fns.is_empty(),
+        "expected unfiltered results; full response={resp}"
+    );
+
+    srv.kill().await;
+}

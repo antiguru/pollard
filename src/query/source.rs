@@ -5,6 +5,7 @@
 use crate::error::{FunctionCandidate, ToolError};
 use crate::matching::{
     DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
+    required_matcher,
 };
 use crate::profile::Profile;
 use crate::profile::raw::RawLib;
@@ -91,10 +92,7 @@ pub async fn source_for_function(
     match source_for_function_inner(profile, &args.function, args, None).await {
         Err(ToolError::FunctionNotFound { .. }) => {
             // Try once more against an auto-promoted high-confidence fuzzy hit.
-            let matcher =
-                FunctionMatcher::new(&args.function).map_err(|e| ToolError::Internal {
-                    message: e.to_string(),
-                })?;
+            let matcher = required_matcher("function", &args.function)?;
             let scored = nearest_function_scored(profile, &matcher);
             let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
                 return Err(ToolError::FunctionNotFound {
@@ -118,9 +116,7 @@ async fn source_for_function_inner(
     args: &Args,
     did_you_mean: Option<DidYouMean>,
 ) -> Result<SourceListing, ToolError> {
-    let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
-        message: e.to_string(),
-    })?;
+    let matcher = required_matcher("function", function)?;
     let (ctx, _samples_per_line, _total) = attribute(
         profile,
         &matcher,
@@ -415,9 +411,7 @@ pub fn build_listing(
     expand_inlines: bool,
 ) -> Result<SourceListing, ToolError> {
     // Re-attribute samples for this listing.
-    let matcher = FunctionMatcher::new(function).map_err(|e| ToolError::Internal {
-        message: e.to_string(),
-    })?;
+    let matcher = required_matcher("function", function)?;
     let (_file, samples_per_line, total) = attribute(profile, &matcher, module, expand_inlines)?;
 
     let total_lines: Vec<(u32, String)> = resolved

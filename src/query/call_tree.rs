@@ -4,7 +4,8 @@
 
 use crate::error::ToolError;
 use crate::matching::{
-    DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
+    DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, narrowing_matcher,
+    nearest_function_scored,
 };
 use crate::profile::{Profile, ThreadHandle};
 use crate::query::event::EventSource;
@@ -171,22 +172,8 @@ fn call_tree_inner(
     args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
     args.filter_args.validate_time_range(profile)?;
-    let root_matcher = args
-        .root_function
-        .as_deref()
-        .map(FunctionMatcher::new)
-        .transpose()
-        .map_err(|e| ToolError::Internal {
-            message: e.to_string(),
-        })?;
-    let paths_to = args
-        .paths_to
-        .as_deref()
-        .map(FunctionMatcher::new)
-        .transpose()
-        .map_err(|e| ToolError::Internal {
-            message: e.to_string(),
-        })?;
+    let root_matcher = narrowing_matcher("root_function", args.root_function.as_deref())?;
+    let paths_to = narrowing_matcher("paths_to", args.paths_to.as_deref())?;
 
     let mut root = AggNode::default();
     let mut total_samples: u64 = 0;

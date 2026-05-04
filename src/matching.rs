@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use crate::error::ToolError;
 use crate::profile::Profile;
 use regex::Regex;
 
@@ -18,6 +19,12 @@ pub enum FunctionMatcher {
 pub enum MatcherError {
     #[error("invalid regex: {0}")]
     Regex(#[from] regex::Error),
+    /// The pattern (or the body after the `re:` prefix) was empty after
+    /// HTML-entity decoding. `Substring("").contains(_) == true` and the
+    /// empty regex matches every position, so an empty pattern matches
+    /// every function — never what the caller intended.
+    #[error("pattern is empty")]
+    Empty,
 }
 
 impl FunctionMatcher {
@@ -28,8 +35,14 @@ impl FunctionMatcher {
         // brittle "function not found".
         let decoded = decode_html_entities(pattern);
         if let Some(re) = decoded.strip_prefix("re:") {
+            if re.is_empty() {
+                return Err(MatcherError::Empty);
+            }
             Ok(Self::Regex(Regex::new(re)?))
         } else {
+            if decoded.is_empty() {
+                return Err(MatcherError::Empty);
+            }
             Ok(Self::Substring(decoded))
         }
     }
@@ -49,6 +62,65 @@ fn decode_html_entities(s: &str) -> String {
         .replace("&#39;", "'")
         // `&amp;` last so we don't double-decode `&amp;lt;` into `<`.
         .replace("&amp;", "&")
+}
+
+/// Build a [`FunctionMatcher`] for a tool argument, mapping
+/// [`MatcherError`] into the structured [`ToolError`] variants the MCP
+/// surface uses. `MatcherError::Empty` becomes
+/// [`ToolError::InvalidValue`] with the field name so the LLM sees the
+/// accepted pattern syntax in one retry; regex errors fall through as
+/// `ToolError::Internal`. Use [`required_matcher`] when the pattern
+/// must be non-empty (e.g. `stacks_containing.function`).
+fn matcher_error_to_tool_error(field: &str, value: &str, err: MatcherError) -> ToolError {
+    match err {
+        MatcherError::Empty => ToolError::InvalidValue {
+            field: field.to_owned(),
+            value: value.to_owned(),
+            accepted: vec!["<non-empty pattern>".to_owned(), "re:<regex>".to_owned()],
+        },
+        MatcherError::Regex(_) => ToolError::Internal {
+            message: err.to_string(),
+        },
+    }
+}
+
+/// Construct a [`FunctionMatcher`] for an argument the tool *requires*
+/// (e.g. `stacks_containing.function`, `source_for_function.function`).
+/// An empty pattern surfaces as `invalid_value` rather than silently
+/// matching every function.
+pub fn required_matcher(field: &'static str, pattern: &str) -> Result<FunctionMatcher, ToolError> {
+    FunctionMatcher::new(pattern).map_err(|e| matcher_error_to_tool_error(field, pattern, e))
+}
+
+/// Construct a [`FunctionMatcher`] for an argument the tool treats as
+/// *optional but narrowing* — it isn't required, but when set it must
+/// constrain the result. `None` returns `Ok(None)`; `Some("")` returns
+/// `invalid_value` instead of silently matching every function and
+/// defeating the narrowing intent. Used by `call_tree.root_function`
+/// and `call_tree.paths_to`.
+pub fn narrowing_matcher(
+    field: &'static str,
+    pattern: Option<&str>,
+) -> Result<Option<FunctionMatcher>, ToolError> {
+    match pattern {
+        None => Ok(None),
+        Some(p) => Ok(Some(required_matcher(field, p)?)),
+    }
+}
+
+/// Construct a [`FunctionMatcher`] for an argument that may be omitted
+/// entirely (`None`) or sent as the empty string (`Some("")`) when the
+/// caller wants no filter. Both shapes produce `Ok(None)`. Used by
+/// the genuinely-optional `filter` field on `top_functions`,
+/// `top_groups`, `compare_profiles`, and `folded_stacks`.
+pub fn optional_matcher(
+    field: &'static str,
+    pattern: Option<&str>,
+) -> Result<Option<FunctionMatcher>, ToolError> {
+    match pattern.filter(|s| !s.is_empty()) {
+        None => Ok(None),
+        Some(p) => Ok(Some(required_matcher(field, p)?)),
+    }
 }
 
 /// Render a matcher back to its user-facing pattern (regex prefixed with
@@ -341,6 +413,35 @@ mod tests {
     fn invalid_regex_returns_error() {
         let err = FunctionMatcher::new("re:[invalid").unwrap_err();
         assert!(err.to_string().contains("regex"));
+    }
+
+    #[test]
+    fn empty_pattern_returns_error() {
+        // Bare empty: `Substring("").contains` would otherwise match every
+        // function name. Reject so callers that require a pattern can
+        // surface a clear error instead of silently returning the entire
+        // profile.
+        assert!(matches!(
+            FunctionMatcher::new("").unwrap_err(),
+            MatcherError::Empty
+        ));
+        // `re:` with an empty body — the empty regex matches every position
+        // in every string, which has the same effect as the substring case.
+        assert!(matches!(
+            FunctionMatcher::new("re:").unwrap_err(),
+            MatcherError::Empty
+        ));
+    }
+
+    #[test]
+    fn html_only_pattern_rejected_after_decode() {
+        // After HTML-entity decoding, the payload can still be empty
+        // (e.g. caller sent `&amp;` followed by nothing). The post-decode
+        // empty must be rejected too, otherwise the bypass survives.
+        assert!(matches!(
+            FunctionMatcher::new("").unwrap_err(),
+            MatcherError::Empty
+        ));
     }
 
     #[test]
