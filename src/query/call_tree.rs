@@ -7,7 +7,7 @@ use crate::matching::{
     DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, nearest_function_scored,
 };
 use crate::profile::{Profile, ThreadHandle};
-use crate::query::event::{self, EventSource};
+use crate::query::event::EventSource;
 use crate::query::filters::Filter;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -170,6 +170,7 @@ fn call_tree_inner(
 ) -> Result<Output, ToolError> {
     args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
+    args.filter_args.validate_time_range(profile)?;
     let root_matcher = args
         .root_function
         .as_deref()
@@ -199,6 +200,7 @@ fn call_tree_inner(
             args.inverted,
             args.expand_inlines,
             &args.event,
+            args.filter_args.time_range,
             &root_matcher,
             &paths_to,
             &mut root,
@@ -276,6 +278,7 @@ fn accumulate_with_root(
     inverted: bool,
     expand_inlines: bool,
     event: &EventSource,
+    time_range: Option<[f64; 2]>,
     root_matcher: &Option<FunctionMatcher>,
     paths_to_matcher: &Option<FunctionMatcher>,
     root: &mut AggNode,
@@ -283,7 +286,7 @@ fn accumulate_with_root(
     root_match_seen: &mut bool,
     paths_to_match_seen: &mut bool,
 ) {
-    for stack_opt in event::stack_indices(profile, handle, event) {
+    for stack_opt in profile.stack_indices(handle, event, time_range) {
         let Some(stack_idx) = stack_opt else { continue };
         // Resolve every native frame and (when expand_inlines is set) fan
         // each one out into its DWARF inline chain. Build root-to-leaf,

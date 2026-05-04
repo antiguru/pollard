@@ -12,6 +12,7 @@
 
 #![allow(dead_code)]
 
+use crate::profile::event_source::EventSource;
 use crate::profile::raw::{InlineFrame, Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
@@ -191,6 +192,98 @@ impl Profile {
             current = thread.stack_table.prefix.get(s).copied().flatten();
             Some(frame)
         })
+    }
+
+    /// Iterate the stack-table indices that this thread contributes for
+    /// the given event source. `Some(idx)` per sample/marker, `None` to
+    /// skip (matching the existing `samples.stack: Vec<Option<usize>>`
+    /// shape so callers can stay in their per-stack loop).
+    ///
+    /// `time_range`, when set, gates each yielded item by its per-sample
+    /// timestamp ([`crate::profile::raw::RawSampleTable::absolute_times`]
+    /// for [`EventSource::Samples`], `markers.start_time` for
+    /// [`EventSource::Marker`]). Items outside the inclusive range are
+    /// dropped entirely. Pass `None` for the unfiltered behavior.
+    pub fn stack_indices<'a>(
+        &'a self,
+        handle: ThreadHandle,
+        source: &'a EventSource,
+        time_range: Option<[f64; 2]>,
+    ) -> Box<dyn Iterator<Item = Option<usize>> + 'a> {
+        let raw = self.raw_thread(handle);
+        // Closure copies the range so each branch's iterator can move
+        // it freely without borrowing `time_range` itself.
+        let in_range = move |t: f64| match time_range {
+            None => true,
+            Some([s, e]) => t >= s && t <= e,
+        };
+        match source {
+            EventSource::Samples => {
+                // Materialize absolute times once per thread; samply
+                // emits either `time` directly or `timeDeltas`, and
+                // `absolute_times` unifies the two.
+                let times = raw.samples.absolute_times();
+                Box::new(
+                    raw.samples
+                        .stack
+                        .iter()
+                        .copied()
+                        .enumerate()
+                        .filter_map(move |(i, s)| {
+                            // A sample with no recorded timestamp can't
+                            // be gated; with a time-range filter set we
+                            // conservatively drop unstamped samples —
+                            // there's no way to tell whether they belong
+                            // in the slice.
+                            let t = *times.get(i)?;
+                            if !in_range(t) {
+                                return None;
+                            }
+                            Some(s)
+                        }),
+                )
+            }
+            EventSource::Marker(name) => {
+                // Resolve the marker name to its string-array index
+                // *once* per thread; markers without a `cause.stack`
+                // payload are yielded as `None` so the caller's
+                // "skip None" branch handles them uniformly with samples
+                // that have no stack.
+                let str_idx = raw.string_array.iter().position(|s| s == name);
+                match str_idx {
+                    None => Box::new(std::iter::empty()),
+                    Some(target) => Box::new(raw.markers.name.iter().enumerate().filter_map(
+                        move |(i, &n)| {
+                            // Skip non-matching markers entirely so we
+                            // yield exactly one item per *matching*
+                            // marker. Text-only matches still appear,
+                            // as `None`, so the aggregator can tell
+                            // "no stack to attribute to" apart from
+                            // "marker isn't ours".
+                            if n != target {
+                                return None;
+                            }
+                            // Gate by the marker's start_time when a
+                            // range is set; missing entries are
+                            // conservatively dropped (same rationale as
+                            // the unstamped-sample branch).
+                            let t = raw.markers.start_time.get(i).copied()?;
+                            if !in_range(t) {
+                                return None;
+                            }
+                            Some(
+                                raw.markers
+                                    .data
+                                    .get(i)
+                                    .and_then(|d| d.as_ref())
+                                    .and_then(|d| d.cause.as_ref())
+                                    .map(|c| c.stack),
+                            )
+                        },
+                    )),
+                }
+            }
+        }
     }
 }
 

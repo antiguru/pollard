@@ -1,46 +1,14 @@
-//! Event-source resolution: maps a user-facing `event` string to either
-//! the per-thread samples track (default — what samply uses for
-//! cycles-as-samples) or to a marker-name slice. Provides a unified
-//! stack-index iterator so the aggregators stay generic.
+//! Event-source resolution: maps a user-facing `event` string to an
+//! [`EventSource`]. The iterator implementation lives on [`Profile::stack_indices`];
+//! this module owns the string-to-source mapping and the "did you mean"
+//! suggestions so that path can stay profile-aware.
 
 #![allow(dead_code)]
 
+pub use crate::profile::EventSource;
+
 use crate::error::ToolError;
-use crate::profile::{Profile, ThreadHandle};
-
-/// Where a per-sample stack index comes from. Matches the two layouts
-/// samply emits: cycles in `samples`, all other hardware events in
-/// `markers` keyed by name.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub enum EventSource {
-    /// The default samples track. samply records the first perf event
-    /// (typically `cycles`) here; pct columns mean "% of cycles" or
-    /// equivalently "% of CPU time".
-    #[default]
-    Samples,
-    /// Markers whose `name[i]` resolves to this string. samply uses this
-    /// for secondary perf events (cache-misses, branch-misses,
-    /// instructions, etc.).
-    Marker(String),
-}
-
-impl EventSource {
-    /// True iff the source's per-event count multiplied by
-    /// `meta.interval` produces a meaningful wall-time-ish duration.
-    /// `Samples` is, all marker-backed events are not.
-    pub fn is_time_shaped(&self) -> bool {
-        matches!(self, EventSource::Samples)
-    }
-
-    /// Stable lowercase label for output payloads ("samples" or the
-    /// marker name verbatim).
-    pub fn label(&self) -> &str {
-        match self {
-            EventSource::Samples => "samples",
-            EventSource::Marker(name) => name.as_str(),
-        }
-    }
-}
+use crate::profile::Profile;
 
 /// Resolve a user-facing event string to an [`EventSource`].
 ///
@@ -123,51 +91,6 @@ fn known_marker_events(profile: &Profile) -> Vec<String> {
     names.into_iter().collect()
 }
 
-/// Iterate the stack-table indices that this thread contributes for the
-/// given event source. `Some(idx)` per sample/marker, `None` to skip
-/// (matching the existing `samples.stack: Vec<Option<usize>>` shape so
-/// callers can stay in their current per-stack loop).
-pub fn stack_indices<'a>(
-    profile: &'a Profile,
-    handle: ThreadHandle,
-    source: &'a EventSource,
-) -> Box<dyn Iterator<Item = Option<usize>> + 'a> {
-    let raw = profile.raw_thread(handle);
-    match source {
-        EventSource::Samples => Box::new(raw.samples.stack.iter().copied()),
-        EventSource::Marker(name) => {
-            // Resolve the marker name to its string-array index *once*
-            // per thread; markers without a `cause.stack` payload are
-            // yielded as `None` so the caller's "skip None" branch
-            // handles them uniformly with samples that have no stack.
-            let str_idx = raw.string_array.iter().position(|s| s == name);
-            match str_idx {
-                None => Box::new(std::iter::empty()),
-                Some(target) => Box::new(raw.markers.name.iter().enumerate().filter_map(
-                    move |(i, &n)| {
-                        // Skip non-matching markers entirely so we yield
-                        // exactly one item per *matching* marker. Text-only
-                        // matches still appear, as `None`, so the aggregator
-                        // can tell "no stack to attribute to" apart from
-                        // "marker isn't ours".
-                        if n != target {
-                            return None;
-                        }
-                        Some(
-                            raw.markers
-                                .data
-                                .get(i)
-                                .and_then(|d| d.as_ref())
-                                .and_then(|d| d.cause.as_ref())
-                                .map(|c| c.stack),
-                        )
-                    },
-                )),
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,7 +130,7 @@ mod tests {
     fn samples_iter_yields_every_sample_stack() {
         let p = fixture();
         let handle = p.threads().next().unwrap().handle();
-        let n: usize = stack_indices(&p, handle, &EventSource::Samples).count();
+        let n: usize = p.stack_indices(handle, &EventSource::Samples, None).count();
         assert_eq!(n, p.raw_thread(handle).samples.stack.len());
     }
 
@@ -215,9 +138,29 @@ mod tests {
     fn marker_iter_filters_to_named_event() {
         let p = fixture();
         let handle = p.threads().next().unwrap().handle();
-        let stacks: Vec<_> =
-            stack_indices(&p, handle, &EventSource::Marker("cache-misses".into())).collect();
+        let stacks: Vec<_> = p
+            .stack_indices(handle, &EventSource::Marker("cache-misses".into()), None)
+            .collect();
         assert_eq!(stacks.len(), 2);
         assert!(stacks.iter().all(|s| s.is_some()));
+    }
+
+    #[test]
+    fn samples_iter_gates_by_time_range() {
+        // linear_chain.json has 100 samples with 1ms cadence (t = 0..99).
+        // A [10, 19] window must yield exactly 10 stacks; an out-of-range
+        // window must yield 0.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        let in_window: Vec<_> = p
+            .stack_indices(handle, &EventSource::Samples, Some([10.0, 19.0]))
+            .collect();
+        assert_eq!(in_window.len(), 10);
+        let outside: Vec<_> = p
+            .stack_indices(handle, &EventSource::Samples, Some([5_000.0, 6_000.0]))
+            .collect();
+        assert!(outside.is_empty());
     }
 }
