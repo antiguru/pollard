@@ -3,8 +3,6 @@
 //! this module owns the string-to-source mapping and the "did you mean"
 //! suggestions so that path can stay profile-aware.
 
-#![allow(dead_code)]
-
 pub use crate::profile::EventSource;
 
 use crate::error::ToolError;

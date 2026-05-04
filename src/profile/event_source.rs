@@ -4,8 +4,6 @@
 //! the query layer; resolution-from-string and "did you mean" suggestions
 //! still live in `query::event`.
 
-#![allow(dead_code)]
-
 /// Where a per-sample stack index comes from. Matches the two layouts
 /// samply emits: cycles in `samples`, all other hardware events in
 /// `markers` keyed by name.
