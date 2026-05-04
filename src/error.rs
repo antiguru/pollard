@@ -49,6 +49,15 @@ pub enum ToolError {
         profile_id: String,
         original_path: PathBuf,
     },
+    /// User passed a value for a string-enum argument that wasn't one
+    /// of the accepted options. Echo the field, the offending value,
+    /// and the full accepted set so the caller can correct in one
+    /// retry — same shape as `function_not_found.nearest_matches`.
+    InvalidValue {
+        field: String,
+        value: String,
+        accepted: Vec<String>,
+    },
     Internal {
         message: String,
     },

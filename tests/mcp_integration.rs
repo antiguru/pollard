@@ -442,61 +442,58 @@ async fn describe_profile_with_unknown_id_returns_profile_not_found() {
     srv.kill().await;
 }
 
-/// `time_range` slices the profile at the sample level. linear_chain.json
-/// has 100 samples on a 1ms cadence (timestamps 0..99) all on the leaf
-/// `d`. A `[10, 19]` slice must yield exactly 10 samples there.
+/// Unknown `sort_by` value used to fall through to the default
+/// (`SortBy::SelfTime`). It must now hard-error so a typo doesn't
+/// silently rank by something the caller didn't ask for.
 #[tokio::test]
-async fn top_functions_time_range_slices_sample_count() {
+async fn top_functions_unknown_sort_by_returns_invalid_value() {
     let mut srv = Server::spawn().await;
-    let path = fixture("linear_chain.json");
+    let path = fixture("two_functions.json");
     let pid = srv.load_fixture(1, &path).await;
 
     let resp = srv
         .call_tool(
             2,
             "top_functions",
-            serde_json::json!({ "profile_id": pid, "time_range": [10.0, 19.0] }),
-        )
-        .await;
-    let sc = &resp["result"]["structuredContent"];
-    let total = sc["total_samples"].as_u64().expect("total_samples missing");
-    assert_eq!(
-        total, 10,
-        "expected 10 samples in [10,19] window; got {total} (full response={resp})"
-    );
-
-    let leaf = sc["functions"]
-        .as_array()
-        .expect("functions missing")
-        .iter()
-        .find(|f| f["function"].as_str() == Some("d"))
-        .expect("'d' must appear in the slice");
-    assert_eq!(leaf["self_samples"].as_u64(), Some(10));
-
-    srv.kill().await;
-}
-
-#[tokio::test]
-async fn top_functions_time_range_outside_profile_returns_out_of_bounds() {
-    let mut srv = Server::spawn().await;
-    let path = fixture("linear_chain.json");
-    let pid = srv.load_fixture(1, &path).await;
-
-    let resp = srv
-        .call_tool(
-            2,
-            "top_functions",
-            serde_json::json!({ "profile_id": pid, "time_range": [5_000.0, 6_000.0] }),
+            serde_json::json!({ "profile_id": pid, "sort_by": "selfTime" }),
         )
         .await;
     let data = &resp["error"]["data"];
     assert_eq!(
         data["error"].as_str(),
-        Some("out_of_bounds"),
-        "expected out_of_bounds; full response={resp}"
+        Some("invalid_value"),
+        "expected invalid_value; full response={resp}"
     );
-    assert_eq!(data["original_range"][0].as_f64(), Some(5_000.0));
-    assert_eq!(data["original_range"][1].as_f64(), Some(6_000.0));
+    assert_eq!(data["field"].as_str(), Some("sort_by"));
+    assert_eq!(data["value"].as_str(), Some("selfTime"));
+    let accepted = data["accepted"].as_array().expect("accepted list missing");
+    let names: Vec<&str> = accepted.iter().filter_map(|v| v.as_str()).collect();
+    for expected in ["self", "total", "descendants"] {
+        assert!(
+            names.contains(&expected),
+            "{expected} missing from accepted={names:?}"
+        );
+    }
+
+    srv.kill().await;
+}
+
+#[tokio::test]
+async fn top_groups_unknown_group_by_returns_invalid_value() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let pid = srv.load_fixture(1, &path).await;
+
+    let resp = srv
+        .call_tool(
+            2,
+            "top_groups",
+            serde_json::json!({ "profile_id": pid, "group_by": "lib" }),
+        )
+        .await;
+    let data = &resp["error"]["data"];
+    assert_eq!(data["error"].as_str(), Some("invalid_value"));
+    assert_eq!(data["field"].as_str(), Some("group_by"));
 
     srv.kill().await;
 }

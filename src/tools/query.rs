@@ -57,6 +57,33 @@ fn parse_pid(rest: &str) -> Option<Pid> {
     Some(Pid { value, suffix })
 }
 
+/// Map a user-supplied string against a fixed set of accepted values
+/// for a string-enum argument. `None` returns `default`; an unknown
+/// `Some(other)` returns [`ToolError::InvalidValue`] with the full
+/// accepted list — matching the structured-suggestion shape of
+/// `function_not_found.nearest_matches`. Unknown values were silently
+/// falling through to the default before, masking caller typos.
+fn parse_string_enum<T: Copy>(
+    field: &'static str,
+    raw: Option<&str>,
+    default: T,
+    table: &[(&'static str, T)],
+) -> Result<T, ToolError> {
+    let Some(value) = raw else {
+        return Ok(default);
+    };
+    for (name, val) in table {
+        if *name == value {
+            return Ok(*val);
+        }
+    }
+    Err(ToolError::InvalidValue {
+        field: field.to_owned(),
+        value: value.to_owned(),
+        accepted: table.iter().map(|(n, _)| (*n).to_owned()).collect(),
+    })
+}
+
 fn parse_filter(args: &CommonFilterArgs) -> Filter {
     let thread = args.thread.as_deref().map(|t| {
         if let Some(rest) = t.strip_prefix("tid:")
@@ -312,11 +339,16 @@ impl PollardServer {
         let q_args = top_functions::Args {
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
-            sort_by: match args.sort_by.as_deref() {
-                Some("total") => top_functions::SortBy::TotalTime,
-                Some("descendants") => top_functions::SortBy::Descendants,
-                _ => top_functions::SortBy::SelfTime,
-            },
+            sort_by: parse_string_enum(
+                "sort_by",
+                args.sort_by.as_deref(),
+                top_functions::SortBy::SelfTime,
+                &[
+                    ("self", top_functions::SortBy::SelfTime),
+                    ("total", top_functions::SortBy::TotalTime),
+                    ("descendants", top_functions::SortBy::Descendants),
+                ],
+            )?,
             filter_args: parse_filter(&args.common),
             expand_inlines: args.expand_inlines.unwrap_or(false),
             event,
@@ -335,19 +367,29 @@ impl PollardServer {
     ) -> Result<Json<top_groups::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
         let q_args = top_groups::Args {
-            group_by: match args.group_by.as_deref() {
-                Some("module") => top_groups::GroupBy::Module,
-                Some("file") => top_groups::GroupBy::File,
-                Some("directory") => top_groups::GroupBy::Directory,
-                _ => top_groups::GroupBy::Function,
-            },
+            group_by: parse_string_enum(
+                "group_by",
+                args.group_by.as_deref(),
+                top_groups::GroupBy::Function,
+                &[
+                    ("function", top_groups::GroupBy::Function),
+                    ("module", top_groups::GroupBy::Module),
+                    ("file", top_groups::GroupBy::File),
+                    ("directory", top_groups::GroupBy::Directory),
+                ],
+            )?,
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
-            sort_by: match args.sort_by.as_deref() {
-                Some("total") => top_groups::SortBy::TotalTime,
-                Some("descendants") => top_groups::SortBy::Descendants,
-                _ => top_groups::SortBy::SelfTime,
-            },
+            sort_by: parse_string_enum(
+                "sort_by",
+                args.sort_by.as_deref(),
+                top_groups::SortBy::SelfTime,
+                &[
+                    ("self", top_groups::SortBy::SelfTime),
+                    ("total", top_groups::SortBy::TotalTime),
+                    ("descendants", top_groups::SortBy::Descendants),
+                ],
+            )?,
             filter_args: parse_filter(&args.common),
             expand_inlines: args.expand_inlines.unwrap_or(false),
             directory_depth: args.directory_depth,
@@ -417,19 +459,29 @@ impl PollardServer {
         let q_args = compare::Args {
             filter: args.filter.clone(),
             limit: args.limit.unwrap_or(0),
-            sort_by: match args.sort_by.as_deref() {
-                Some("a") => compare::SortBy::A,
-                Some("b") => compare::SortBy::B,
-                Some("delta_ms") => compare::SortBy::DeltaMs,
-                _ => compare::SortBy::Delta,
-            },
+            sort_by: parse_string_enum(
+                "sort_by",
+                args.sort_by.as_deref(),
+                compare::SortBy::Delta,
+                &[
+                    ("delta", compare::SortBy::Delta),
+                    ("delta_ms", compare::SortBy::DeltaMs),
+                    ("a", compare::SortBy::A),
+                    ("b", compare::SortBy::B),
+                ],
+            )?,
             min_delta_pct: args.min_delta_pct,
             filter_args: parse_filter(&args.common),
             expand_inlines: args.expand_inlines.unwrap_or(false),
-            align_by: match args.align_by.as_deref() {
-                Some("function") => compare::AlignBy::Function,
-                _ => compare::AlignBy::FunctionAndModule,
-            },
+            align_by: parse_string_enum(
+                "align_by",
+                args.align_by.as_deref(),
+                compare::AlignBy::FunctionAndModule,
+                &[
+                    ("function_and_module", compare::AlignBy::FunctionAndModule),
+                    ("function", compare::AlignBy::Function),
+                ],
+            )?,
             event,
         };
         let result = compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
