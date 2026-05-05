@@ -1,7 +1,7 @@
 //! Drill-down MCP tools: source_for_function, asm_for_function.
 
 use crate::error::ToolError;
-use crate::query::{address_to_function, asm, source};
+use crate::query::{address_to_function, asm, compare_functions, source};
 use crate::tools::PollardServer;
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -56,6 +56,34 @@ pub struct AsmForFunctionArgs {
     pub function: String,
     #[serde(default)]
     pub module: Option<String>,
+    #[serde(default)]
+    pub with_samples: Option<bool>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct CompareFunctionsArgs {
+    /// Profile ID for side A. Required.
+    pub profile_id_a: String,
+    /// Profile ID for side B. Defaults to `profile_id_a` — pass a
+    /// different ID to compare two functions across two recordings
+    /// (e.g. before/after a refactor).
+    #[serde(default)]
+    pub profile_id_b: Option<String>,
+    /// Function to disassemble on side A.
+    /// Substring match by default; prefix with `re:` for a regex (use `re:(?i)foo` for case-insensitive).
+    pub function_a: String,
+    /// Function to disassemble on side B.
+    /// Substring match by default; prefix with `re:` for a regex (use `re:(?i)foo` for case-insensitive).
+    pub function_b: String,
+    /// Optional module disambiguator for side A's function.
+    #[serde(default)]
+    pub module_a: Option<String>,
+    /// Optional module disambiguator for side B's function.
+    #[serde(default)]
+    pub module_b: Option<String>,
+    /// Forwarded to the underlying `asm_for_function` calls. Defaults
+    /// to `true` — turn off only if you don't care about the per-row
+    /// sample columns and want to halve the wire size.
     #[serde(default)]
     pub with_samples: Option<bool>,
 }
@@ -119,6 +147,32 @@ impl PollardServer {
             with_samples: args.with_samples.unwrap_or(true),
         };
         let result = asm::asm_for_function(session.profile(), &q_args).await?;
+        Ok(Json(result))
+    }
+
+    #[tool(
+        name = "compare_functions",
+        description = "Side-by-side asm diff of two functions, with per-instruction sample counts on both sides. Aligns rows via LCS over a normalized instruction key (registers and numeric immediates collapsed) so register renames and differing displacements still pair instead of fragmenting the diff. Use within one profile to answer \"why is `simd_rows_1st` faster than `simd_cols_1st`\" or across two profiles (`profile_id_b=<other>`) to read a before/after refactor. The displayed asm text is unchanged; normalization is alignment-only."
+    )]
+    pub async fn compare_functions(
+        &self,
+        Parameters(args): Parameters<CompareFunctionsArgs>,
+    ) -> Result<Json<compare_functions::Output>, ErrorData> {
+        let session_a = session(self, &args.profile_id_a).await?;
+        let session_b = match args.profile_id_b.as_deref() {
+            Some(id) if id != args.profile_id_a => session(self, id).await?,
+            _ => std::sync::Arc::clone(&session_a),
+        };
+        let q_args = compare_functions::Args {
+            function_a: args.function_a,
+            module_a: args.module_a,
+            function_b: args.function_b,
+            module_b: args.module_b,
+            with_samples: args.with_samples.unwrap_or(true),
+        };
+        let result =
+            compare_functions::compare_functions(session_a.profile(), session_b.profile(), &q_args)
+                .await?;
         Ok(Json(result))
     }
 }
