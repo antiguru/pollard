@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(symbolicate)* don't enable macOS Spotlight on Linux ([#56](https://github.com/antiguru/pollard/issues/56)).
+  `SymbolManagerConfig::use_spotlight(true)` was unconditional. On Linux that pushed wholesym into a macOS-shaped resolution path that ended in a `dyld_shared_cache_x86_64` read, so every Linux `.so` failed symbolication with a stderr line like `could not load symbols for "/usr/lib64/libc-2.28.so": ... /System/Library/dyld/dyld_shared_cache_x86_64 ... No such file or directory`. Profiles imported from `perf.data` showed up degraded (`top_functions`, `call_tree`, `source_for_function` lost names) and the stderr volume drowned other diagnostics. Spotlight is now gated behind `cfg!(target_os = "macos")`, leaving the macOS dSYM-bundle lookup intact and skipping it entirely on other targets.
+
 ### Changed
 
 - *(tools)* document the `re:` regex prefix on every function-pattern arg ([#66](https://github.com/antiguru/pollard/issues/66)).
