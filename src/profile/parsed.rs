@@ -88,6 +88,18 @@ impl Profile {
         })
     }
 
+    /// Wrap a previously-issued [`ThreadHandle`] back into a
+    /// [`ThreadView`]. Used when an aggregator iterates handles via
+    /// [`crate::query::filters::Filter::threads`] but still needs
+    /// per-thread metadata (pid, name, …) without re-walking and
+    /// re-filtering [`Self::threads`].
+    pub fn thread_view(&self, handle: ThreadHandle) -> ThreadView<'_> {
+        ThreadView {
+            profile: self,
+            handle,
+        }
+    }
+
     pub fn duration_ms(&self) -> f64 {
         self.threads()
             .filter_map(|t| {

@@ -22,6 +22,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(query)* surface cross-process aggregation on inverted `call_tree` ([#68](https://github.com/antiguru/pollard/issues/68)).
+  An inverted (`inverted=true`) `call_tree` without a `process=` filter pulls callers from every pid that hits a given leaf. Reasonable for "where is `memcpy` called from anywhere", but the same caller chain can mix time from two different processes via different code paths and the result was indistinguishable from a single-process tree. The response now carries `cross_process: true` and `processes_in_tree: [{pid, name, samples, pct}]` (biggest first; `pid` matches the `process=pid:` wire form) when the inverted aggregation crossed >1 distinct pid; single-process and process-filtered results stay silent. Top-down trees never emit the signal because their root structure already separates per-process callees.
+
 - *(query)* `summary` accepts the standard `process` / `thread` / `time_range` filter ([#63](https://github.com/antiguru/pollard/issues/63)).
   Previously profile-wide only, so the natural follow-up after spotting a hot pid in `top_processes` was a hand-composed `top_functions` + `top_modules` + dominant-thread reasoning. The filter now flows through every sample-count surface in the response (`total_samples`, `time_range_ms`, `duration_ms`, `top_processes`, `top_threads`, `top_modules`, both top-functions lists, `dominant_thread`); recording-level fields (`interval_ms`, `sample_rate_hz`, `unsymbolicated_pct`, `profile_start_ms`) stay profile-wide because they describe the recording, not the slice. Default args reproduce the prior profile-wide behavior.
 
