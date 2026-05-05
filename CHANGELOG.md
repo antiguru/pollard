@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - *(query)* surface child names on `call_tree` pruning markers ([#61](https://github.com/antiguru/pollard/issues/61)).
   Omitted-children markers now carry `top_omitted` (up to 3 entries of `{function, pct}`, biggest first) and truncated-subtree markers carry the cutoff frame's `function`, so a caller can tell *what* was dropped and decide whether widening `min_pct` / `max_breadth` / `max_depth` is worth a second call.
+- *(query)* warn when bare-name `process=` aggregates across multiple pids ([#62](https://github.com/antiguru/pollard/issues/62)).
+  `top_functions`, `call_tree`, `top_groups`, `stacks_containing`, and `compare_profiles` now expose `matched_processes: [{pid, name}]` (per-side `a_/b_` for `compare_profiles`) when a bare-name filter resolves to more than one distinct pid, listing the pids it absorbed so the caller can disambiguate via `pid:N` / `pid:N.M`. Bare-name filters that resolve to a single pid stay silent.
 
 ### Fixed
 

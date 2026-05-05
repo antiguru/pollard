@@ -8,7 +8,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{ProcessRef, ToolError};
 use crate::profile::Profile;
 use crate::query::filters::Filter;
 use crate::query::top_functions::{Counts, aggregate_grouped};
@@ -62,6 +62,11 @@ pub struct Output {
     pub filter: Option<String>,
     pub sort_by: &'static str,
     pub groups: Vec<GroupEntry>,
+    /// Set when a bare-name `process=` filter aggregated across more than
+    /// one distinct pid. Lists the matched `(pid, name)` pairs so the
+    /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_processes: Option<Vec<ProcessRef>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -142,6 +147,7 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             SortBy::Descendants => "descendants",
         },
         groups,
+        matched_processes: args.filter_args.bare_name_multi_match(profile),
     })
 }
 
