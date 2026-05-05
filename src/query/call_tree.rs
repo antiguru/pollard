@@ -203,7 +203,9 @@ pub fn call_tree(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
                 return Err(ToolError::FunctionNotFound {
                     function: needle,
-                    nearest_matches: scored.into_iter().map(|(n, _)| n).collect(),
+                    nearest_matches: crate::error::truncate_nearest_matches(
+                        scored.into_iter().map(|(n, _)| n).collect(),
+                    ),
                 });
             };
 
@@ -272,10 +274,7 @@ fn call_tree_inner(
     {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(m),
-            nearest_matches: nearest_function_scored(profile, m)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
+            nearest_matches: crate::matching::nearest_matches_for_error(profile, m),
         });
     }
     if let Some(m) = &paths_to
@@ -283,10 +282,7 @@ fn call_tree_inner(
     {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(m),
-            nearest_matches: nearest_function_scored(profile, m)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
+            nearest_matches: crate::matching::nearest_matches_for_error(profile, m),
         });
     }
 

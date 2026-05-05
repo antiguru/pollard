@@ -502,7 +502,9 @@ pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListi
             let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
                 return Err(ToolError::FunctionNotFound {
                     function: args.function.clone(),
-                    nearest_matches: scored.into_iter().map(|(n, _)| n).collect(),
+                    nearest_matches: crate::error::truncate_nearest_matches(
+                        scored.into_iter().map(|(n, _)| n).collect(),
+                    ),
                 });
             };
             let dym = DidYouMean {
@@ -523,15 +525,24 @@ async fn asm_for_function_inner(
 ) -> Result<AsmListing, ToolError> {
     let matcher = required_matcher("function", function)?;
 
+    // If the caller passed `module=`, validate it points at a real
+    // library before searching for the function. Without this check a
+    // typoed module would fall through to the function-resolver and
+    // surface as `function_not_found` — confusing when the function
+    // name was actually correct.
+    if let Some(m) = args.module.as_deref() {
+        let names = profile.module_names();
+        if !names.iter().any(|n| n == m) {
+            return Err(crate::error::module_not_found(m, names));
+        }
+    }
+
     let loc = match resolve_function(profile, &matcher, args.module.as_deref()) {
         ResolveResult::Single(loc) => loc,
         ResolveResult::NotFound => {
             return Err(ToolError::FunctionNotFound {
                 function: matcher_to_string(&matcher),
-                nearest_matches: nearest_function_scored(profile, &matcher)
-                    .into_iter()
-                    .map(|(n, _)| n)
-                    .collect(),
+                nearest_matches: crate::matching::nearest_matches_for_error(profile, &matcher),
             });
         }
         ResolveResult::Ambiguous(candidates) => {
@@ -605,6 +616,32 @@ mod tests {
                 assert!(names.contains(&"cold"), "expected `cold` in {names:?}");
             }
             other => panic!("expected Ambiguous, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_module_returns_module_not_found() {
+        // Up-front module check should reject `module="missing"`
+        // before the function resolver runs, so the caller sees
+        // `module_not_found` instead of `function_not_found`.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let err = asm_for_function(
+            &profile,
+            &Args {
+                function: "hot".to_owned(),
+                module: Some("missing".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            crate::error::ToolError::ModuleNotFound { module, .. } => {
+                assert_eq!(module, "missing");
+            }
+            other => panic!("expected ModuleNotFound, got {other:?}"),
         }
     }
 }

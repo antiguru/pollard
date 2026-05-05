@@ -76,12 +76,15 @@ pub async fn address_to_function(profile: &Profile, args: &Args) -> Result<Outpu
         .collect();
 
     if candidates.is_empty() {
-        return Err(ToolError::Internal {
-            message: match &args.module {
-                Some(m) => format!("no library matches module filter {m:?}"),
-                None => "profile contains no libraries".to_owned(),
-            },
-        });
+        return match &args.module {
+            // Module filter typo / unknown library — surface a
+            // structured `module_not_found` so the caller sees real
+            // candidates instead of a generic Internal message.
+            Some(m) => Err(crate::error::module_not_found(m, profile.module_names())),
+            None => Err(ToolError::Internal {
+                message: "profile contains no libraries".to_owned(),
+            }),
+        };
     }
 
     let config = SymbolManagerConfig::new().use_spotlight(true);

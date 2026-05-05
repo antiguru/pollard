@@ -83,6 +83,7 @@ fn parse_string_enum<T: Copy>(
         field: field.to_owned(),
         value: value.to_owned(),
         accepted: table.iter().map(|(n, _)| (*n).to_owned()).collect(),
+        hint: None,
     })
 }
 
@@ -105,6 +106,7 @@ pub(crate) fn parse_filter(args: &CommonFilterArgs) -> Result<Filter, ToolError>
                     field: "thread".to_owned(),
                     value: t.to_owned(),
                     accepted: vec!["tid:NNN".to_owned(), "<thread name>".to_owned()],
+                    hint: None,
                 })?;
                 return Ok(ThreadFilter::Tid(n));
             }
@@ -124,6 +126,7 @@ pub(crate) fn parse_filter(args: &CommonFilterArgs) -> Result<Filter, ToolError>
                         "pid:NNN.M".to_owned(),
                         "<process name>".to_owned(),
                     ],
+                    hint: None,
                 })?;
                 return Ok(ProcessFilter::Pid(pid));
             }

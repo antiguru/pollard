@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::{ProcessRef, ThreadRef, ToolError};
+use crate::error::{ERROR_LIST_LIMIT, ProcessRef, ThreadRef, ToolError};
 use crate::profile::raw::Pid;
 use crate::profile::{Profile, ThreadHandle};
 
@@ -76,13 +76,21 @@ impl Filter {
         if self.threads(profile).next().is_some() {
             return Ok(());
         }
-        let available_threads = profile
+        // Rank by sample count, descending, so the busiest threads stay
+        // visible after truncation. Equal counts tiebreak by tid asc so
+        // the output is stable across calls.
+        let mut all: Vec<ThreadRef> = profile
             .threads()
             .map(|t| ThreadRef {
                 tid: t.tid(),
                 name: t.name().unwrap_or("").to_owned(),
+                samples: t.raw().samples.length as u64,
             })
             .collect();
+        all.sort_by(|a, b| b.samples.cmp(&a.samples).then_with(|| a.tid.cmp(&b.tid)));
+        let total = all.len();
+        let available_threads: Vec<ThreadRef> = all.into_iter().take(ERROR_LIST_LIMIT).collect();
+        let omitted_thread_count = total.saturating_sub(available_threads.len());
         let thread = match self.thread.as_ref().unwrap() {
             ThreadFilter::Tid(t) => t.to_string(),
             ThreadFilter::Name(n) => n.clone(),
@@ -90,13 +98,15 @@ impl Filter {
         Err(ToolError::ThreadNotFound {
             thread,
             available_threads,
+            omitted_thread_count,
         })
     }
 
     /// Validate process filter; if it matches no threads, return a
-    /// `process_not_found` error listing every distinct `(pid, name)` in
-    /// the profile so the caller can pick a real one. Mirrors
-    /// [`Self::validate_thread`].
+    /// `process_not_found` error listing the busiest distinct
+    /// `(pid, name)` pairs (capped at [`ERROR_LIST_LIMIT`]) so the
+    /// caller can pick a real one without drowning in 196-process
+    /// listings. Mirrors [`Self::validate_thread`].
     pub fn validate_process(&self, profile: &Profile) -> Result<(), ToolError> {
         let Some(pf) = self.process.as_ref() else {
             return Ok(());
@@ -111,22 +121,32 @@ impl Filter {
         if process_only.threads(profile).next().is_some() {
             return Ok(());
         }
-        let mut seen: std::collections::BTreeMap<Pid, String> = std::collections::BTreeMap::new();
+        // Aggregate per-pid: pick the first non-empty process name we
+        // see, sum samples across all threads of the pid.
+        let mut seen: std::collections::BTreeMap<Pid, (String, u64)> =
+            std::collections::BTreeMap::new();
         for t in profile.threads() {
             let entry = seen.entry(t.pid_full()).or_default();
-            if entry.is_empty()
+            if entry.0.is_empty()
                 && let Some(name) = t.process_name().filter(|s| !s.is_empty())
             {
-                *entry = name.to_owned();
+                entry.0 = name.to_owned();
             }
+            entry.1 += t.raw().samples.length as u64;
         }
-        let available_processes = seen
+        let mut all: Vec<ProcessRef> = seen
             .into_iter()
-            .map(|(pid, name)| ProcessRef {
+            .map(|(pid, (name, samples))| ProcessRef {
                 pid: pid.to_string(),
                 name,
+                samples,
             })
             .collect();
+        // Rank by sample count desc; pid asc tiebreak for stability.
+        all.sort_by(|a, b| b.samples.cmp(&a.samples).then_with(|| a.pid.cmp(&b.pid)));
+        let total = all.len();
+        let available_processes: Vec<ProcessRef> = all.into_iter().take(ERROR_LIST_LIMIT).collect();
+        let omitted_process_count = total.saturating_sub(available_processes.len());
         let process = match pf {
             ProcessFilter::Pid(p) => p.to_string(),
             ProcessFilter::Name(n) => n.clone(),
@@ -134,6 +154,7 @@ impl Filter {
         Err(ToolError::ProcessNotFound {
             process,
             available_processes,
+            omitted_process_count,
         })
     }
 
@@ -152,26 +173,31 @@ impl Filter {
         let ProcessFilter::Name(needle) = self.process.as_ref()? else {
             return None;
         };
-        let mut seen: std::collections::BTreeMap<Pid, String> = std::collections::BTreeMap::new();
+        let mut seen: std::collections::BTreeMap<Pid, (String, u64)> =
+            std::collections::BTreeMap::new();
         for t in profile.threads() {
             if t.process_name().is_none_or(|name| name != needle) {
                 continue;
             }
-            seen.entry(t.pid_full()).or_insert_with(|| {
-                t.process_name()
+            let entry = seen.entry(t.pid_full()).or_default();
+            if entry.0.is_empty() {
+                entry.0 = t
+                    .process_name()
                     .filter(|s| !s.is_empty())
                     .unwrap_or("")
-                    .to_owned()
-            });
+                    .to_owned();
+            }
+            entry.1 += t.raw().samples.length as u64;
         }
         if seen.len() <= 1 {
             return None;
         }
         Some(
             seen.into_iter()
-                .map(|(pid, name)| ProcessRef {
+                .map(|(pid, (name, samples))| ProcessRef {
                     pid: pid.to_string(),
                     name,
+                    samples,
                 })
                 .collect(),
         )
@@ -350,6 +376,136 @@ mod tests {
     }
 
     #[test]
+    fn process_not_found_caps_available_at_error_list_limit() {
+        // Build a fixture with `ERROR_LIST_LIMIT + 5` distinct procs so
+        // we can assert the cap kicks in and `omitted_process_count`
+        // reports the rest.
+        let mut threads = String::new();
+        let target = ERROR_LIST_LIMIT + 5;
+        for i in 0..target {
+            if i > 0 {
+                threads.push(',');
+            }
+            // Each process has 1 thread. Sample counts ascend by `i`
+            // so the highest-pid process is also the busiest — that
+            // tells us the rank-by-samples sort is what's actually
+            // selecting which entries survive truncation.
+            let samples = (i + 1) * 10;
+            let times: Vec<String> = (0..samples).map(|t| t.to_string()).collect();
+            let stacks: Vec<&str> = (0..samples).map(|_| "null").collect();
+            threads.push_str(&format!(
+                r#"{{
+                    "name": "t{i}",
+                    "processName": "proc-{i}",
+                    "tid": {i},
+                    "pid": {i},
+                    "registerTime": 0.0,
+                    "stringArray": [],
+                    "frameTable": {{"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []}},
+                    "stackTable": {{"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []}},
+                    "samples": {{"length": {samples}, "stack": [{stacks}], "time": [{times}]}},
+                    "funcTable": {{"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []}},
+                    "resourceTable": {{"length": 0, "lib": [], "name": [], "host": [], "type": []}},
+                    "nativeSymbols": {{"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}}
+                }}"#,
+                stacks = stacks.join(","),
+                times = times.join(","),
+            ));
+        }
+        let json = format!(
+            r#"{{
+                "meta": {{"interval": 1.0, "startTime": 0.0, "product": "test"}},
+                "libs": [],
+                "threads": [{threads}]
+            }}"#
+        );
+        let raw: RawProfile = serde_json::from_str(&json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let filter = Filter {
+            process: Some(ProcessFilter::Name("nope".into())),
+            ..Default::default()
+        };
+        let err = filter.validate_process(&profile).unwrap_err();
+        match err {
+            ToolError::ProcessNotFound {
+                available_processes,
+                omitted_process_count,
+                ..
+            } => {
+                assert_eq!(available_processes.len(), ERROR_LIST_LIMIT);
+                assert_eq!(omitted_process_count, target - ERROR_LIST_LIMIT);
+                // Busiest first — proc with pid `target-1` has the most
+                // samples by construction.
+                assert_eq!(available_processes[0].name, format!("proc-{}", target - 1));
+                assert!(available_processes[0].samples > available_processes[1].samples);
+            }
+            other => panic!("expected ProcessNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn thread_not_found_caps_available_at_error_list_limit() {
+        // Same construction as above but the filter rejects every
+        // thread — exercises `available_threads` truncation.
+        let mut threads = String::new();
+        let target = ERROR_LIST_LIMIT + 3;
+        for i in 0..target {
+            if i > 0 {
+                threads.push(',');
+            }
+            let samples = (i + 1) * 10;
+            let times: Vec<String> = (0..samples).map(|t| t.to_string()).collect();
+            let stacks: Vec<&str> = (0..samples).map(|_| "null").collect();
+            threads.push_str(&format!(
+                r#"{{
+                    "name": "t{i}",
+                    "processName": "p",
+                    "tid": {i},
+                    "pid": 1,
+                    "registerTime": 0.0,
+                    "stringArray": [],
+                    "frameTable": {{"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []}},
+                    "stackTable": {{"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []}},
+                    "samples": {{"length": {samples}, "stack": [{stacks}], "time": [{times}]}},
+                    "funcTable": {{"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []}},
+                    "resourceTable": {{"length": 0, "lib": [], "name": [], "host": [], "type": []}},
+                    "nativeSymbols": {{"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}}
+                }}"#,
+                stacks = stacks.join(","),
+                times = times.join(","),
+            ));
+        }
+        let json = format!(
+            r#"{{
+                "meta": {{"interval": 1.0, "startTime": 0.0, "product": "test"}},
+                "libs": [],
+                "threads": [{threads}]
+            }}"#
+        );
+        let raw: RawProfile = serde_json::from_str(&json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let filter = Filter {
+            thread: Some(ThreadFilter::Name("nope".into())),
+            ..Default::default()
+        };
+        let err = filter.validate_thread(&profile).unwrap_err();
+        match err {
+            ToolError::ThreadNotFound {
+                available_threads,
+                omitted_thread_count,
+                ..
+            } => {
+                assert_eq!(available_threads.len(), ERROR_LIST_LIMIT);
+                assert_eq!(omitted_thread_count, target - ERROR_LIST_LIMIT);
+                // Highest-tid thread has the most samples in this
+                // fixture, so it's the leader after rank-by-samples.
+                assert_eq!(available_threads[0].tid, (target - 1) as u64);
+            }
+            other => panic!("expected ThreadNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn unmatched_process_returns_empty_and_validates_with_error() {
         let p = multi_process_fixture();
         let filter = Filter {
@@ -362,6 +518,7 @@ mod tests {
             ToolError::ProcessNotFound {
                 process,
                 available_processes,
+                ..
             } => {
                 assert_eq!(process, "nope");
                 let names: Vec<_> = available_processes.iter().map(|r| &r.name).collect();
