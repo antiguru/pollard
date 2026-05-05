@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- *(tools)* document the `re:(?i)` case-insensitive convention on every function-pattern arg ([#67](https://github.com/antiguru/pollard/issues/67)).
+  Substring matching is case-sensitive (`memcpy` ≠ `MEMCPY`), which surprises during exploration. The regex form already supports the standard `(?i)` inline flag; the per-arg docs and the `src/matching.rs` module header now spell that out so callers don't have to discover it from the `regex` crate. The canonical one-liner is now `Substring match by default; prefix with `re:` for a regex (use `re:(?i)foo` for case-insensitive).` — same wording at every site so it stays grep-able alongside the #66 line. Default behavior is unchanged.
+
 - *(tools)* document the `re:` regex prefix on every function-pattern arg ([#66](https://github.com/antiguru/pollard/issues/66)).
   The prefix that flips a function pattern from substring match to regex was discoverable through the skill description, not through per-arg docs — callers without the skill missed the feature, and callers with it had to re-find which args supported it. Every function-pattern arg now carries the same one-line "Substring match by default; prefix with `re:` for a regex." in its `description`: `top_functions.filter`, `top_groups.filter`, `compare_profiles.filter`, `call_tree.root_function`, `call_tree.paths_to`, `folded_stacks.function_filter`, `stacks_containing.function`, `source_for_function.function`, `asm_for_function.function`. The wording is identical at every site so it's grep-able.
 

@@ -2,6 +2,12 @@
 //!
 //! Used uniformly by every tool parameter that takes a function name
 //! (`filter`, `function`, `root_function`, `paths_to`).
+//!
+//! Substring matching is case-sensitive. For a case-insensitive lookup,
+//! switch to the regex form and use the standard inline flag —
+//! `re:(?i)memcpy` matches `memcpy`, `MemCpy`, `MEMCPY`. Inline flags
+//! also scope per-group (`re:(?i:memcpy)Foo`), so anchoring or
+//! alternation with mixed case semantics works out of the box.
 
 #![allow(dead_code)]
 

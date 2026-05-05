@@ -20,7 +20,7 @@ async fn session(
 pub struct SourceForFunctionArgs {
     pub profile_id: String,
     /// Function to resolve.
-    /// Substring match by default; prefix with `re:` for a regex.
+    /// Substring match by default; prefix with `re:` for a regex (use `re:(?i)foo` for case-insensitive).
     pub function: String,
     #[serde(default)]
     pub module: Option<String>,
@@ -52,7 +52,7 @@ pub struct AddressToFunctionArgs {
 pub struct AsmForFunctionArgs {
     pub profile_id: String,
     /// Function to disassemble.
-    /// Substring match by default; prefix with `re:` for a regex.
+    /// Substring match by default; prefix with `re:` for a regex (use `re:(?i)foo` for case-insensitive).
     pub function: String,
     #[serde(default)]
     pub module: Option<String>,
