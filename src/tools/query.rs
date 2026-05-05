@@ -434,7 +434,7 @@ impl PollardServer {
 
     #[tool(
         name = "call_tree",
-        description = "Hierarchical call tree, pruned for LLM consumption. Pass `event=\"<name>\"` to build the tree from a marker-backed counter (cache-misses, branch-misses, instructions, …) instead of the default samples track."
+        description = "Hierarchical call tree, pruned for LLM consumption. Pass `event=\"<name>\"` to build the tree from a marker-backed counter (cache-misses, branch-misses, instructions, …) instead of the default samples track. With `inverted=true` and no `process=` filter, multi-process recordings expose `cross_process: true` plus a `processes_in_tree: [{pid, name, samples, pct}]` summary so the caller can tell when one leaf's caller chain mixes time from different processes; narrow with `process=pid:<N>` to peel off a single contributor."
     )]
     pub async fn call_tree(
         &self,

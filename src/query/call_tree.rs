@@ -7,6 +7,7 @@ use crate::matching::{
     DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, narrowing_matcher,
     nearest_function_scored,
 };
+use crate::profile::raw::Pid;
 use crate::profile::{Profile, ThreadHandle};
 use crate::query::event::EventSource;
 use crate::query::filters::Filter;
@@ -75,6 +76,34 @@ pub struct Output {
     /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_processes: Option<Vec<ProcessRef>>,
+    /// `true` when `inverted=true` and the tree aggregates leaves across
+    /// more than one process because no `process=` filter was set.
+    /// Only the inverted shape conflates callers across processes under
+    /// the same leaf — a top-down tree groups under the outermost frame
+    /// (typically per-process) and stays per-process by construction.
+    /// Surfaced so the caller can decide whether the `memcpy`-style
+    /// caller chain they're reading actually mixes time from two
+    /// different processes via different code paths. Omitted (`null`)
+    /// when the result is single-process or process-filtered.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_process: Option<bool>,
+    /// Per-process sample contribution to the tree, biggest first.
+    /// Set together with [`Self::cross_process`]. Each entry's `pct` is
+    /// share of `total_samples` (same denominator the tree uses), so
+    /// a caller can re-run with `process=pid:<N>` to peel off a single
+    /// contributor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processes_in_tree: Option<Vec<ProcessInTree>>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ProcessInTree {
+    /// `pid.suffix` when samply recorded a `.N` sub-process, otherwise
+    /// the bare OS pid. Same wire form `process=pid:` accepts.
+    pub pid: String,
+    pub name: String,
+    pub samples: u64,
+    pub pct: f32,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Clone)]
@@ -201,8 +230,17 @@ fn call_tree_inner(
     let mut total_samples: u64 = 0;
     let mut root_match_seen = false;
     let mut paths_to_match_seen = false;
+    // Track sample contribution per pid so we can flag inverted trees
+    // that silently aggregate callers across processes (#68). Keyed by
+    // the full `Pid` (incl. samply's `.N` sub-pid suffix) so a caller
+    // can disambiguate via `process=pid:<N>` / `pid:<N.M>`.
+    let mut per_pid: HashMap<Pid, (u64, String)> = HashMap::new();
 
     for handle in args.filter_args.threads(profile) {
+        let view = profile.thread_view(handle);
+        let pid = view.pid_full();
+        let name = view.process_name().unwrap_or("").to_owned();
+        let before = total_samples;
         accumulate_with_root(
             profile,
             handle,
@@ -217,6 +255,11 @@ fn call_tree_inner(
             &mut root_match_seen,
             &mut paths_to_match_seen,
         );
+        let added = total_samples - before;
+        if added > 0 {
+            let entry = per_pid.entry(pid).or_insert_with(|| (0, name));
+            entry.0 += added;
+        }
     }
 
     // If the user pinned the tree to a specific function (root_function or
@@ -265,6 +308,24 @@ fn call_tree_inner(
         compress_chains(node);
     }
 
+    let (cross_process, processes_in_tree) =
+        if args.inverted && args.filter_args.process.is_none() && per_pid.len() > 1 {
+            let total = total_samples.max(1) as f32;
+            let mut entries: Vec<ProcessInTree> = per_pid
+                .into_iter()
+                .map(|(pid, (samples, name))| ProcessInTree {
+                    pid: format_pid(&pid),
+                    name,
+                    samples,
+                    pct: 100.0 * samples as f32 / total,
+                })
+                .collect();
+            entries.sort_by(|a, b| b.samples.cmp(&a.samples).then_with(|| a.pid.cmp(&b.pid)));
+            (Some(true), Some(entries))
+        } else {
+            (None, None)
+        };
+
     Ok(Output {
         thread: None,
         total_samples,
@@ -278,7 +339,18 @@ fn call_tree_inner(
         tree,
         did_you_mean,
         matched_processes: args.filter_args.bare_name_multi_match(profile),
+        cross_process,
+        processes_in_tree,
     })
+}
+
+/// Render a [`Pid`] back to the wire form accepted by `process=pid:`.
+/// Bare pid when no sub-process suffix is set; `pid.suffix` otherwise.
+fn format_pid(pid: &Pid) -> String {
+    match pid.suffix {
+        Some(s) => format!("{}.{}", pid.value, s),
+        None => pid.value.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -849,5 +921,101 @@ mod tests {
         } else {
             panic!("expected frame root");
         }
+    }
+
+    /// Build a two-pid profile by re-parsing the two_functions fixture and
+    /// rewriting the second copy's pid / processName. RawThread is
+    /// `Deserialize`-only (no Clone), so we can't share a parsed thread
+    /// between the two pids — re-parsing keeps the test self-contained.
+    fn two_pid_profile() -> Profile {
+        let json = include_str!("../../tests/fixtures/two_functions.json");
+        let mut raw: RawProfile = serde_json::from_str(json).unwrap();
+        let mut second: RawProfile = serde_json::from_str(json).unwrap();
+        let mut clone = second.threads.remove(0);
+        clone.pid = crate::profile::raw::Pid {
+            value: 2,
+            suffix: None,
+        };
+        clone.process_name = Some("Other".into());
+        raw.threads.push(clone);
+        Profile::from_raw(raw)
+    }
+
+    /// Inverted call_tree without a process filter that pulls samples from
+    /// more than one pid must surface `cross_process: true` and a
+    /// `processes_in_tree` breakdown so callers don't silently conflate
+    /// `memcpy`-style caller chains across processes (#68).
+    #[test]
+    fn inverted_cross_process_signal() {
+        let profile = two_pid_profile();
+
+        let tree = call_tree(
+            &profile,
+            &Args {
+                inverted: true,
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(tree.cross_process, Some(true));
+        let entries = tree.processes_in_tree.expect("processes_in_tree set");
+        assert_eq!(entries.len(), 2);
+        let pids: Vec<_> = entries.iter().map(|p| p.pid.as_str()).collect();
+        assert!(pids.contains(&"1") && pids.contains(&"2"), "{pids:?}");
+        assert_eq!(entries.iter().map(|p| p.samples).sum::<u64>(), 200);
+    }
+
+    /// Top-down (non-inverted) trees stay silent — the synthetic ROOT
+    /// already separates per-process callees, so there's no
+    /// cross-process conflation to flag. Same fixture as the inverted
+    /// case to keep the two tests contrastable.
+    #[test]
+    fn top_down_does_not_emit_cross_process_signal() {
+        let profile = two_pid_profile();
+
+        let tree = call_tree(
+            &profile,
+            &Args {
+                inverted: false,
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(tree.cross_process, None);
+        assert!(tree.processes_in_tree.is_none());
+    }
+
+    /// An explicit `process=pid:<N>` filter is the user telling us which
+    /// pid they care about, so the cross-process signal should stay
+    /// silent even for inverted trees.
+    #[test]
+    fn process_filter_suppresses_cross_process_signal() {
+        let profile = two_pid_profile();
+
+        let tree = call_tree(
+            &profile,
+            &Args {
+                inverted: true,
+                min_pct: 0.0,
+                filter_args: Filter {
+                    process: Some(crate::query::filters::ProcessFilter::Pid(
+                        crate::profile::raw::Pid {
+                            value: 1,
+                            suffix: None,
+                        },
+                    )),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(tree.cross_process, None);
+        assert!(tree.processes_in_tree.is_none());
     }
 }
