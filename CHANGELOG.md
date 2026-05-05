@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- *(query)* surface child names on `call_tree` pruning markers ([#61](https://github.com/antiguru/pollard/issues/61)).
+  Omitted-children markers now carry `top_omitted` (up to 3 entries of `{function, pct}`, biggest first) and truncated-subtree markers carry the cutoff frame's `function`, so a caller can tell *what* was dropped and decide whether widening `min_pct` / `max_breadth` / `max_depth` is worth a second call.
+
 ### Fixed
 
 - *(query)* align `summary.time_range_ms` with the `time_range` filter contract ([#64](https://github.com/antiguru/pollard/issues/64)).
