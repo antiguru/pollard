@@ -1,7 +1,7 @@
 //! Lifecycle MCP tools: load_profile, unload_profile, list_profiles, describe_profile.
 
 use crate::error::ToolError;
-use crate::query::describe::{ProfileDescription, describe};
+use crate::query::describe::{DEFAULT_TOP_N, ProfileDescription, describe};
 use crate::query::summary;
 use crate::tools::PollardServer;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -21,6 +21,20 @@ pub struct LoadProfileArgs {
     /// Optional human-readable label. Defaults to the file basename.
     #[serde(default)]
     pub name: Option<String>,
+    /// Cap on processes (and threads per process) returned in the
+    /// description. 0-sample entries are always dropped first. Omit for
+    /// the default; call `describe_profile` with a larger value to widen.
+    #[serde(default)]
+    pub top_n: Option<usize>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DescribeProfileArgs {
+    pub profile_id: String,
+    /// Cap on processes (and threads per process). 0-sample entries are
+    /// always dropped first. Omit for the default.
+    #[serde(default)]
+    pub top_n: Option<usize>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -98,6 +112,7 @@ impl PollardServer {
             session.name(),
             &session.path().display().to_string(),
             session.unsymbolicated_pct(),
+            args.top_n.unwrap_or(DEFAULT_TOP_N),
         );
         let evicted = evicted
             .into_iter()
@@ -153,10 +168,12 @@ impl PollardServer {
         Ok(Json(ListResult { profiles, evicted }))
     }
 
-    #[tool(description = "Describe a loaded profile: processes, threads, sample counts.")]
+    #[tool(
+        description = "Describe a loaded profile: top processes and threads by sample count, with totals and omitted-entry counts. Use `top_n` to widen the per-call window."
+    )]
     pub async fn describe_profile(
         &self,
-        Parameters(args): Parameters<ProfileIdArgs>,
+        Parameters(args): Parameters<DescribeProfileArgs>,
     ) -> Result<Json<ProfileDescription>, rmcp::ErrorData> {
         let session = self.registry.get_or_error(&args.profile_id).await?;
         Ok(Json(describe(
@@ -165,6 +182,7 @@ impl PollardServer {
             session.name(),
             &session.path().display().to_string(),
             session.unsymbolicated_pct(),
+            args.top_n.unwrap_or(DEFAULT_TOP_N),
         )))
     }
 

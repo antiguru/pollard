@@ -10,38 +10,16 @@ expression: desc
   "interval_ms": 1.0,
   "sample_rate_hz": 1000.0,
   "total_samples": "[total]",
+  "total_processes": 3,
+  "total_threads": 11,
   "unsymbolicated_pct": "[pct]",
   "processes": [
-    {
-      "pid": "1969186",
-      "name": "samply",
-      "thread_count": 1,
-      "threads": [
-        {
-          "tid": 1969186,
-          "name": "samply",
-          "samples": "[n]",
-          "duration_ms": "[dur]"
-        }
-      ]
-    },
     {
       "pid": "1969186.1",
       "name": "rustfmt",
       "thread_count": 9,
+      "total_samples": "[total]",
       "threads": [
-        {
-          "tid": 1969186,
-          "name": "rustfmt",
-          "samples": "[n]",
-          "duration_ms": "[dur]"
-        },
-        {
-          "tid": 1969260,
-          "name": "tokio-runtime-w",
-          "samples": "[n]",
-          "duration_ms": "[dur]"
-        },
         {
           "tid": 1969261,
           "name": "tokio-runtime-w",
@@ -49,7 +27,7 @@ expression: desc
           "duration_ms": "[dur]"
         },
         {
-          "tid": 1969262,
+          "tid": 1969260,
           "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
@@ -67,6 +45,24 @@ expression: desc
           "duration_ms": "[dur]"
         },
         {
+          "tid": 1969267,
+          "name": "tokio-runtime-w",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 1969186,
+          "name": "rustfmt",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
+          "tid": 1969262,
+          "name": "tokio-runtime-w",
+          "samples": "[n]",
+          "duration_ms": "[dur]"
+        },
+        {
           "tid": 1969265,
           "name": "tokio-runtime-w",
           "samples": "[n]",
@@ -77,10 +73,18 @@ expression: desc
           "name": "tokio-runtime-w",
           "samples": "[n]",
           "duration_ms": "[dur]"
-        },
+        }
+      ]
+    },
+    {
+      "pid": "1969186",
+      "name": "samply",
+      "thread_count": 1,
+      "total_samples": "[total]",
+      "threads": [
         {
-          "tid": 1969267,
-          "name": "tokio-runtime-w",
+          "tid": 1969186,
+          "name": "samply",
           "samples": "[n]",
           "duration_ms": "[dur]"
         }
@@ -90,6 +94,7 @@ expression: desc
       "pid": "1969186.2",
       "name": "rustfmt",
       "thread_count": 1,
+      "total_samples": "[total]",
       "threads": [
         {
           "tid": 1969186,

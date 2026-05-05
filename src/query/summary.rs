@@ -24,7 +24,10 @@ const DEFAULT_MODULE_LIMIT: usize = 5;
 pub struct Output {
     pub profile_id: String,
     pub name: String,
-    pub duration_ms: f64,
+    /// Wall-clock span across all threads, rounded to whole milliseconds.
+    /// See [`crate::query::describe::ProfileDescription::duration_ms`] for
+    /// caveats around event-shaped (non-time-sampled) profiles.
+    pub duration_ms: u64,
     pub interval_ms: f64,
     pub sample_rate_hz: f64,
     pub total_samples: u64,
@@ -69,7 +72,8 @@ pub fn summary(
 ) -> Result<Output, ToolError> {
     // Reuse `describe` rather than re-deriving sample-rate / total-samples
     // so the two tools cannot disagree about how those values are counted.
-    let desc = describe(profile, profile_id, name, path, unsymbolicated_pct);
+    // `top_n=0` skips the per-process detail we don't surface here.
+    let desc = describe(profile, profile_id, name, path, unsymbolicated_pct, 0);
 
     let time_range_ms = profile_time_range(profile);
     let dominant_thread = compute_dominant_thread(profile, desc.total_samples);
