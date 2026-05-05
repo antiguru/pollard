@@ -22,6 +22,7 @@ async fn describe_snapshot() {
         session.name(),
         session.path().display().to_string().as_str(),
         session.unsymbolicated_pct(),
+        pollard::query::describe::DEFAULT_TOP_N,
     );
 
     assert_json_snapshot!(desc, {
@@ -30,8 +31,11 @@ async fn describe_snapshot() {
         ".duration_ms" => "[duration]",
         ".total_samples" => "[total]",
         ".unsymbolicated_pct" => "[pct]",
+        ".processes[].total_samples" => "[total]",
+        ".processes[].omitted_thread_samples" => "[n]",
         ".processes[].threads[].samples" => "[n]",
         ".processes[].threads[].duration_ms" => "[dur]",
+        ".omitted_process_samples" => "[n]",
     });
 }
 
