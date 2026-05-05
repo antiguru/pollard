@@ -10,6 +10,7 @@
 
 use crate::error::ToolError;
 use crate::profile::Profile;
+use crate::profile::symbolicate::LibSymbolicationOutcome;
 use crate::query::describe::describe;
 use crate::query::filters::Filter;
 use crate::query::top_functions::{self, FunctionEntry, SortBy};
@@ -66,6 +67,12 @@ pub struct Output {
     pub top_modules: Vec<ModuleEntry>,
     pub top_self_functions: Vec<FunctionEntry>,
     pub top_total_functions: Vec<FunctionEntry>,
+    /// Per-lib symbolication outcomes worth flagging — non-`Loaded`
+    /// libs, plus loaded libs whose every address lookup missed (a
+    /// stale-binary signature; see issue #80). Empty when every lib
+    /// loaded and resolved at least one frame.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub lib_diagnostics: Vec<LibSymbolicationOutcome>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -194,6 +201,11 @@ pub fn summary(
         top_modules,
         top_self_functions: by_self.functions,
         top_total_functions: by_total.functions,
+        // Filled in by the lifecycle tool wrapper, which has access to
+        // [`crate::session::ProfileSession::lib_outcomes`]. Default
+        // empty so non-tool callers (tests, ad-hoc diagnostics) don't
+        // need to think about it.
+        lib_diagnostics: Vec::new(),
     })
 }
 

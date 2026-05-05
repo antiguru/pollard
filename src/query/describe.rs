@@ -3,6 +3,7 @@
 #![allow(dead_code)]
 
 use crate::profile::Profile;
+use crate::profile::symbolicate::LibSymbolicationOutcome;
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -43,6 +44,12 @@ pub struct ProfileDescription {
     pub omitted_process_count: usize,
     #[serde(skip_serializing_if = "is_zero_u64")]
     pub omitted_process_samples: u64,
+    /// Per-lib symbolication outcomes worth flagging — non-`Loaded`
+    /// libs, plus loaded libs whose every address lookup missed (a
+    /// stale-binary signature; see issue #80). Empty when every lib
+    /// loaded and resolved at least one frame.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub lib_diagnostics: Vec<LibSymbolicationOutcome>,
 }
 
 #[derive(Serialize, JsonSchema, Debug)]
@@ -215,6 +222,11 @@ pub fn describe(
         processes,
         omitted_process_count,
         omitted_process_samples,
+        // Filled in by the lifecycle tool wrappers, which have access to
+        // the [`crate::session::ProfileSession`] and its lib outcomes.
+        // Default empty so callers that build descriptions outside that
+        // path (tests, ad-hoc diagnostics) don't need to think about it.
+        lib_diagnostics: Vec::new(),
     }
 }
 
