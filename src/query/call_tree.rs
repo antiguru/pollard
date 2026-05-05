@@ -395,7 +395,8 @@ fn build_node(
         let breadth_cut = i as u32 >= args.max_breadth;
         let prune_cut = pruned(child_agg.total_samples, child_pct, args);
         let mut emitted = false;
-        if !breadth_cut && !prune_cut
+        if !breadth_cut
+            && !prune_cut
             && let Some(node) = build_node(
                 child_agg,
                 total_samples,
