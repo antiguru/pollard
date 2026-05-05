@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- *(query)* align `summary.time_range_ms` with the `time_range` filter contract ([#64](https://github.com/antiguru/pollard/issues/64)).
+  `summary.time_range_ms` reported absolute (boot-relative) timestamps while `time_range` filter args are documented as profile-relative; pasting one into the other returned no samples.
+  `time_range_ms` is now offset by the first-sample anchor (matching the filter's reference frame), the new `summary.profile_start_ms` exposes that anchor so the absolute frame is one addition away, and `Profile::stack_indices` subtracts the anchor before gating so boot-relative samply timestamps no longer leak through.
+
 ## [0.0.5](https://github.com/antiguru/pollard/compare/v0.0.4...v0.0.5) - 2026-05-04
 
 This release fixes a class of silent-failure bugs across the query tools where filter and enum arguments documented in the spec either did nothing or fell through to a default without any error.

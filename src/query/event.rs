@@ -217,4 +217,38 @@ mod tests {
             .collect();
         assert!(outside.is_empty());
     }
+
+    /// Regression for issue #64: a profile with boot-relative sample
+    /// timestamps (samply's actual output) must still accept a
+    /// profile-relative `time_range`.
+    #[test]
+    fn samples_iter_time_range_is_relative_to_profile_start() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [{
+                "name": "Main",
+                "tid": 1,
+                "pid": 1,
+                "registerTime": 0.0,
+                "stringArray": [],
+                "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                "samples": {"length": 4, "stack": [null, null, null, null], "time": [42646349.0, 42646359.0, 42646369.0, 42646379.0]},
+                "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        // [0, 20] relative covers the first three samples (0, 10, 20 ms
+        // after the first one). Pasting the absolute boot timestamp
+        // would have selected zero.
+        let kept: Vec<_> = p
+            .stack_indices(handle, &EventSource::Samples, Some([0.0, 20.0]))
+            .collect();
+        assert_eq!(kept.len(), 3);
+    }
 }

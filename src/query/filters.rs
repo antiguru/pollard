@@ -10,6 +10,12 @@ use crate::profile::{Profile, ThreadHandle};
 pub struct Filter {
     pub thread: Option<ThreadFilter>,
     pub process: Option<ProcessFilter>,
+    /// Inclusive `[start_ms, end_ms]` window, anchored at profile start
+    /// (i.e. the earliest sample timestamp; see
+    /// [`Profile::start_time_ms`]). Sample times are offset by that
+    /// anchor before the comparison, so this matches `summary`'s
+    /// `time_range_ms` field one-for-one regardless of whether the
+    /// underlying clock is boot-relative.
     pub time_range: Option<[f64; 2]>,
 }
 

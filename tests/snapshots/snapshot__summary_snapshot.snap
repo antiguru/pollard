@@ -10,6 +10,7 @@ expression: result
   "sample_rate_hz": 1000.0,
   "total_samples": "[total]",
   "time_range_ms": "[range]",
+  "profile_start_ms": "[start]",
   "unsymbolicated_pct": "[pct]",
   "unsymbolicated_bracket": "0%",
   "dominant_thread": {

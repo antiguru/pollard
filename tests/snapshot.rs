@@ -61,6 +61,7 @@ async fn summary_snapshot() {
         ".duration_ms" => "[duration]",
         ".total_samples" => "[total]",
         ".time_range_ms" => "[range]",
+        ".profile_start_ms" => "[start]",
         ".unsymbolicated_pct" => "[pct]",
         ".dominant_thread.samples" => "[n]",
         ".dominant_thread.samples_pct" => "[pct]",
