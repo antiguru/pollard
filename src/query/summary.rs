@@ -19,6 +19,12 @@ use std::collections::{HashMap, HashSet};
 
 const DEFAULT_FUNCTION_LIMIT: usize = 10;
 const DEFAULT_MODULE_LIMIT: usize = 5;
+/// Cap on `top_processes`. Five fits a typical multi-process recording
+/// (a binary plus its children) while keeping the summary payload narrow.
+const DEFAULT_PROCESS_LIMIT: usize = 5;
+/// Cap on `top_threads`. Ten covers the common "one busy worker pool"
+/// shape without leaking deep into idle threads.
+const DEFAULT_THREAD_LIMIT: usize = 10;
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct Output {
@@ -50,6 +56,13 @@ pub struct Output {
     pub unsymbolicated_bracket: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dominant_thread: Option<DominantThread>,
+    /// Top processes by sample count, descending. Capped at
+    /// [`DEFAULT_PROCESS_LIMIT`]; processes beyond that are dropped silently
+    /// (use `describe_profile` with a wider `top_n` to widen).
+    pub top_processes: Vec<ProcessEntry>,
+    /// Top threads by sample count, descending. Capped at
+    /// [`DEFAULT_THREAD_LIMIT`]; threads beyond that are dropped silently.
+    pub top_threads: Vec<ThreadEntry>,
     pub top_modules: Vec<ModuleEntry>,
     pub top_self_functions: Vec<FunctionEntry>,
     pub top_total_functions: Vec<FunctionEntry>,
@@ -57,6 +70,31 @@ pub struct Output {
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct DominantThread {
+    pub tid: u64,
+    pub name: String,
+    /// String form to preserve samply's `.N` sub-process suffix.
+    pub pid: String,
+    pub samples: u64,
+    pub samples_pct: f32,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ProcessEntry {
+    /// String form to preserve samply's `.N` sub-process suffix.
+    pub pid: String,
+    pub name: String,
+    /// Total samples across all threads of this process.
+    pub samples: u64,
+    /// `samples` as a percentage of profile-wide `total_samples`. Field
+    /// name mirrors [`DominantThread::samples_pct`]; see issue #65 for
+    /// the larger naming sweep across percentage fields.
+    pub samples_pct: f32,
+    /// Threads belonging to this process, before any filtering.
+    pub thread_count: usize,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct ThreadEntry {
     pub tid: u64,
     pub name: String,
     /// String form to preserve samply's `.N` sub-process suffix.
@@ -82,12 +120,22 @@ pub fn summary(
 ) -> Result<Output, ToolError> {
     // Reuse `describe` rather than re-deriving sample-rate / total-samples
     // so the two tools cannot disagree about how those values are counted.
-    // `top_n=0` skips the per-process detail we don't surface here.
-    let desc = describe(profile, profile_id, name, path, unsymbolicated_pct, 0);
+    // `top_n=DEFAULT_PROCESS_LIMIT` lets us reuse the per-pid aggregation
+    // describe already performs, so we don't walk the threads twice.
+    let desc = describe(
+        profile,
+        profile_id,
+        name,
+        path,
+        unsymbolicated_pct,
+        DEFAULT_PROCESS_LIMIT,
+    );
 
     let profile_start_ms = profile.start_time_ms();
     let time_range_ms = profile_time_range(profile, profile_start_ms);
     let dominant_thread = compute_dominant_thread(profile, desc.total_samples);
+    let top_processes = compute_top_processes(&desc);
+    let top_threads = compute_top_threads(profile, desc.total_samples, DEFAULT_THREAD_LIMIT);
     let top_modules = compute_top_modules(profile, DEFAULT_MODULE_LIMIT);
 
     let by_self = top_functions::top_functions(
@@ -121,6 +169,8 @@ pub fn summary(
         unsymbolicated_pct: desc.unsymbolicated_pct,
         unsymbolicated_bracket: bracket(desc.unsymbolicated_pct),
         dominant_thread,
+        top_processes,
+        top_threads,
         top_modules,
         top_self_functions: by_self.functions,
         top_total_functions: by_total.functions,
@@ -178,6 +228,46 @@ fn compute_dominant_thread(profile: &Profile, total: u64) -> Option<DominantThre
                 samples_pct: 100.0 * samples as f32 / total_f,
             }
         })
+}
+
+fn compute_top_processes(desc: &crate::query::describe::ProfileDescription) -> Vec<ProcessEntry> {
+    // `desc.processes` is already sorted descending by sample count and
+    // capped at `DEFAULT_PROCESS_LIMIT` (passed as `top_n` above), so we
+    // just translate the rows into the summary's narrower entry shape.
+    let total_f = desc.total_samples.max(1) as f32;
+    desc.processes
+        .iter()
+        .map(|p| ProcessEntry {
+            pid: p.pid.clone(),
+            name: p.name.clone(),
+            samples: p.total_samples,
+            samples_pct: 100.0 * p.total_samples as f32 / total_f,
+            thread_count: p.thread_count,
+        })
+        .collect()
+}
+
+fn compute_top_threads(profile: &Profile, total: u64, limit: usize) -> Vec<ThreadEntry> {
+    let total_f = total.max(1) as f32;
+    let mut entries: Vec<ThreadEntry> = profile
+        .threads()
+        .filter(|t| t.raw().samples.length > 0)
+        .map(|t| {
+            let samples = t.raw().samples.length as u64;
+            ThreadEntry {
+                tid: t.tid(),
+                name: t.name().unwrap_or("").to_owned(),
+                pid: t.pid_full().to_string(),
+                samples,
+                samples_pct: 100.0 * samples as f32 / total_f,
+            }
+        })
+        .collect();
+    // Sort descending by samples; tid asc as a stable tiebreak so the
+    // output doesn't shuffle across calls when counts are equal.
+    entries.sort_by(|a, b| b.samples.cmp(&a.samples).then_with(|| a.tid.cmp(&b.tid)));
+    entries.truncate(limit);
+    entries
 }
 
 fn compute_top_modules(profile: &Profile, limit: usize) -> Vec<ModuleEntry> {
@@ -290,6 +380,81 @@ mod tests {
         assert_eq!(s.profile_start_ms, 0.0);
         assert!(s.dominant_thread.is_none());
         assert!(s.top_modules.is_empty());
+        assert!(s.top_processes.is_empty());
+        assert!(s.top_threads.is_empty());
+    }
+
+    #[test]
+    fn summary_returns_top_processes_and_threads() {
+        let profile = fixture("two_functions");
+        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+
+        // The fixture has at least one sampled thread, so both arrays
+        // should be non-empty and capped at their respective limits.
+        assert!(!s.top_processes.is_empty());
+        assert!(s.top_processes.len() <= DEFAULT_PROCESS_LIMIT);
+        assert!(!s.top_threads.is_empty());
+        assert!(s.top_threads.len() <= DEFAULT_THREAD_LIMIT);
+
+        // Top-process entry must carry positive sample counts and a
+        // sensible percentage, and `thread_count` should be at least 1.
+        let p = &s.top_processes[0];
+        assert!(p.samples > 0);
+        assert!(p.samples_pct > 0.0);
+        assert!(p.thread_count >= 1);
+
+        // Top-thread leader should match dominant_thread (same sort key,
+        // same tiebreak), so the two surfaces stay self-consistent.
+        let dom = s.dominant_thread.as_ref().unwrap();
+        let leader = &s.top_threads[0];
+        assert_eq!(leader.tid, dom.tid);
+        assert_eq!(leader.samples, dom.samples);
+        assert_eq!(leader.pid, dom.pid);
+    }
+
+    #[test]
+    fn top_processes_ordered_descending_by_samples() {
+        // Reuse describe's multi-process fixture pattern by constructing
+        // a profile inline so we don't depend on fixture content.
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [
+                {
+                    "name": "t1", "processName": "alpha", "tid": 1, "pid": 10,
+                    "registerTime": 0.0, "stringArray": [],
+                    "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                    "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                    "samples": {"length": 2, "stack": [null, null], "time": [0.0, 1.0]},
+                    "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                    "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                    "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+                },
+                {
+                    "name": "t2", "processName": "beta", "tid": 2, "pid": 20,
+                    "registerTime": 0.0, "stringArray": [],
+                    "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                    "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                    "samples": {"length": 5, "stack": [null, null, null, null, null], "time": [0.0, 1.0, 2.0, 3.0, 4.0]},
+                    "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                    "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                    "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+                }
+            ]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+
+        assert_eq!(s.top_processes.len(), 2);
+        assert_eq!(s.top_processes[0].name, "beta");
+        assert_eq!(s.top_processes[0].samples, 5);
+        assert_eq!(s.top_processes[1].name, "alpha");
+        assert_eq!(s.top_processes[1].samples, 2);
+
+        // Percentages should reflect 5/7 and 2/7 of total_samples.
+        assert!((s.top_processes[0].samples_pct - 100.0 * 5.0 / 7.0).abs() < 0.01);
+        assert!((s.top_processes[1].samples_pct - 100.0 * 2.0 / 7.0).abs() < 0.01);
     }
 
     /// Synthesize a profile whose sample timestamps are boot-relative
