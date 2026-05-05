@@ -24,15 +24,28 @@ what an LLM can hold and reason about.
 
 ## Non-goals (v1)
 
-- Marker / event analysis (the data model leaves room for it but no tool
-  ships in v1).
-- Cross-profile diff (`diff_profiles`).
 - Recording as an MCP tool (`record`). The agent uses Bash to run
   `samply record --save-only` itself, then calls `load_profile`.
 - Profile-format conversion (perf.data, ETW, etc.). Input must already be a
   Firefox-format profile JSON. samply handles those conversions; we don't.
 - A human-facing CLI subcommand. The MCP server is the only surface.
 - Authentication / remote access. Local stdio only.
+
+## Shipped beyond the original v1
+
+These were called out as non-goals in the first cut of this spec but
+landed shortly after. Documented here so future readers don't think the
+spec lags reality:
+
+- **Marker / event analysis.** `top_functions`, `call_tree`, and
+  `compare_profiles` accept an optional `event` argument naming a marker
+  with a `cause.stack` payload (e.g. `cache-misses`, `branch-misses`,
+  `instructions`). See *Event sources*. `top_groups` aggregates samples
+  only and ignores `event`.
+- **Cross-profile diff.** Shipped as
+  `compare_profiles(profile_id_a, profile_id_b, ...)`. Same filter and
+  `event` rules apply to both sides; events are resolved against
+  profile A.
 
 ## Architecture
 
@@ -62,8 +75,9 @@ when the agent chooses to call it via Bash; pollard never spawns it.
 - Profile IDs are short stable strings derived from the absolute path
   (the first 8 hex chars of a hash, with an optional human-supplied
   `name`).
-- A loaded profile is roughly 100–500 MB resident depending on size. See
-  *Memory management* below.
+- Resident memory per loaded profile depends almost entirely on how much
+  debuginfo wholesym pulls in, not on file size or sample count. See
+  *Memory management* for measured ranges.
 
 ### Dependencies
 
@@ -89,7 +103,7 @@ agent itself wants to record (via Bash, not via an MCP tool). The
 `load_profile` flow works on any Firefox-format profile JSON regardless of
 origin.
 
-## MCP tool surface (9 tools)
+## MCP tool surface (14 tools)
 
 Tools are organized into four groups: session management, describe, query,
 and drill-down.
@@ -120,37 +134,54 @@ success, `profile_not_found` if the id is unknown.
 
 What is currently loaded.
 
+#### `summary(profile_id, thread?, process?, time_range?) -> Summary`
+
+One-shot orientation: profile shape (duration, sample rate, time range,
+unsymbolicated bracket), top processes and threads by sample count,
+top modules, and top functions by self / total time. Accepts the
+standard filter args — passing `process` / `thread` / `time_range`
+re-scopes every sample count to that slice without changing the
+response shape. Aggregates the samples track only; `event` has no
+effect.
+
+Use this first instead of chaining `describe_profile` + `top_functions`;
+it returns a denser bird's-eye view in one round-trip. Categorized as
+session management for ergonomics, but doubles as a query entry point.
+
 ### Describe
 
-#### `describe_profile(profile_id) -> ProfileMetadata`
+#### `describe_profile(profile_id, top_n?) -> ProfileMetadata`
 
-Returns processes, threads (with sample counts and durations), total
-samples, total duration, sample rate, and `unsymbolicated_pct` (the
-fraction of frames that did not symbolicate). Bounded output — even a
-hundred-thread profile fits comfortably.
+Returns top processes and threads by sample count (with totals and
+omitted-entry counts), total samples, total duration, sample rate, and
+`unsymbolicated_pct` (the fraction of frames that did not symbolicate).
+`top_n` widens the per-call window when the default is too narrow for
+a many-thread / many-process profile.
 
 ### Query
 
-#### `top_functions(profile_id, thread?, process?, time_range?, sort_by="self", limit=30, filter?) -> TopFunctions`
+#### `top_functions(profile_id, thread?, process?, time_range?, event?, sort_by="self", limit=30, filter?) -> TopFunctions`
 
 Flat top-N functions.
 
-- `thread: string | int?` — thread name or `tid`. If a name matches
-  multiple threads, results aggregate across them.
-- `process: string | int?` — process name or `pid`. Same matching.
-- `time_range: [number, number]?` — `[start_ms, end_ms]` from profile
-  start. Out-of-bounds values clamp with a warning.
-- `sort_by: "self" | "total"` — default `"self"`. Whether to rank by
-  self-samples (functions where time is *actually spent*) or total-samples
-  (functions that *contain* the most time, including their callees).
+- `thread`, `process`, `time_range`: see *Filter grammar*.
+- `event: string?` — see *Event sources*. Defaults to the samples track.
+- `sort_by: "self" | "total" | "descendants"` — default `"self"`.
+  Whether to rank by self-samples (functions where time is *actually
+  spent*), total-samples (functions that *contain* the most time,
+  including their callees), or descendants-only (total minus self).
+  Typo'd values return `invalid_value`.
 - `limit: number` — default 30.
-- `filter: string?` — see *Function matching* below. Restricts the result
-  set to functions matching the filter.
+- `filter: string?` — see *Function matching*. Restricts the result set to
+  functions matching the filter. The only function-pattern arg that
+  treats an empty string as "no filter".
 
-#### `call_tree(profile_id, thread?, process?, time_range?, inverted?, root_function?, paths_to?, min_pct=1.0, max_depth=8, max_breadth=5) -> CallTree`
+#### `call_tree(profile_id, thread?, process?, time_range?, event?, inverted?, root_function?, paths_to?, min_pct=1.0, max_depth=8, max_breadth=5) -> CallTree`
 
 Pruned hierarchical call tree.
 
+- `thread`, `process`, `time_range`: see *Filter grammar*.
+- `event: string?` — see *Event sources*. Defaults to the samples track.
 - `inverted: bool` — default `false`.
   - `false`: rooted at top-of-stack frames (typically thread entry /
     `main`). Children are callees. "Where does my program spend its
@@ -176,9 +207,54 @@ sample count. Each stack lists frames root-to-leaf with the matched frame
 flagged. Different from an inverted call tree because the leaf is the
 deepest frame in the stack (often a syscall), not the matched function.
 
+#### `top_groups(profile_id, thread?, process?, time_range?, group_by="function", sort_by="self", limit=30, filter?, directory_depth?, expand_inlines?) -> TopGroups`
+
+Flat top-N aggregation under a caller-chosen group key. Use first when
+one binary or directory dominates and you want to know *which* before
+drilling into functions.
+
+- `group_by: "function" | "module" | "file" | "directory"` — default
+  `"function"` (matches `top_functions` modulo the module-disambiguation
+  column). Typo'd values return `invalid_value`.
+- `sort_by: "self" | "total" | "descendants"` — same semantics as
+  `top_functions`.
+- `directory_depth: int?` — only meaningful for `group_by="directory"`.
+  Truncates the path to the first N components.
+- `filter: string?` — frame-level filter applied *before* grouping (a
+  `group_by="module"` query with `filter="hot"` only counts frames whose
+  function names match `"hot"`).
+- Aggregates samples only; `event` is not accepted.
+
+#### `folded_stacks(profile_id, thread?, process?, time_range?) -> FoldedStacks`
+
+Flame-graph fold output (`frame;frame;... count\n`). Intended as input to
+external visualizers (FlameGraph.pl, speedscope). Not designed for the
+LLM to read directly — `call_tree` and `stacks_containing` are the
+LLM-shaped views.
+
+#### `compare_profiles(profile_id_a, profile_id_b, thread?, process?, time_range?, event?, filter?, align_by="function_and_module", sort_by="delta", limit=30, min_delta_pct?, expand_inlines?) -> Comparison`
+
+Per-function diff between two loaded profiles. Each side aggregates
+self-samples under the supplied filters; output ranks rows by the
+delta (largest absolute change first by default).
+
+- Both profiles must already be loaded; the same filter, `event`, and
+  matching rules apply to both sides.
+- `align_by: "function_and_module" | "function"` — default
+  `"function_and_module"`, which strips cargo's 16-hex build-hash suffix
+  before keying so two builds of the same binary still align.
+  `"function"` drops module from the key entirely (cross-binary
+  comparisons). Typo'd values return `invalid_value`.
+- `sort_by: "delta" | "delta_ms" | "a" | "b"` — default `"delta"`
+  (`|b_self_pct − a_self_pct|`). `"delta_ms"` is robust to changes in
+  total profile duration.
+- `min_delta_pct: number?` — drop rows whose absolute self-pct delta is
+  below this. Filters out rounding noise on the long tail.
+- Output rows omit `*_ms` columns when `event` is not time-shaped.
+
 ### Drill-down
 
-#### `source_for_function(profile_id, function, module?, with_samples=true, whole_file=false) -> SourceListing`
+#### `source_for_function(profile_id, function, module?, with_samples=true, whole_file=false, expand_inlines=false) -> SourceListing`
 
 Source code for the function, with per-line sample counts merged in.
 Implementation reuses samply-api's `/source/v1` to fetch file content and
@@ -189,10 +265,24 @@ By default returns only the function's line range plus 5 lines of context
 above/below. `whole_file=true` returns the entire file (use when the
 function spans the bulk of the file or when broader context is needed).
 
+When `expand_inlines=true` the function matcher also considers DWARF
+inline frames, so callers can ask for the source of an inlined callee
+(e.g. `core::iter::Sum::sum`) instead of only the enclosing native
+function.
+
 #### `asm_for_function(profile_id, function, module?, with_samples=true) -> AsmListing`
 
 Disassembly for the function with per-instruction sample counts. Reuses
 samply-api's `/asm/v1`.
+
+#### `address_to_function(profile_id, address, module?) -> FrameInfo`
+
+Resolve a single library-relative address to a function name (and
+file/line where available). Diagnostic for profiles with unresolved hex
+offsets — wraps the same wholesym lookup pollard runs on load. `module`
+is an optional substring matched against `lib.name`, `lib.debug_name`,
+`lib.path`, or `lib.debug_path`; without it, every loaded library is
+tried in order until one resolves.
 
 #### `compare_functions(profile_id_a, function_a, function_b, profile_id_b?, module_a?, module_b?, with_samples=true) -> CompareFunctionsOutput`
 
@@ -248,6 +338,53 @@ Every parameter that takes a function name (`filter`, `function`,
 - Matching is case-sensitive.
 - A `module` parameter (where present) further constrains by the binary
   name. Without `module`, matches across all loaded modules.
+- Empty / blank patterns are rejected for required pattern args
+  (`function`) and for narrowing args that would otherwise silently
+  match every frame (`root_function`, `paths_to`). Optional `filter` is
+  the one exception: empty means "no filter". This split lets the LLM
+  pass through a "leave blank to keep results unfiltered" UX without
+  also letting it accidentally match-all on a drill-down.
+
+#### Filter grammar
+
+`thread`, `process`, and `time_range` apply uniformly across every query
+tool. They are gating filters, not hints — samples outside the filter
+are not aggregated.
+
+- `process: string?` — process name (substring match), `pid:NNN` for an
+  exact pid, or `pid:NNN.M` to pin to one of samply's `.M`
+  sub-processes that share an OS pid (samply emits `pid 1234.0`,
+  `1234.1`, ...). Bare-name matches aggregate across every matching
+  process. Malformed `pid:` prefixes (e.g. `pid:abc`, `pid:1.2.3`)
+  hard-error rather than silently falling back to name matching.
+- `thread: string?` — thread name (substring match) or `tid:NNN` for an
+  exact tid. Same malformed-prefix rule as `process`.
+- `time_range: [number, number]?` — `[start_ms, end_ms]` from profile
+  start. Out-of-bounds windows return zero samples; that is the answer,
+  not a clamp + warning. Caller is expected to size the window against
+  `describe_profile.duration_ms`.
+
+#### Event sources
+
+By default, queries aggregate the samples track (CPU cycles in samply's
+perf recorder). Profiles also carry markers for hardware counters such
+as `cache-misses`, `branch-misses`, `instructions`. Pass
+`event="cache-misses"` (etc.) to `top_functions`, `call_tree`, or
+`compare_profiles` to aggregate that counter instead.
+
+Two error shapes distinguish the failure modes:
+
+- **Unknown event** — message lists every stack-bearing marker name in
+  the profile as suggestions. The LLM is meant to retry with one.
+- **Stackless marker** — the marker name exists but its entries carry
+  no `cause.stack` payload (e.g. text-only `mmap` annotations). The
+  message names the matched marker and explains the missing
+  `cause.stack`. Distinct from unknown-event so the caller can tell "I
+  asked for the wrong name" apart from "this name exists but isn't
+  aggregatable."
+
+`top_groups` and `folded_stacks` aggregate samples only and ignore
+`event`.
 
 Percentages in source listings (`self_pct`) are denominated against
 the function's own sample count, not the whole profile — these answer
@@ -444,9 +581,12 @@ input is fundamentally invalid.
 | `function_ambiguous` | Multiple distinct functions match | `function`, `candidates: [{function, module}]` |
 | `thread_not_found` | Thread filter doesn't match | `thread`, `available_threads: [{tid, name}]` |
 | `process_not_found` | Process filter doesn't match | `process`, `available_processes: [...]` |
-| `out_of_bounds` | `time_range` extends beyond profile | Clamp silently, attach `warning: {clamped_range, original_range}` to the response — not a hard error |
+| `out_of_bounds` | Reserved | Not currently raised: out-of-bounds `time_range` returns zero samples instead. The caller is expected to size the window against `describe_profile.duration_ms`. |
+| `invalid_value` | Typo'd enum value (e.g. `sort_by="seff"`, `group_by="moduel"`, `align="endian"`) | `field`, `value`, `accepted: [...]` listing the legal alternatives |
 | `profile_not_found` | Unknown id, never loaded | `profile_id` |
 | `profile_evicted` | Id was loaded but later evicted under memory pressure | `profile_id`, `original_path` so the LLM can `load_profile` it again |
+| `internal` (unknown event) | `event=<name>` matches no marker in the profile | message lists every stack-bearing marker name as suggestions |
+| `internal` (stackless marker) | `event=<name>` matches a marker but every entry has `cause.stack=null` | distinct from unknown-event; message names the matched marker and the stack-bearing alternatives |
 
 ## Memory management
 
@@ -465,6 +605,33 @@ Tool calls referencing an evicted id return `profile_evicted` with the
 original path, letting the LLM re-load on demand. Re-loading triggers
 re-symbolication, which is slow; the LRU bound is set generously enough
 that this is rare in practice.
+
+### Measured resident sizes
+
+Resident memory is dominated by symbolication scaffolding (decompressed
+DWARF sections + addr2line line tables held inside wholesym), not by
+sample count or compressed file size. Reference numbers from
+`examples/measure_rss`:
+
+| Profile | File | Threads | Samples | RSS Δ steady | VmHWM peak |
+|---|---|---|---|---|---|
+| pager (small Rust) | 0.3 MiB | 4 | 16k | 73 MiB | 159 MiB |
+| `perf record -a` 30 s | 2.7 MiB | 9400 | 39k | 159 MiB | 319 MiB |
+| materialize (rich debuginfo) | 2.8 MiB | 1107 | 78k | 1032 MiB | 3939 MiB |
+
+Two implications:
+
+- The default `POLLARD_MAX_PROFILES=4` is sized for typical samply
+  output (~150 MiB each) and produces a worst-case ~1.5 GiB resident.
+  On Rust binaries with rich debuginfo, four loaded profiles can
+  conservatively reach 4 GiB resident plus several GiB of transient
+  peak during a fresh load. Operators of memory-constrained hosts
+  should cap N lower.
+- Peak/steady ratio is ~2× for typical workloads, ~3.8× for
+  debuginfo-heavy ones — partly per-library DWARF decompression
+  buffers, partly glibc not returning freed pages. See issue #57 for
+  the breakdown and proposed fixes (drop the `SymbolManager` once
+  names/files/lines are interned; resolve+drop per library to cap peak).
 
 ## Concurrency
 
@@ -553,9 +720,12 @@ Default rustfmt is fine; no override file initially.
    linear-chain compression all behave deterministically; `_omitted` and
    `_truncated` markers appear correctly.
 3. **Error paths** — `function_not_found` returns nearest matches,
-   `function_ambiguous` lists candidates, `thread_not_found` lists
-   threads, `out_of_bounds` clamps with a warning, `profile_evicted`
-   carries the original path.
+   `function_ambiguous` lists candidates, `thread_not_found` /
+   `process_not_found` list available alternatives, `invalid_value`
+   names accepted enum variants, the unknown-event vs. stackless-marker
+   split surfaces distinct messages, out-of-bounds `time_range` simply
+   returns zero samples, and `profile_evicted` carries the original
+   path.
 4. **Output stability** — tool outputs are byte-stable across runs
    (snapshot tests catch unintended shape changes).
 5. **MCP wire layer** — tool registration, JSON-schema validation, error
