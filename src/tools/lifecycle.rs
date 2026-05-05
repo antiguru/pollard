@@ -4,6 +4,7 @@ use crate::error::ToolError;
 use crate::query::describe::{DEFAULT_TOP_N, ProfileDescription, describe};
 use crate::query::summary;
 use crate::tools::PollardServer;
+use crate::tools::query::{CommonFilterArgs, parse_filter};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
@@ -50,6 +51,22 @@ pub struct LoadProfileResult {
 #[derive(Deserialize, JsonSchema)]
 pub struct ProfileIdArgs {
     pub profile_id: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct SummaryArgs {
+    pub profile_id: String,
+    /// Optional filter context. When set, every sample-count surface
+    /// in the response (`total_samples`, `time_range_ms`,
+    /// `top_processes`, `top_threads`, `top_modules`, both top-functions
+    /// lists, `dominant_thread`) is recomputed against the filter so the
+    /// caller can re-run `summary` for a single pid/thread/time slice
+    /// without composing `top_functions` + `top_modules` by hand.
+    /// Recording-level fields (`interval_ms`, `sample_rate_hz`,
+    /// `unsymbolicated_pct`, `profile_start_ms`) stay profile-wide
+    /// because they describe the recording, not the slice.
+    #[serde(flatten)]
+    pub common: CommonFilterArgs,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -188,19 +205,21 @@ impl PollardServer {
 
     #[tool(
         name = "summary",
-        description = "One-shot orientation: shape (duration, sample rate, time range, unsymbolicated bracket), dominant thread, top 5 modules, top 10 functions by self time, and top 10 by total time. Use this first instead of chaining describe_profile + top_functions."
+        description = "One-shot orientation: shape (duration, sample rate, time range, unsymbolicated bracket), dominant thread, top 5 modules, top 10 functions by self time, and top 10 by total time. Pass the standard process / thread / time_range filter args to re-scope every sample count to that slice — the response shape doesn't change. Use this first instead of chaining describe_profile + top_functions."
     )]
     pub async fn summary(
         &self,
-        Parameters(args): Parameters<ProfileIdArgs>,
+        Parameters(args): Parameters<SummaryArgs>,
     ) -> Result<Json<summary::Output>, rmcp::ErrorData> {
         let session = self.registry.get_or_error(&args.profile_id).await?;
+        let filter = parse_filter(&args.common)?;
         let result = summary::summary(
             session.profile(),
             session.id(),
             session.name(),
             &session.path().display().to_string(),
             session.unsymbolicated_pct(),
+            filter,
         )?;
         Ok(Json(result))
     }

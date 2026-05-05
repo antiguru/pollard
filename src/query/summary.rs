@@ -117,11 +117,17 @@ pub fn summary(
     name: &str,
     path: &str,
     unsymbolicated_pct: f32,
+    filter_args: Filter,
 ) -> Result<Output, ToolError> {
-    // Reuse `describe` rather than re-deriving sample-rate / total-samples
-    // so the two tools cannot disagree about how those values are counted.
-    // `top_n=DEFAULT_PROCESS_LIMIT` lets us reuse the per-pid aggregation
-    // describe already performs, so we don't walk the threads twice.
+    filter_args.validate_process(profile)?;
+    filter_args.validate_thread(profile)?;
+    filter_args.validate_time_range(profile)?;
+
+    // Profile-wide describe still drives the *recording-level* fields
+    // (interval, sample rate, unsymbolicated pct) — those don't shift
+    // with a filter context. Sample-count fields below are recomputed
+    // against the filter so the rest of the response is the filtered
+    // view.
     let desc = describe(
         profile,
         profile_id,
@@ -132,18 +138,30 @@ pub fn summary(
     );
 
     let profile_start_ms = profile.start_time_ms();
-    let time_range_ms = profile_time_range(profile, profile_start_ms);
-    let dominant_thread = compute_dominant_thread(profile, desc.total_samples);
-    let top_processes = compute_top_processes(&desc);
-    let top_threads = compute_top_threads(profile, desc.total_samples, DEFAULT_THREAD_LIMIT);
-    let top_modules = compute_top_modules(profile, DEFAULT_MODULE_LIMIT);
+    let (total_samples, time_range_ms) =
+        compute_filtered_shape(profile, &filter_args, profile_start_ms);
+    // Filtered duration: span of the surviving samples. Falls back to
+    // describe's profile-wide duration when no samples land inside the
+    // filter (the time_range_ms collapses to [0, 0]) so an empty slice
+    // doesn't masquerade as a zero-length recording.
+    let duration_ms = if time_range_ms == [0.0, 0.0] {
+        desc.duration_ms
+    } else {
+        (time_range_ms[1] - time_range_ms[0]).max(0.0).round() as u64
+    };
+    let dominant_thread = compute_dominant_thread(profile, &filter_args, total_samples);
+    let top_processes =
+        compute_top_processes(profile, &filter_args, total_samples, DEFAULT_PROCESS_LIMIT);
+    let top_threads =
+        compute_top_threads(profile, &filter_args, total_samples, DEFAULT_THREAD_LIMIT);
+    let top_modules = compute_top_modules(profile, &filter_args, DEFAULT_MODULE_LIMIT);
 
     let by_self = top_functions::top_functions(
         profile,
         &top_functions::Args {
             limit: DEFAULT_FUNCTION_LIMIT,
             sort_by: SortBy::SelfTime,
-            filter_args: Filter::default(),
+            filter_args: filter_args.clone(),
             ..Default::default()
         },
     )?;
@@ -152,7 +170,7 @@ pub fn summary(
         &top_functions::Args {
             limit: DEFAULT_FUNCTION_LIMIT,
             sort_by: SortBy::TotalTime,
-            filter_args: Filter::default(),
+            filter_args: filter_args.clone(),
             ..Default::default()
         },
     )?;
@@ -160,10 +178,10 @@ pub fn summary(
     Ok(Output {
         profile_id: desc.profile_id,
         name: desc.name,
-        duration_ms: desc.duration_ms,
+        duration_ms,
         interval_ms: desc.interval_ms,
         sample_rate_hz: desc.sample_rate_hz,
-        total_samples: desc.total_samples,
+        total_samples,
         time_range_ms,
         profile_start_ms,
         unsymbolicated_pct: desc.unsymbolicated_pct,
@@ -193,90 +211,188 @@ fn bracket(pct: f32) -> &'static str {
     }
 }
 
-fn profile_time_range(profile: &Profile, profile_start_ms: f64) -> [f64; 2] {
+/// Filtered total-sample count plus the `[start, end]` span of the
+/// surviving timestamps, both relative to `profile_start_ms`.
+///
+/// Threads outside the process/thread filter are skipped; per-sample
+/// timestamps that fall outside the time-range filter are dropped. The
+/// time-range comparison happens against the *raw* (boot-relative)
+/// sample timestamps so the same range that gates `stack_indices`
+/// gates this aggregation too.
+///
+/// When a thread carries no `time` / `timeDeltas` we fall back to its
+/// `samples.length` (only possible if no time-range filter is set —
+/// otherwise we have nothing to compare against). This matches the
+/// semantics describe.rs uses for unstamped recordings.
+fn compute_filtered_shape(
+    profile: &Profile,
+    filter: &Filter,
+    profile_start_ms: f64,
+) -> (u64, [f64; 2]) {
+    let mut total: u64 = 0;
     let mut start = f64::INFINITY;
     let mut end = f64::NEG_INFINITY;
-    for t in profile.threads() {
-        let times = t.raw().samples.absolute_times();
-        if let Some(&first) = times.first() {
-            start = start.min(first);
+    for handle in filter.threads(profile) {
+        let raw = profile.raw_thread(handle);
+        let times = raw.samples.absolute_times();
+        if times.is_empty() {
+            // No timestamps — count every sample only when the filter
+            // doesn't gate by time (otherwise we'd have to guess which
+            // window they belong in).
+            if filter.time_range.is_none() {
+                total += raw.samples.length as u64;
+            }
+            continue;
         }
-        if let Some(&last) = times.last() {
-            end = end.max(last);
+        for &abs_t in times.iter() {
+            let rel = abs_t - profile_start_ms;
+            if !filter.in_time_range(rel) {
+                continue;
+            }
+            total += 1;
+            if abs_t < start {
+                start = abs_t;
+            }
+            if abs_t > end {
+                end = abs_t;
+            }
         }
     }
-    if start.is_finite() && end.is_finite() {
+    let time_range_ms = if start.is_finite() && end.is_finite() {
         [start - profile_start_ms, end - profile_start_ms]
     } else {
         [0.0, 0.0]
-    }
+    };
+    (total, time_range_ms)
 }
 
-fn compute_dominant_thread(profile: &Profile, total: u64) -> Option<DominantThread> {
+/// Per-thread sample count under the filter, keyed by [`ThreadHandle`].
+/// Centralizes the "samples count under filter" rule so dominant_thread,
+/// top_threads, and top_processes can't disagree about which samples
+/// they each see.
+fn per_thread_filtered_counts(
+    profile: &Profile,
+    filter: &Filter,
+    profile_start_ms: f64,
+) -> Vec<(crate::profile::ThreadHandle, u64)> {
+    let mut out = Vec::new();
+    for handle in filter.threads(profile) {
+        let raw = profile.raw_thread(handle);
+        let times = raw.samples.absolute_times();
+        let count = if times.is_empty() {
+            if filter.time_range.is_none() {
+                raw.samples.length as u64
+            } else {
+                0
+            }
+        } else {
+            times
+                .iter()
+                .filter(|&&abs_t| filter.in_time_range(abs_t - profile_start_ms))
+                .count() as u64
+        };
+        out.push((handle, count));
+    }
+    out
+}
+
+fn compute_dominant_thread(
+    profile: &Profile,
+    filter: &Filter,
+    total: u64,
+) -> Option<DominantThread> {
     let total_f = total.max(1) as f32;
-    profile
-        .threads()
-        .filter(|t| t.raw().samples.length > 0)
-        .max_by_key(|t| t.raw().samples.length)
-        .map(|t| {
-            let samples = t.raw().samples.length as u64;
+    let counts = per_thread_filtered_counts(profile, filter, profile.start_time_ms());
+    counts
+        .into_iter()
+        .filter(|&(_, c)| c > 0)
+        .max_by_key(|&(_, c)| c)
+        .map(|(handle, samples)| {
+            let raw = profile.raw_thread(handle);
             DominantThread {
-                tid: t.tid(),
-                name: t.name().unwrap_or("").to_owned(),
-                pid: t.pid_full().to_string(),
+                tid: raw.tid,
+                name: raw.name.clone().unwrap_or_default(),
+                pid: raw.pid.to_string(),
                 samples,
                 samples_pct: 100.0 * samples as f32 / total_f,
             }
         })
 }
 
-fn compute_top_processes(desc: &crate::query::describe::ProfileDescription) -> Vec<ProcessEntry> {
-    // `desc.processes` is already sorted descending by sample count and
-    // capped at `DEFAULT_PROCESS_LIMIT` (passed as `top_n` above), so we
-    // just translate the rows into the summary's narrower entry shape.
-    let total_f = desc.total_samples.max(1) as f32;
-    desc.processes
-        .iter()
-        .map(|p| ProcessEntry {
-            pid: p.pid.clone(),
-            name: p.name.clone(),
-            samples: p.total_samples,
-            samples_pct: 100.0 * p.total_samples as f32 / total_f,
-            thread_count: p.thread_count,
+fn compute_top_processes(
+    profile: &Profile,
+    filter: &Filter,
+    total: u64,
+    limit: usize,
+) -> Vec<ProcessEntry> {
+    let total_f = total.max(1) as f32;
+    let counts = per_thread_filtered_counts(profile, filter, profile.start_time_ms());
+    // Aggregate by full pid (preserving the `.N` sub-process suffix so
+    // samply's parent recorder vs. forked targets stay distinct).
+    let mut by_pid: HashMap<crate::profile::raw::Pid, (String, u64, usize)> = HashMap::new();
+    for (handle, samples) in counts {
+        let raw = profile.raw_thread(handle);
+        let entry = by_pid
+            .entry(raw.pid)
+            .or_insert_with(|| (String::new(), 0, 0));
+        if entry.0.is_empty()
+            && let Some(name) = raw.process_name.as_deref().filter(|s| !s.is_empty())
+        {
+            entry.0 = name.to_owned();
+        }
+        entry.1 += samples;
+        entry.2 += 1;
+    }
+    let mut entries: Vec<ProcessEntry> = by_pid
+        .into_iter()
+        .filter(|(_, (_, samples, _))| *samples > 0)
+        .map(|(pid, (name, samples, thread_count))| ProcessEntry {
+            pid: pid.to_string(),
+            name,
+            samples,
+            samples_pct: 100.0 * samples as f32 / total_f,
+            thread_count,
         })
-        .collect()
+        .collect();
+    entries.sort_by(|a, b| b.samples.cmp(&a.samples).then_with(|| a.pid.cmp(&b.pid)));
+    entries.truncate(limit);
+    entries
 }
 
-fn compute_top_threads(profile: &Profile, total: u64, limit: usize) -> Vec<ThreadEntry> {
+fn compute_top_threads(
+    profile: &Profile,
+    filter: &Filter,
+    total: u64,
+    limit: usize,
+) -> Vec<ThreadEntry> {
     let total_f = total.max(1) as f32;
-    let mut entries: Vec<ThreadEntry> = profile
-        .threads()
-        .filter(|t| t.raw().samples.length > 0)
-        .map(|t| {
-            let samples = t.raw().samples.length as u64;
+    let counts = per_thread_filtered_counts(profile, filter, profile.start_time_ms());
+    let mut entries: Vec<ThreadEntry> = counts
+        .into_iter()
+        .filter(|&(_, c)| c > 0)
+        .map(|(handle, samples)| {
+            let raw = profile.raw_thread(handle);
             ThreadEntry {
-                tid: t.tid(),
-                name: t.name().unwrap_or("").to_owned(),
-                pid: t.pid_full().to_string(),
+                tid: raw.tid,
+                name: raw.name.clone().unwrap_or_default(),
+                pid: raw.pid.to_string(),
                 samples,
                 samples_pct: 100.0 * samples as f32 / total_f,
             }
         })
         .collect();
-    // Sort descending by samples; tid asc as a stable tiebreak so the
-    // output doesn't shuffle across calls when counts are equal.
     entries.sort_by(|a, b| b.samples.cmp(&a.samples).then_with(|| a.tid.cmp(&b.tid)));
     entries.truncate(limit);
     entries
 }
 
-fn compute_top_modules(profile: &Profile, limit: usize) -> Vec<ModuleEntry> {
+fn compute_top_modules(profile: &Profile, filter: &Filter, limit: usize) -> Vec<ModuleEntry> {
+    use crate::query::event::EventSource;
     let mut counts: HashMap<String, u64> = HashMap::new();
     let mut total_samples: u64 = 0;
 
-    for view in profile.threads() {
-        let handle = view.handle();
-        for &stack_opt in &view.raw().samples.stack {
+    for handle in filter.threads(profile) {
+        for stack_opt in profile.stack_indices(handle, &EventSource::Samples, filter.time_range) {
             let Some(stack_idx) = stack_opt else { continue };
             total_samples += 1;
             // Each sample contributes 1 to every module appearing at least
@@ -345,7 +461,15 @@ mod tests {
     #[test]
     fn summary_returns_top_self_and_total_with_limit() {
         let profile = fixture("two_functions");
-        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
         assert!(s.total_samples > 0);
         assert_eq!(
             s.top_self_functions.len().min(DEFAULT_FUNCTION_LIMIT),
@@ -363,7 +487,15 @@ mod tests {
     #[test]
     fn summary_picks_dominant_thread() {
         let profile = fixture("two_functions");
-        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
         let dom = s
             .dominant_thread
             .expect("fixture has at least one sampled thread");
@@ -374,7 +506,15 @@ mod tests {
     #[test]
     fn summary_handles_empty_profile() {
         let profile = fixture("minimal");
-        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
         // Minimal fixture has zero samples; time_range collapses to [0,0].
         assert_eq!(s.time_range_ms, [0.0, 0.0]);
         assert_eq!(s.profile_start_ms, 0.0);
@@ -387,7 +527,15 @@ mod tests {
     #[test]
     fn summary_returns_top_processes_and_threads() {
         let profile = fixture("two_functions");
-        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
 
         // The fixture has at least one sampled thread, so both arrays
         // should be non-empty and capped at their respective limits.
@@ -444,7 +592,15 @@ mod tests {
         }"#;
         let raw: RawProfile = serde_json::from_str(json).unwrap();
         let profile = Profile::from_raw(raw);
-        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
 
         assert_eq!(s.top_processes.len(), 2);
         assert_eq!(s.top_processes[0].name, "beta");
@@ -483,8 +639,116 @@ mod tests {
         }"#;
         let raw: RawProfile = serde_json::from_str(json).unwrap();
         let profile = Profile::from_raw(raw);
-        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
         assert_eq!(s.profile_start_ms, 42_646_349.0);
         assert_eq!(s.time_range_ms, [0.0, 42_713_794.0 - 42_646_349.0]);
+    }
+
+    /// Two processes with different sample volumes; a `process=` filter
+    /// should restrict every sample-count surface to the named process —
+    /// `total_samples`, `top_processes`, `top_threads`, and the
+    /// dominant-thread slot all reflect the slice. Regression guard for
+    /// issue #63 (per-process orientation via filter).
+    #[test]
+    fn filter_by_process_restricts_sample_counts_to_that_process() {
+        use crate::query::filters::ProcessFilter;
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [
+                {"name": "t1", "processName": "alpha", "tid": 1, "pid": 10, "registerTime": 0.0,
+                 "stringArray": [],
+                 "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                 "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                 "samples": {"length": 2, "stack": [null, null], "time": [0.0, 1.0]},
+                 "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                 "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                 "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}},
+                {"name": "t2", "processName": "beta", "tid": 2, "pid": 20, "registerTime": 0.0,
+                 "stringArray": [],
+                 "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                 "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                 "samples": {"length": 5, "stack": [null, null, null, null, null], "time": [0.0, 1.0, 2.0, 3.0, 4.0]},
+                 "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                 "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                 "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}}
+            ]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter {
+                process: Some(ProcessFilter::Name("beta".into())),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        // Filtered scope = beta's 5 samples only.
+        assert_eq!(s.total_samples, 5);
+        // Only beta should appear in top_processes / top_threads.
+        assert_eq!(s.top_processes.len(), 1);
+        assert_eq!(s.top_processes[0].name, "beta");
+        assert_eq!(s.top_processes[0].samples, 5);
+        // beta's sample share within its own filtered scope is 100%.
+        assert!((s.top_processes[0].samples_pct - 100.0).abs() < 0.01);
+        assert_eq!(s.top_threads.len(), 1);
+        assert_eq!(s.top_threads[0].tid, 2);
+        let dom = s.dominant_thread.expect("filtered profile has samples");
+        assert_eq!(dom.tid, 2);
+        assert_eq!(dom.samples, 5);
+    }
+
+    /// `time_range` filter must trim `total_samples` and `time_range_ms`
+    /// on top of the process / thread slice.
+    #[test]
+    fn filter_by_time_range_trims_sample_counts() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [{
+                "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": [],
+                "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                "samples": {"length": 5, "stack": [null, null, null, null, null], "time": [0.0, 10.0, 20.0, 30.0, 40.0]},
+                "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        // Time range covers the middle three samples (10, 20, 30 ms).
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter {
+                time_range: Some([10.0, 30.0]),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(s.total_samples, 3);
+        assert_eq!(s.time_range_ms, [10.0, 30.0]);
+        // Filtered duration is the span of the surviving samples, not
+        // the full recording.
+        assert_eq!(s.duration_ms, 20);
     }
 }

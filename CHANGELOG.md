@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- *(query)* `summary` accepts the standard `process` / `thread` / `time_range` filter ([#63](https://github.com/antiguru/pollard/issues/63)).
+  Previously profile-wide only, so the natural follow-up after spotting a hot pid in `top_processes` was a hand-composed `top_functions` + `top_modules` + dominant-thread reasoning. The filter now flows through every sample-count surface in the response (`total_samples`, `time_range_ms`, `duration_ms`, `top_processes`, `top_threads`, `top_modules`, both top-functions lists, `dominant_thread`); recording-level fields (`interval_ms`, `sample_rate_hz`, `unsymbolicated_pct`, `profile_start_ms`) stay profile-wide because they describe the recording, not the slice. Default args reproduce the prior profile-wide behavior.
+
 - *(query)* surface child names on `call_tree` pruning markers ([#61](https://github.com/antiguru/pollard/issues/61)).
   Omitted-children markers now carry `top_omitted` (up to 3 entries of `{function, pct}`, biggest first) and truncated-subtree markers carry the cutoff frame's `function`, so a caller can tell *what* was dropped and decide whether widening `min_pct` / `max_breadth` / `max_depth` is worth a second call.
 - *(query)* warn when bare-name `process=` aggregates across multiple pids ([#62](https://github.com/antiguru/pollard/issues/62)).

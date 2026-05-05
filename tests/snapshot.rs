@@ -53,6 +53,7 @@ async fn summary_snapshot() {
         session.name(),
         session.path().display().to_string().as_str(),
         session.unsymbolicated_pct(),
+        pollard::query::filters::Filter::default(),
     )
     .unwrap();
 

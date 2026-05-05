@@ -95,7 +95,7 @@ fn parse_string_enum<T: Copy>(
 /// then echoed the original string back, which made the diagnostic
 /// confusing because the listed available threads/processes never
 /// matched. Reject malformed prefixes up front instead.
-fn parse_filter(args: &CommonFilterArgs) -> Result<Filter, ToolError> {
+pub(crate) fn parse_filter(args: &CommonFilterArgs) -> Result<Filter, ToolError> {
     let thread = args
         .thread
         .as_deref()
