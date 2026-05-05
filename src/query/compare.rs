@@ -13,7 +13,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{ProcessRef, ToolError};
 use crate::profile::Profile;
 use crate::query::event::EventSource;
 use crate::query::filters::Filter;
@@ -124,6 +124,16 @@ pub struct Output {
     /// counter the pct columns are percentages of.
     pub event: String,
     pub functions: Vec<DiffEntry>,
+    /// Set when a bare-name `process=` filter aggregated across more than
+    /// one distinct pid in profile A. Lists the matched `(pid, name)`
+    /// pairs so the caller can disambiguate via `pid:N` or `pid:N.M`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub a_matched_processes: Option<Vec<ProcessRef>>,
+    /// Same as [`Self::a_matched_processes`] but resolved against
+    /// profile B. The two filters share the same `process=` value but
+    /// can resolve to different pid sets in each recording.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub b_matched_processes: Option<Vec<ProcessRef>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -312,6 +322,8 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
         },
         event: args.event.label().to_owned(),
         functions: rows,
+        a_matched_processes: args.filter_args.bare_name_multi_match(a),
+        b_matched_processes: args.filter_args.bare_name_multi_match(b),
     })
 }
 

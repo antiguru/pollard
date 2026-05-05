@@ -137,6 +137,46 @@ impl Filter {
         })
     }
 
+    /// When the process filter is a bare name (`ProcessFilter::Name`) that
+    /// matches more than one distinct pid, return the matched
+    /// `(pid, name)` pairs so callers can surface the over-aggregation in
+    /// their response. Returns `None` when the filter is unset, when it's
+    /// a `Pid` filter (already pid-precise), or when the bare-name match
+    /// resolves to a single pid.
+    ///
+    /// Distinct-pid count uses [`ThreadView::pid_full`] so samply's
+    /// `.N` sub-process suffix counts as a separate process — passing
+    /// `pid.suffix` syntax is exactly the disambiguation we tell the
+    /// caller about.
+    pub fn bare_name_multi_match(&self, profile: &Profile) -> Option<Vec<ProcessRef>> {
+        let ProcessFilter::Name(needle) = self.process.as_ref()? else {
+            return None;
+        };
+        let mut seen: std::collections::BTreeMap<Pid, String> = std::collections::BTreeMap::new();
+        for t in profile.threads() {
+            if t.process_name().is_none_or(|name| name != needle) {
+                continue;
+            }
+            seen.entry(t.pid_full()).or_insert_with(|| {
+                t.process_name()
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("")
+                    .to_owned()
+            });
+        }
+        if seen.len() <= 1 {
+            return None;
+        }
+        Some(
+            seen.into_iter()
+                .map(|(pid, name)| ProcessRef {
+                    pid: pid.to_string(),
+                    name,
+                })
+                .collect(),
+        )
+    }
+
     /// Clamp a time range to the profile's actual duration; emit no error.
     /// Returns the clamped range and the original-range diagnostic if anything changed.
     pub fn clamped_time_range(
@@ -333,6 +373,97 @@ mod tests {
             }
             other => panic!("expected ProcessNotFound, got {other:?}"),
         }
+    }
+
+    /// Two threads sharing the same `processName` (`clusterd`) on different
+    /// pids — the over-aggregation case bare-name `process=` filtering is
+    /// supposed to warn about.
+    fn shared_name_fixture() -> Profile {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [
+                {
+                    "name": "main",
+                    "processName": "clusterd",
+                    "tid": 1,
+                    "pid": 100,
+                    "registerTime": 0.0,
+                    "stringArray": [],
+                    "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                    "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                    "samples": {"length": 0, "stack": [], "time": []},
+                    "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                    "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                    "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+                },
+                {
+                    "name": "main",
+                    "processName": "clusterd",
+                    "tid": 2,
+                    "pid": 200,
+                    "registerTime": 0.0,
+                    "stringArray": [],
+                    "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                    "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                    "samples": {"length": 0, "stack": [], "time": []},
+                    "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                    "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                    "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+                }
+            ]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        Profile::from_raw(raw)
+    }
+
+    #[test]
+    fn bare_name_multi_match_returns_pids_when_more_than_one() {
+        let p = shared_name_fixture();
+        let filter = Filter {
+            process: Some(ProcessFilter::Name("clusterd".into())),
+            ..Default::default()
+        };
+        let matched = filter
+            .bare_name_multi_match(&p)
+            .expect("expected Some when bare name resolves to >1 pid");
+        assert_eq!(matched.len(), 2);
+        let pids: Vec<_> = matched.iter().map(|r| r.pid.as_str()).collect();
+        assert!(pids.contains(&"100"), "missing pid 100 in {pids:?}");
+        assert!(pids.contains(&"200"), "missing pid 200 in {pids:?}");
+        assert!(matched.iter().all(|r| r.name == "clusterd"));
+    }
+
+    #[test]
+    fn bare_name_multi_match_returns_none_for_single_pid() {
+        let p = multi_process_fixture(); // each name maps to one pid here
+        let filter = Filter {
+            process: Some(ProcessFilter::Name("samply".into())),
+            ..Default::default()
+        };
+        assert!(filter.bare_name_multi_match(&p).is_none());
+    }
+
+    #[test]
+    fn bare_name_multi_match_returns_none_for_pid_filter() {
+        // Pid filtering is already pid-precise, so we must not warn even
+        // when a bare pid (suffix=None) covers multiple sub-pids.
+        let p = shared_name_fixture();
+        let filter = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: None,
+            })),
+            ..Default::default()
+        };
+        assert!(filter.bare_name_multi_match(&p).is_none());
+    }
+
+    #[test]
+    fn bare_name_multi_match_returns_none_when_no_filter() {
+        let p = shared_name_fixture();
+        let filter = Filter::default();
+        assert!(filter.bare_name_multi_match(&p).is_none());
     }
 
     #[test]

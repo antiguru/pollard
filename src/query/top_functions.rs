@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{ProcessRef, ToolError};
 use crate::matching::optional_matcher;
 use crate::profile::Profile;
 use crate::query::event::EventSource;
@@ -51,6 +51,11 @@ pub struct Output {
     /// columns are percentages of this event's total count.
     pub event: String,
     pub functions: Vec<FunctionEntry>,
+    /// Set when a bare-name `process=` filter aggregated across more than
+    /// one distinct pid. Lists the matched `(pid, name)` pairs so the
+    /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_processes: Option<Vec<ProcessRef>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -233,6 +238,7 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
         },
         event: args.event.label().to_owned(),
         functions,
+        matched_processes: args.filter_args.bare_name_multi_match(profile),
     })
 }
 
@@ -315,6 +321,54 @@ mod tests {
             .expect("d must still appear in totals");
         assert_eq!(d.self_samples, 0);
         assert_eq!(d.total_samples, 100);
+    }
+
+    #[test]
+    fn matched_processes_set_when_bare_name_resolves_to_multiple_pids() {
+        // Two threads share processName="clusterd" on different pids so a
+        // bare-name `process=clusterd` filter silently aggregates both.
+        // The Output should now expose this via `matched_processes`.
+        use crate::query::filters::{Filter, ProcessFilter};
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [
+                {"name": "main", "processName": "clusterd", "tid": 1, "pid": 100, "registerTime": 0.0,
+                 "stringArray": ["f"],
+                 "frameTable": {"length": 1, "address": [-1], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]},
+                 "stackTable": {"length": 1, "frame": [0], "category": [0], "subcategory": [0], "prefix": [null]},
+                 "samples": {"length": 1, "stack": [0], "time": [0.0]},
+                 "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                 "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                 "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}},
+                {"name": "main", "processName": "clusterd", "tid": 2, "pid": 200, "registerTime": 0.0,
+                 "stringArray": ["g"],
+                 "frameTable": {"length": 1, "address": [-1], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]},
+                 "stackTable": {"length": 1, "frame": [0], "category": [0], "subcategory": [0], "prefix": [null]},
+                 "samples": {"length": 1, "stack": [0], "time": [0.0]},
+                 "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                 "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                 "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}}
+            ]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let result = top_functions(
+            &profile,
+            &Args {
+                filter_args: Filter {
+                    process: Some(ProcessFilter::Name("clusterd".into())),
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let matched = result
+            .matched_processes
+            .expect("expected matched_processes when bare name spans >1 pid");
+        let pids: Vec<_> = matched.iter().map(|r| r.pid.as_str()).collect();
+        assert!(pids.contains(&"100") && pids.contains(&"200"));
     }
 
     #[test]

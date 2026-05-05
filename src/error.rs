@@ -5,6 +5,7 @@
 
 #![allow(dead_code)]
 
+use schemars::JsonSchema;
 use serde::Serialize;
 use std::path::PathBuf;
 
@@ -75,7 +76,7 @@ pub struct ThreadRef {
     pub name: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct ProcessRef {
     /// String form to preserve samply's `.N` sub-process suffix
     /// (e.g. `"100.1"`) — same convention as `ProcessDescription::pid`.

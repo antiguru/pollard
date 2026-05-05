@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{ProcessRef, ToolError};
 use crate::matching::{
     DidYouMean, FunctionMatcher, auto_promote_match, matcher_to_string, narrowing_matcher,
     nearest_function_scored,
@@ -70,6 +70,11 @@ pub struct Output {
     /// so the caller can verify the substitution.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub did_you_mean: Option<DidYouMean>,
+    /// Set when a bare-name `process=` filter aggregated across more than
+    /// one distinct pid. Lists the matched `(pid, name)` pairs so the
+    /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_processes: Option<Vec<ProcessRef>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Clone)]
@@ -272,6 +277,7 @@ fn call_tree_inner(
         },
         tree,
         did_you_mean,
+        matched_processes: args.filter_args.bare_name_multi_match(profile),
     })
 }
 

@@ -2,7 +2,7 @@
 
 #![allow(dead_code)]
 
-use crate::error::ToolError;
+use crate::error::{ProcessRef, ToolError};
 use crate::matching::required_matcher;
 use crate::profile::Profile;
 use crate::query::event::EventSource;
@@ -26,6 +26,11 @@ pub struct Output {
     pub unique_stacks_total: usize,
     pub stacks_returned: usize,
     pub stacks: Vec<StackOutput>,
+    /// Set when a bare-name `process=` filter aggregated across more than
+    /// one distinct pid. Lists the matched `(pid, name)` pairs so the
+    /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub matched_processes: Option<Vec<ProcessRef>>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -129,6 +134,7 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
         unique_stacks_total,
         stacks_returned: stacks.len(),
         stacks,
+        matched_processes: args.filter_args.bare_name_multi_match(profile),
     })
 }
 
