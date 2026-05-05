@@ -145,12 +145,13 @@ pub(crate) fn parse_filter(args: &CommonFilterArgs) -> Result<Filter, ToolError>
 pub struct TopFunctionsArgs {
     /// Profile ID returned by load_profile.
     pub profile_id: String,
-    /// Optional filter on the **demangled function name**. Literal
-    /// case-sensitive substring by default — e.g. `"simd_cols_3rd"` matches,
-    /// `"simd"` matches `"simd_cols_3rd"` but NOT `"SIMD"` or `"simdcols"`.
-    /// Prefix with `re:` for a regex (`"re:simd.*cols"`). Not a topic /
-    /// fuzzy / token search; for "anything related to X" use multiple narrow
-    /// substring queries or a regex with alternation.
+    /// Optional filter on the **demangled function name**.
+    /// Substring match by default; prefix with `re:` for a regex.
+    /// Case-sensitive — e.g. `"simd_cols_3rd"` matches, `"simd"` matches
+    /// `"simd_cols_3rd"` but NOT `"SIMD"` or `"simdcols"`; a regex form is
+    /// `"re:simd.*cols"`. Not a topic / fuzzy / token search; for "anything
+    /// related to X" use multiple narrow substring queries or a regex with
+    /// alternation.
     #[serde(default)]
     pub filter: Option<String>,
     /// Maximum number of results to return. Defaults to 30.
@@ -190,9 +191,11 @@ pub struct CallTreeArgs {
     #[serde(default)]
     pub inverted: Option<bool>,
     /// Only show subtrees rooted at this function name / pattern.
+    /// Substring match by default; prefix with `re:` for a regex.
     #[serde(default)]
     pub root_function: Option<String>,
     /// Only include stacks that pass through this function.
+    /// Substring match by default; prefix with `re:` for a regex.
     #[serde(default)]
     pub paths_to: Option<String>,
     /// Minimum percentage threshold for including a node (default 1.0).
@@ -235,6 +238,7 @@ pub struct FoldedStacksArgs {
     pub profile_id: String,
     /// Optional function-name filter; only stacks containing at least one
     /// matching frame are emitted (the full stack is preserved in the line).
+    /// Substring match by default; prefix with `re:` for a regex.
     #[serde(default)]
     pub function_filter: Option<String>,
     #[serde(flatten)]
@@ -260,10 +264,10 @@ pub struct TopGroupsArgs {
     /// `top_functions` modulo the module disambiguation column).
     #[serde(default)]
     pub group_by: Option<String>,
-    /// Optional substring/regex filter on function names — same matcher
-    /// syntax as `top_functions`. Filters frames *before* grouping, so a
-    /// `group_by="module"` query with `filter="hot"` only counts frames
-    /// whose function names match `hot`.
+    /// Optional filter on function names — same matcher as `top_functions`.
+    /// Substring match by default; prefix with `re:` for a regex. Filters
+    /// frames *before* grouping, so a `group_by="module"` query with
+    /// `filter="hot"` only counts frames whose function names match `hot`.
     #[serde(default)]
     pub filter: Option<String>,
     /// Maximum number of rows to return. Defaults to 30.
@@ -295,8 +299,8 @@ pub struct CompareProfilesArgs {
     pub profile_id_a: String,
     /// Comparison profile ID (the "after" side of the diff).
     pub profile_id_b: String,
-    /// Optional substring/regex filter on function names. Same matcher
-    /// syntax as `top_functions` — applied identically to both sides.
+    /// Optional filter on function names — applied identically to both sides.
+    /// Substring match by default; prefix with `re:` for a regex.
     #[serde(default)]
     pub filter: Option<String>,
     /// Maximum number of rows to return. Defaults to 30.
@@ -341,6 +345,7 @@ pub struct StacksContainingArgs {
     /// Profile ID returned by load_profile.
     pub profile_id: String,
     /// Function name / pattern to search for in each stack.
+    /// Substring match by default; prefix with `re:` for a regex.
     pub function: String,
     /// Maximum number of distinct stacks to return. Defaults to 20.
     #[serde(default)]
