@@ -75,6 +75,7 @@ async fn lists_all_tools() {
         "asm_for_function",
         "address_to_function",
         "compare_profiles",
+        "compare_functions",
         "summary",
     ] {
         assert!(names.contains(expected), "missing tool: {}", expected);

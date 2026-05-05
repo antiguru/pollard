@@ -194,6 +194,33 @@ function spans the bulk of the file or when broader context is needed).
 Disassembly for the function with per-instruction sample counts. Reuses
 samply-api's `/asm/v1`.
 
+#### `compare_functions(profile_id_a, function_a, function_b, profile_id_b?, module_a?, module_b?, with_samples=true) -> CompareFunctionsOutput`
+
+Side-by-side asm diff of two functions, with per-instruction sample
+counts on both sides.
+Internally calls `asm_for_function` once per side and aligns the two
+streams row-by-row using LCS over a normalized instruction key
+(registers collapsed to `R`, numeric immediates to `IMM`,
+mnemonic + operand shape preserved).
+The displayed asm text is unchanged — normalization is alignment-only.
+
+`profile_id_b` defaults to `profile_id_a`, so the natural
+"why is `simd_rows_1st` faster than `simd_cols_1st`" workflow only
+needs one profile.
+Pass a different `profile_id_b` to read a before/after refactor across
+two recordings.
+
+Without normalization, register renames and differing displacements
+(`xmm0`/`xmm1`, `rdi+rcx*8-0x38` / `rdi+rcx*1-0x6000`) would split
+nominally-equal instructions onto separate rows and the per-row sample
+columns would no longer line up — defeating the whole point.
+LCS gap-fills with `Option<.>` fields (`only_a` / `only_b` per
+position) so the surplus instructions on the longer side remain
+visible at their original offsets.
+
+The two sides must agree on `arch`; a mismatch returns `Internal` rather
+than producing a meaningless alignment.
+
 ## Data shapes and pruning policy
 
 Pruning is the central design decision. Without bounds, a `call_tree` for
@@ -341,6 +368,35 @@ Frames are root-to-leaf. The matched frame carries `"matched": true`.
 
 By default, lines outside `line_range ± 5` are dropped. `whole_file=true`
 returns every line.
+
+### `compare_functions` output
+
+```json
+{
+  "function_a": "sum_rows", "module_a": "rowcol",
+  "function_b": "sum_cols", "module_b": "rowcol",
+  "arch": "x86_64",
+  "total_samples_a": 1754,
+  "total_samples_b": 14639,
+  "rows": [
+    {"offset_a": 32, "asm_a": "addsd xmm0, qword [rdi + rcx * 8 - 0x38]", "samples_a": 0,
+     "offset_b": 32, "asm_b": "addsd xmm0, qword [rdi + rcx * 1 - 0x6000]", "samples_b": 0},
+    {"offset_a": 38, "asm_a": "addsd xmm0, qword [rdi + rcx * 8 - 0x30]", "samples_a": 228,
+     "offset_b": 41, "asm_b": "addsd xmm0, qword [rdi + rcx * 1 - 0x4000]", "samples_b": 3543},
+    {"offset_a": 56, "asm_a": "addsd xmm0, qword [rdi + rcx * 8 - 0x18]", "samples_a": 204}
+  ]
+}
+```
+
+Each row carries the asm text and per-instruction sample count for one
+or both sides.
+A row with only `_a` fields is an instruction present on side A with no
+LCS counterpart on side B (and vice versa).
+Matched rows have both — that's where the per-row sample columns line
+up for direct comparison.
+Total-sample columns at the top let the caller eyeball the wall-time
+ratio between the two functions before reading the per-instruction
+detail.
 
 ### `describe_profile` output
 
