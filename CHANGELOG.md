@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- *(tools)* document the `re:` regex prefix on every function-pattern arg ([#66](https://github.com/antiguru/pollard/issues/66)).
+  The prefix that flips a function pattern from substring match to regex was discoverable through the skill description, not through per-arg docs — callers without the skill missed the feature, and callers with it had to re-find which args supported it. Every function-pattern arg now carries the same one-line "Substring match by default; prefix with `re:` for a regex." in its `description`: `top_functions.filter`, `top_groups.filter`, `compare_profiles.filter`, `call_tree.root_function`, `call_tree.paths_to`, `folded_stacks.function_filter`, `stacks_containing.function`, `source_for_function.function`, `asm_for_function.function`. The wording is identical at every site so it's grep-able.
+
 ### Added
 
 - *(query)* `summary` accepts the standard `process` / `thread` / `time_range` filter ([#63](https://github.com/antiguru/pollard/issues/63)).

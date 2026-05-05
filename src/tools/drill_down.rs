@@ -19,6 +19,8 @@ async fn session(
 #[derive(Deserialize, JsonSchema)]
 pub struct SourceForFunctionArgs {
     pub profile_id: String,
+    /// Function to resolve.
+    /// Substring match by default; prefix with `re:` for a regex.
     pub function: String,
     #[serde(default)]
     pub module: Option<String>,
@@ -49,6 +51,8 @@ pub struct AddressToFunctionArgs {
 #[derive(Deserialize, JsonSchema)]
 pub struct AsmForFunctionArgs {
     pub profile_id: String,
+    /// Function to disassemble.
+    /// Substring match by default; prefix with `re:` for a regex.
     pub function: String,
     #[serde(default)]
     pub module: Option<String>,
