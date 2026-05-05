@@ -81,7 +81,7 @@ pub struct SourceLine {
     pub line: u32,
     pub samples: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub samples_pct: Option<f32>,
+    pub self_pct: Option<f32>,
     pub code: String,
 }
 
@@ -442,7 +442,7 @@ pub fn build_listing(
             SourceLine {
                 line: n,
                 samples: s,
-                samples_pct: if total > 0 {
+                self_pct: if total > 0 {
                     Some(100.0 * s as f32 / total_f)
                 } else {
                     None

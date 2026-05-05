@@ -75,7 +75,7 @@ pub struct DominantThread {
     /// String form to preserve samply's `.N` sub-process suffix.
     pub pid: String,
     pub samples: u64,
-    pub samples_pct: f32,
+    pub self_pct: f32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -85,10 +85,12 @@ pub struct ProcessEntry {
     pub name: String,
     /// Total samples across all threads of this process.
     pub samples: u64,
-    /// `samples` as a percentage of profile-wide `total_samples`. Field
-    /// name mirrors [`DominantThread::samples_pct`]; see issue #65 for
-    /// the larger naming sweep across percentage fields.
-    pub samples_pct: f32,
+    /// `samples` as a percentage of profile-wide `total_samples`. Same
+    /// `{kind}_pct` convention as `top_functions[].self_pct` —
+    /// `self` here means "samples attributed to this process",
+    /// which has no `total` counterpart since processes don't compose
+    /// the way function self/total does.
+    pub self_pct: f32,
     /// Threads belonging to this process, before any filtering.
     pub thread_count: usize,
 }
@@ -100,7 +102,7 @@ pub struct ThreadEntry {
     /// String form to preserve samply's `.N` sub-process suffix.
     pub pid: String,
     pub samples: u64,
-    pub samples_pct: f32,
+    pub self_pct: f32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -314,7 +316,7 @@ fn compute_dominant_thread(
                 name: raw.name.clone().unwrap_or_default(),
                 pid: raw.pid.to_string(),
                 samples,
-                samples_pct: 100.0 * samples as f32 / total_f,
+                self_pct: 100.0 * samples as f32 / total_f,
             }
         })
 }
@@ -350,7 +352,7 @@ fn compute_top_processes(
             pid: pid.to_string(),
             name,
             samples,
-            samples_pct: 100.0 * samples as f32 / total_f,
+            self_pct: 100.0 * samples as f32 / total_f,
             thread_count,
         })
         .collect();
@@ -377,7 +379,7 @@ fn compute_top_threads(
                 name: raw.name.clone().unwrap_or_default(),
                 pid: raw.pid.to_string(),
                 samples,
-                samples_pct: 100.0 * samples as f32 / total_f,
+                self_pct: 100.0 * samples as f32 / total_f,
             }
         })
         .collect();
@@ -500,7 +502,7 @@ mod tests {
             .dominant_thread
             .expect("fixture has at least one sampled thread");
         assert!(dom.samples > 0);
-        assert!(dom.samples_pct > 0.0);
+        assert!(dom.self_pct > 0.0);
     }
 
     #[test]
@@ -548,7 +550,7 @@ mod tests {
         // sensible percentage, and `thread_count` should be at least 1.
         let p = &s.top_processes[0];
         assert!(p.samples > 0);
-        assert!(p.samples_pct > 0.0);
+        assert!(p.self_pct > 0.0);
         assert!(p.thread_count >= 1);
 
         // Top-thread leader should match dominant_thread (same sort key,
@@ -609,8 +611,8 @@ mod tests {
         assert_eq!(s.top_processes[1].samples, 2);
 
         // Percentages should reflect 5/7 and 2/7 of total_samples.
-        assert!((s.top_processes[0].samples_pct - 100.0 * 5.0 / 7.0).abs() < 0.01);
-        assert!((s.top_processes[1].samples_pct - 100.0 * 2.0 / 7.0).abs() < 0.01);
+        assert!((s.top_processes[0].self_pct - 100.0 * 5.0 / 7.0).abs() < 0.01);
+        assert!((s.top_processes[1].self_pct - 100.0 * 2.0 / 7.0).abs() < 0.01);
     }
 
     /// Synthesize a profile whose sample timestamps are boot-relative
@@ -704,7 +706,7 @@ mod tests {
         assert_eq!(s.top_processes[0].name, "beta");
         assert_eq!(s.top_processes[0].samples, 5);
         // beta's sample share within its own filtered scope is 100%.
-        assert!((s.top_processes[0].samples_pct - 100.0).abs() < 0.01);
+        assert!((s.top_processes[0].self_pct - 100.0).abs() < 0.01);
         assert_eq!(s.top_threads.len(), 1);
         assert_eq!(s.top_threads[0].tid, 2);
         let dom = s.dominant_thread.expect("filtered profile has samples");

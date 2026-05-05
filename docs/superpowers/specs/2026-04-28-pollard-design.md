@@ -222,7 +222,7 @@ Every parameter that takes a function name (`filter`, `function`,
 - A `module` parameter (where present) further constrains by the binary
   name. Without `module`, matches across all loaded modules.
 
-Percentages in source listings (`samples_pct`) are denominated against
+Percentages in source listings (`self_pct`) are denominated against
 the function's own sample count, not the whole profile — these answer
 "which lines in this function are hot." Percentages elsewhere (`self_pct`,
 `total_pct`) are denominated against the relevant aggregation scope
@@ -334,7 +334,7 @@ Frames are root-to-leaf. The matched frame carries `"matched": true`.
   "line_range": [40, 78],
   "lines": [
     {"line": 40, "samples": 0, "code": "fn process_request(req: Request) {"},
-    {"line": 44, "samples": 800, "samples_pct": 53.3, "code": "    validate(&parsed);"}
+    {"line": 44, "samples": 800, "self_pct": 53.3, "code": "    validate(&parsed);"}
   ]
 }
 ```
