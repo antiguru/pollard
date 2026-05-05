@@ -36,7 +36,12 @@ fn intern_string(string_array: &mut Vec<String>, s: &str) -> usize {
 /// Best-effort: any lib that wholesym cannot load is skipped silently.
 /// Returns `Ok(())` always (errors are logged to stderr per-lib).
 pub async fn symbolicate(raw: &mut RawProfile) -> Result<(), crate::error::ToolError> {
-    let config = SymbolManagerConfig::new().use_spotlight(true);
+    // `use_spotlight` is macOS-only — it asks Spotlight for adjacent .dSYM
+    // bundles. Enabling it on Linux pushes wholesym into a macOS-shaped
+    // resolution path that ends in a dyld-shared-cache read; every Linux
+    // module then fails symbolication with "could not load symbols ...
+    // /System/Library/dyld/dyld_shared_cache_x86_64".
+    let config = SymbolManagerConfig::new().use_spotlight(cfg!(target_os = "macos"));
     let symbol_manager = SymbolManager::with_config(config);
 
     // Process top-level threads (they share raw.libs for lib lookup)
