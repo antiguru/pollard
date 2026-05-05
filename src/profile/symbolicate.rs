@@ -6,19 +6,144 @@
 //! resolves them via `wholesym` before `Profile::from_raw` wraps the data.
 //!
 //! If a library cannot be found or wholesym fails to load it, the lib is
-//! skipped silently (single stderr line) and those frames remain with their
-//! hex-address names.
+//! recorded with a [`LibSymbolicationStatus::LoadError`] in the per-lib
+//! outcomes and frames belonging to that lib are left with their hex
+//! names. Per-lib lookup counts are also tracked so callers can spot
+//! "loaded the binary but every address missed" cases (e.g. a stale
+//! rebuild where layout drifted).
 
 use std::collections::HashMap;
 use std::path::Path;
 
+use schemars::JsonSchema;
+use serde::Serialize;
 use wholesym::{LookupAddress, SymbolManager, SymbolManagerConfig, SymbolMap};
 
-use crate::profile::raw::{InlineFrame, RawProfile, RawThread};
+use crate::profile::raw::{InlineFrame, RawLib, RawProfile, RawThread};
 
-/// Returns true if the function name looks unsymbolicated.
-fn is_unsymbolicated(name: &str) -> bool {
-    name.is_empty() || name.starts_with("0x") || name == "0x0"
+/// Returns true if the function name looks unsymbolicated. Treat any
+/// `0x…` hex name as unsymbolicated, not just the literal `"0x0"` —
+/// otherwise a profile whose hot frames all came back as raw addresses
+/// (e.g. binary rebuilt between recording and analysis, see issue #80)
+/// reports a near-zero unsymbolicated percentage.
+pub(crate) fn is_unsymbolicated(name: &str) -> bool {
+    name.is_empty() || name.starts_with("0x")
+}
+
+/// Outcome of attempting to symbolicate one library.
+///
+/// Surfaced through [`crate::session::ProfileSession`] so callers can see
+/// *which* libraries failed to load and *how many* frames each one was
+/// asked about. The pair "loaded ok, but every lookup returned None" is
+/// the smoking gun for a stale-binary scenario.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct LibSymbolicationOutcome {
+    pub lib_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_name: Option<String>,
+    /// Breakpad-formatted debug id, when samply recorded one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub debug_id: Option<String>,
+    /// Path samply pointed at; reported back so users can immediately
+    /// see which binary on disk pollard tried to open.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    pub status: LibSymbolicationStatus,
+    /// Frames whose addresses pointed at this lib and which symbolication
+    /// attempted to resolve. Zero for libs we never reached.
+    pub frames_attempted: u64,
+    /// Subset of `frames_attempted` for which wholesym returned a symbol.
+    /// `frames_attempted > 0 && frames_resolved == 0` is the canonical
+    /// "stale binary loaded but layout drifted" signal.
+    pub frames_resolved: u64,
+}
+
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LibSymbolicationStatus {
+    /// wholesym opened the binary. Per-frame lookups may still miss; the
+    /// `frames_resolved` counter tells the rest of that story.
+    Loaded,
+    /// wholesym refused or failed to open the binary at the recorded
+    /// path. Common causes: the binary was rebuilt and its debug_id no
+    /// longer matches what the profile recorded, the file was moved or
+    /// deleted, or it was never present on this host.
+    LoadError { message: String },
+    /// The lib record has no `path` and no `debug_path`, so there's
+    /// nothing for wholesym to open.
+    NoBinaryPath,
+}
+
+/// Filter outcomes down to entries worth surfacing in `summary` /
+/// `describe_profile` by default: any non-`Loaded` lib, plus any lib
+/// that loaded successfully yet returned zero resolutions for every
+/// frame asked about (the canonical stale-binary signal — see issue
+/// #80). Successfully-loaded libs with at least one resolved frame
+/// are dropped to keep the diagnostic narrow.
+pub fn problematic_outcomes(outcomes: &[LibSymbolicationOutcome]) -> Vec<LibSymbolicationOutcome> {
+    outcomes
+        .iter()
+        .filter(|o| match &o.status {
+            LibSymbolicationStatus::Loaded => o.frames_attempted > 0 && o.frames_resolved == 0,
+            _ => true,
+        })
+        .cloned()
+        .collect()
+}
+
+/// Per-lib accumulator used while walking threads. Converted into a
+/// flat [`LibSymbolicationOutcome`] vec at the end of [`symbolicate`].
+struct OutcomeAccum {
+    lib_name: String,
+    debug_name: Option<String>,
+    debug_id: Option<String>,
+    path: Option<String>,
+    status: LibSymbolicationStatus,
+    frames_attempted: u64,
+    frames_resolved: u64,
+}
+
+impl OutcomeAccum {
+    fn from_lib(lib: &RawLib, status: LibSymbolicationStatus) -> Self {
+        Self {
+            lib_name: lib.name.clone().unwrap_or_default(),
+            debug_name: lib.debug_name.clone(),
+            debug_id: lib.breakpad_id.clone(),
+            path: lib.path.clone().or_else(|| lib.debug_path.clone()),
+            status,
+            frames_attempted: 0,
+            frames_resolved: 0,
+        }
+    }
+
+    fn into_outcome(self) -> LibSymbolicationOutcome {
+        LibSymbolicationOutcome {
+            lib_name: self.lib_name,
+            debug_name: self.debug_name,
+            debug_id: self.debug_id,
+            path: self.path,
+            status: self.status,
+            frames_attempted: self.frames_attempted,
+            frames_resolved: self.frames_resolved,
+        }
+    }
+}
+
+/// Stable identifier for cross-process aggregation. Multiple processes
+/// may reference what is in fact the same binary (same `debug_id`); we
+/// fold their counters together. Falls back to `(name, path)` when no
+/// `debug_id` is present.
+fn outcome_key(lib: &RawLib) -> String {
+    if let Some(id) = lib.breakpad_id.as_deref() {
+        return id.to_owned();
+    }
+    let name = lib.name.as_deref().unwrap_or("");
+    let path = lib
+        .path
+        .as_deref()
+        .or(lib.debug_path.as_deref())
+        .unwrap_or("");
+    format!("{name}|{path}")
 }
 
 /// Add or find a string in the string array, returning its index.
@@ -33,9 +158,11 @@ fn intern_string(string_array: &mut Vec<String>, s: &str) -> usize {
 
 /// Symbolicate all threads in a `RawProfile` in-place.
 ///
-/// Best-effort: any lib that wholesym cannot load is skipped silently.
-/// Returns `Ok(())` always (errors are logged to stderr per-lib).
-pub async fn symbolicate(raw: &mut RawProfile) -> Result<(), crate::error::ToolError> {
+/// Best-effort: any lib that wholesym cannot load is recorded with a
+/// `LoadError` outcome and its frames are left as hex.
+pub async fn symbolicate(
+    raw: &mut RawProfile,
+) -> Result<Vec<LibSymbolicationOutcome>, crate::error::ToolError> {
     // `use_spotlight` is macOS-only — it asks Spotlight for adjacent .dSYM
     // bundles. Enabling it on Linux pushes wholesym into a macOS-shaped
     // resolution path that ends in a dyld-shared-cache read; every Linux
@@ -44,35 +171,64 @@ pub async fn symbolicate(raw: &mut RawProfile) -> Result<(), crate::error::ToolE
     let config = SymbolManagerConfig::new().use_spotlight(cfg!(target_os = "macos"));
     let symbol_manager = SymbolManager::with_config(config);
 
+    let mut outcomes: HashMap<String, OutcomeAccum> = HashMap::new();
+
     // Process top-level threads (they share raw.libs for lib lookup)
-    symbolicate_threads(&symbol_manager, &mut raw.threads, &raw.libs).await;
+    symbolicate_threads(&symbol_manager, &mut raw.threads, &raw.libs, &mut outcomes).await;
 
     // Process sub-process threads (each process has its own libs table)
     for process in &mut raw.processes {
-        symbolicate_threads(&symbol_manager, &mut process.threads, &process.libs).await;
+        symbolicate_threads(
+            &symbol_manager,
+            &mut process.threads,
+            &process.libs,
+            &mut outcomes,
+        )
+        .await;
     }
 
-    Ok(())
+    let mut flat: Vec<LibSymbolicationOutcome> = outcomes
+        .into_values()
+        .map(OutcomeAccum::into_outcome)
+        .collect();
+    // Stable order: lib_name asc, then debug_id asc as tiebreak. Avoids
+    // shuffle from HashMap iteration so snapshot tests stay deterministic.
+    flat.sort_by(|a, b| {
+        a.lib_name
+            .cmp(&b.lib_name)
+            .then_with(|| a.debug_id.cmp(&b.debug_id))
+    });
+
+    Ok(flat)
 }
 
 async fn symbolicate_threads(
     symbol_manager: &SymbolManager,
     threads: &mut [RawThread],
-    libs: &[crate::profile::raw::RawLib],
+    libs: &[RawLib],
+    outcomes: &mut HashMap<String, OutcomeAccum>,
 ) {
     // Cache: lib_index → SymbolMap (or None if we failed to load it)
     let mut symbol_map_cache: HashMap<usize, Option<SymbolMap>> = HashMap::new();
 
     for thread in threads.iter_mut() {
-        symbolicate_thread(symbol_manager, thread, libs, &mut symbol_map_cache).await;
+        symbolicate_thread(
+            symbol_manager,
+            thread,
+            libs,
+            &mut symbol_map_cache,
+            outcomes,
+        )
+        .await;
     }
 }
 
 async fn symbolicate_thread(
     symbol_manager: &SymbolManager,
     thread: &mut RawThread,
-    libs: &[crate::profile::raw::RawLib],
+    libs: &[RawLib],
     symbol_map_cache: &mut HashMap<usize, Option<SymbolMap>>,
+    outcomes: &mut HashMap<String, OutcomeAccum>,
 ) {
     // Collect work: (frame_idx, func_idx, lib_idx, address)
     // We do this in a preliminary pass to avoid borrow conflicts.
@@ -137,19 +293,55 @@ async fn symbolicate_thread(
             continue;
         }
         let raw_lib = libs.get(lib_idx);
-        let map = load_symbol_map_for_lib(symbol_manager, raw_lib).await;
+        let (map, load_status) = load_symbol_map_for_lib(symbol_manager, raw_lib).await;
+        // Record the load status in the per-lib outcome the first time
+        // we see this lib. Subsequent attempts (e.g. reused across
+        // threads) just inherit the cached status.
+        if let Some(lib) = raw_lib {
+            outcomes
+                .entry(outcome_key(lib))
+                .or_insert_with(|| OutcomeAccum::from_lib(lib, load_status));
+        }
         symbol_map_cache.insert(lib_idx, map);
     }
 
     // Apply symbolication results.
     for (frame_idx, func_idx, lib_idx, addr) in work {
+        let raw_lib = libs.get(lib_idx);
+        // We only count attempts and resolutions for libs we have a
+        // record for — frames whose lib is missing from the table can't
+        // be attributed and would distort the per-lib counters.
+        let outcome_slot = raw_lib.map(outcome_key);
+
         let map = match symbol_map_cache.get(&lib_idx).and_then(|o| o.as_ref()) {
             Some(m) => m,
-            None => continue,
+            None => {
+                // No map → the load failed; we still count the attempt
+                // so the diagnostic shows "asked about N frames, never
+                // resolved any" rather than vanishing.
+                if let Some(key) = outcome_slot.as_ref()
+                    && let Some(acc) = outcomes.get_mut(key)
+                {
+                    acc.frames_attempted += 1;
+                }
+                continue;
+            }
         };
+
+        if let Some(key) = outcome_slot.as_ref()
+            && let Some(acc) = outcomes.get_mut(key)
+        {
+            acc.frames_attempted += 1;
+        }
 
         let lookup = map.lookup(LookupAddress::Relative(addr)).await;
         let Some(addr_info) = lookup else { continue };
+
+        if let Some(key) = outcome_slot.as_ref()
+            && let Some(acc) = outcomes.get_mut(key)
+        {
+            acc.frames_resolved += 1;
+        }
 
         // Use the OUTER inline frame for both name and source attribution.
         //
@@ -210,12 +402,15 @@ async fn symbolicate_thread(
 
 async fn load_symbol_map_for_lib(
     symbol_manager: &SymbolManager,
-    raw_lib: Option<&crate::profile::raw::RawLib>,
-) -> Option<SymbolMap> {
-    let lib = raw_lib?;
+    raw_lib: Option<&RawLib>,
+) -> (Option<SymbolMap>, LibSymbolicationStatus) {
+    let Some(lib) = raw_lib else {
+        return (None, LibSymbolicationStatus::NoBinaryPath);
+    };
 
-    // Prefer path, fall back to debug_path.
-    let path_str = lib.path.as_deref().or(lib.debug_path.as_deref())?;
+    let Some(path_str) = lib.path.as_deref().or(lib.debug_path.as_deref()) else {
+        return (None, LibSymbolicationStatus::NoBinaryPath);
+    };
     let path = Path::new(path_str);
 
     // Derive a MultiArchDisambiguator from the arch field if present (macOS fat binaries).
@@ -228,10 +423,145 @@ async fn load_symbol_map_for_lib(
         .load_symbol_map_for_binary_at_path(path, disambiguator)
         .await
     {
-        Ok(map) => Some(map),
-        Err(e) => {
-            eprintln!("pollard: could not load symbols for {:?}: {}", path_str, e);
-            None
+        Ok(map) => (Some(map), LibSymbolicationStatus::Loaded),
+        Err(e) => (
+            None,
+            LibSymbolicationStatus::LoadError {
+                message: e.to_string(),
+            },
+        ),
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_unsymbolicated_catches_nonzero_hex_names() {
+        // The original predicate (`name == "0x0"`) only flagged the
+        // literal zero address, leaving real hex names like
+        // `"0xb9e0452"` counted as symbolicated. After issue #80 we
+        // unify on the broader `starts_with("0x")` rule so the
+        // diagnostic surfaces stale-binary scenarios honestly.
+        assert!(is_unsymbolicated(""));
+        assert!(is_unsymbolicated("0x0"));
+        assert!(is_unsymbolicated("0xb9e0452"));
+        assert!(is_unsymbolicated("0x7f2eda66bcf7"));
+        assert!(!is_unsymbolicated("memcpy"));
+        assert!(!is_unsymbolicated("<core::iter::Sum>::sum"));
+    }
+
+    fn outcome(
+        lib_name: &str,
+        status: LibSymbolicationStatus,
+        attempted: u64,
+        resolved: u64,
+    ) -> LibSymbolicationOutcome {
+        LibSymbolicationOutcome {
+            lib_name: lib_name.to_owned(),
+            debug_name: None,
+            debug_id: None,
+            path: None,
+            status,
+            frames_attempted: attempted,
+            frames_resolved: resolved,
         }
+    }
+
+    #[test]
+    fn problematic_outcomes_keeps_load_errors() {
+        let outcomes = vec![outcome(
+            "missing",
+            LibSymbolicationStatus::LoadError {
+                message: "boom".into(),
+            },
+            0,
+            0,
+        )];
+        let kept = problematic_outcomes(&outcomes);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].lib_name, "missing");
+    }
+
+    #[test]
+    fn problematic_outcomes_keeps_loaded_with_zero_resolutions() {
+        // Stale-binary signature: wholesym opened the file, every
+        // address lookup missed. `problematic_outcomes` must surface
+        // it even though `status == Loaded`.
+        let outcomes = vec![outcome("stale", LibSymbolicationStatus::Loaded, 100, 0)];
+        let kept = problematic_outcomes(&outcomes);
+        assert_eq!(kept.len(), 1);
+        assert_eq!(kept[0].frames_attempted, 100);
+        assert_eq!(kept[0].frames_resolved, 0);
+    }
+
+    #[test]
+    fn problematic_outcomes_drops_healthy_loaded_libs() {
+        // Loaded with at least one resolved frame is the no-news case;
+        // those libs should not bloat the diagnostic.
+        let outcomes = vec![
+            outcome("happy", LibSymbolicationStatus::Loaded, 50, 50),
+            outcome("partial", LibSymbolicationStatus::Loaded, 50, 1),
+        ];
+        assert!(problematic_outcomes(&outcomes).is_empty());
+    }
+
+    #[test]
+    fn problematic_outcomes_keeps_no_binary_path() {
+        let outcomes = vec![outcome(
+            "orphan",
+            LibSymbolicationStatus::NoBinaryPath,
+            0,
+            0,
+        )];
+        let kept = problematic_outcomes(&outcomes);
+        assert_eq!(kept.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn symbolicate_records_load_error_for_missing_binary() {
+        // Synthesize a profile with a hex-named frame pointing at a
+        // lib whose `path` does not exist. Symbolicate must record a
+        // `LoadError` outcome and count one attempted, zero resolved.
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [{
+                "name": "ghost",
+                "path": "/definitely/not/a/real/path/ghost",
+                "debugName": "ghost",
+                "debugPath": "/definitely/not/a/real/path/ghost",
+                "breakpadId": "DEADBEEFDEADBEEFDEADBEEFDEADBEEF0",
+                "codeId": null,
+                "arch": null
+            }],
+            "threads": [{
+                "name": "Main",
+                "processName": "test",
+                "tid": 1,
+                "pid": 1,
+                "registerTime": 0.0,
+                "stringArray": ["0xdead"],
+                "frameTable": {"length": 1, "address": [57005], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]},
+                "stackTable": {"length": 1, "frame": [0], "category": [0], "subcategory": [0], "prefix": [null]},
+                "samples": {"length": 1, "stack": [0], "time": [0.0]},
+                "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [0], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                "resourceTable": {"length": 1, "lib": [0], "name": [0], "host": [null], "type": [1]},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let mut raw: RawProfile = serde_json::from_str(json).unwrap();
+        let outcomes = symbolicate(&mut raw).await.unwrap();
+        assert_eq!(
+            outcomes.len(),
+            1,
+            "expected one lib outcome, got {outcomes:?}"
+        );
+        let o = &outcomes[0];
+        assert_eq!(o.lib_name, "ghost");
+        assert!(matches!(o.status, LibSymbolicationStatus::LoadError { .. }));
+        assert_eq!(o.frames_attempted, 1);
+        assert_eq!(o.frames_resolved, 0);
+        // Surfaced as problematic.
+        assert_eq!(problematic_outcomes(&outcomes).len(), 1);
     }
 }

@@ -1,6 +1,7 @@
 //! A loaded, symbolicated profile, ready to query.
 
 use crate::error::ToolError;
+use crate::profile::symbolicate::{LibSymbolicationOutcome, is_unsymbolicated};
 use crate::profile::{Profile, load_from_path};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -13,6 +14,9 @@ pub struct ProfileSession {
     profile: Arc<Profile>,
     /// Fraction of frames that did not symbolicate. 0.0–100.0.
     unsymbolicated_pct: f32,
+    /// Per-lib outcomes from the on-load symbolication pass. See
+    /// [`LibSymbolicationOutcome`] for what's tracked and why.
+    lib_outcomes: Vec<LibSymbolicationOutcome>,
 }
 
 #[allow(dead_code)]
@@ -23,17 +27,16 @@ impl ProfileSession {
         })?;
 
         let mut raw = load_from_path(&abs)?;
-        // Best-effort symbolication: resolve unsymbolicated frames (e.g. from
-        // macOS samply recordings) before constructing the read-only Profile.
-        crate::profile::symbolicate::symbolicate(&mut raw)
+        // Best-effort symbolication: resolve unsymbolicated frames before
+        // constructing the read-only Profile. Per-lib outcomes (load
+        // success, lookup hit/miss counts) flow back so callers can see
+        // *why* a profile is partially unsymbolicated rather than just
+        // that it is.
+        let lib_outcomes = crate::profile::symbolicate::symbolicate(&mut raw)
             .await
-            .ok();
+            .unwrap_or_default();
         let profile = Arc::new(Profile::from_raw(raw));
 
-        // For v1 we treat the profile as already-symbolicated by samply itself
-        // (samply runs symbolication during recording). `wholesym` integration
-        // for re-symbolicating an unsymbolicated profile is deferred — see spec
-        // §"Architecture: Failure surface vs. samply".
         let unsymbolicated_pct = compute_unsymbolicated_pct(&profile);
 
         let id = profile_id_from_path(&abs);
@@ -50,6 +53,7 @@ impl ProfileSession {
             path: abs,
             profile,
             unsymbolicated_pct,
+            lib_outcomes,
         })
     }
 
@@ -80,6 +84,11 @@ impl ProfileSession {
     pub fn unsymbolicated_pct(&self) -> f32 {
         self.unsymbolicated_pct
     }
+
+    /// Per-lib outcomes from the on-load symbolication pass.
+    pub fn lib_outcomes(&self) -> &[LibSymbolicationOutcome] {
+        &self.lib_outcomes
+    }
 }
 
 #[allow(dead_code)]
@@ -103,9 +112,13 @@ fn compute_unsymbolicated_pct(profile: &Profile) -> f32 {
             for frame_idx in profile.walk_stack(handle, *s) {
                 total += 1;
                 let info = profile.frame_info(handle, frame_idx);
+                // `is_none()` covers the "no frame_info at all" case;
+                // otherwise reuse the predicate symbolicate.rs trusts so
+                // the two surfaces never disagree on what counts as
+                // unsymbolicated.
                 let is_unsym = info
                     .as_ref()
-                    .is_none_or(|i| i.function_name.is_empty() || i.function_name == "0x0");
+                    .is_none_or(|i| is_unsymbolicated(i.function_name));
                 if is_unsym {
                     unsymbolicated += 1;
                 }

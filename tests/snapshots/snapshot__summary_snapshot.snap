@@ -12,7 +12,7 @@ expression: result
   "time_range_ms": "[range]",
   "profile_start_ms": "[start]",
   "unsymbolicated_pct": "[pct]",
-  "unsymbolicated_bracket": "0%",
+  "unsymbolicated_bracket": ">50%",
   "dominant_thread": {
     "tid": 1969261,
     "name": "tokio-runtime-w",

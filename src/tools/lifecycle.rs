@@ -1,6 +1,7 @@
 //! Lifecycle MCP tools: load_profile, unload_profile, list_profiles, describe_profile.
 
 use crate::error::ToolError;
+use crate::profile::symbolicate::problematic_outcomes;
 use crate::query::describe::{DEFAULT_TOP_N, ProfileDescription, describe};
 use crate::query::summary;
 use crate::tools::PollardServer;
@@ -123,7 +124,7 @@ impl PollardServer {
             self.registry.get(&id).await.ok_or_else(|| {
                 rmcp::ErrorData::internal_error("profile vanished after load", None)
             })?;
-        let desc = describe(
+        let mut desc = describe(
             session.profile(),
             session.id(),
             session.name(),
@@ -131,6 +132,7 @@ impl PollardServer {
             session.unsymbolicated_pct(),
             args.top_n.unwrap_or(DEFAULT_TOP_N),
         );
+        desc.lib_diagnostics = problematic_outcomes(session.lib_outcomes());
         let evicted = evicted
             .into_iter()
             .map(|e| EvictedRef {
@@ -193,14 +195,16 @@ impl PollardServer {
         Parameters(args): Parameters<DescribeProfileArgs>,
     ) -> Result<Json<ProfileDescription>, rmcp::ErrorData> {
         let session = self.registry.get_or_error(&args.profile_id).await?;
-        Ok(Json(describe(
+        let mut desc = describe(
             session.profile(),
             session.id(),
             session.name(),
             &session.path().display().to_string(),
             session.unsymbolicated_pct(),
             args.top_n.unwrap_or(DEFAULT_TOP_N),
-        )))
+        );
+        desc.lib_diagnostics = problematic_outcomes(session.lib_outcomes());
+        Ok(Json(desc))
     }
 
     #[tool(
@@ -213,7 +217,7 @@ impl PollardServer {
     ) -> Result<Json<summary::Output>, rmcp::ErrorData> {
         let session = self.registry.get_or_error(&args.profile_id).await?;
         let filter = parse_filter(&args.common)?;
-        let result = summary::summary(
+        let mut result = summary::summary(
             session.profile(),
             session.id(),
             session.name(),
@@ -221,6 +225,7 @@ impl PollardServer {
             session.unsymbolicated_pct(),
             filter,
         )?;
+        result.lib_diagnostics = problematic_outcomes(session.lib_outcomes());
         Ok(Json(result))
     }
 }
