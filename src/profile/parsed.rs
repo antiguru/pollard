@@ -152,6 +152,21 @@ impl Profile {
             .chain(self.raw.processes.iter().flat_map(|p| p.libs.iter()))
     }
 
+    /// Distinct, sorted, non-empty `lib.name` values across every
+    /// library in the profile. Populates
+    /// `module_not_found.available_modules` so callers see real
+    /// candidates after a `module=` typo instead of falling through
+    /// to a misleading `function_not_found`.
+    pub fn module_names(&self) -> Vec<String> {
+        let mut names: std::collections::BTreeSet<String> = Default::default();
+        for lib in self.all_libs() {
+            if let Some(n) = lib.name.as_deref().filter(|s| !s.is_empty()) {
+                names.insert(n.to_owned());
+            }
+        }
+        names.into_iter().collect()
+    }
+
     /// Inline-call chain attached to a native frame (innermost-first).
     /// Empty when the frame has no DWARF inline records or symbolication
     /// hasn't run yet.

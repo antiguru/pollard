@@ -72,10 +72,11 @@ fn decode_html_entities(s: &str) -> String {
 
 /// Build a [`FunctionMatcher`] for a tool argument, mapping
 /// [`MatcherError`] into the structured [`ToolError`] variants the MCP
-/// surface uses. `MatcherError::Empty` becomes
-/// [`ToolError::InvalidValue`] with the field name so the LLM sees the
-/// accepted pattern syntax in one retry; regex errors fall through as
-/// `ToolError::Internal`. Use [`required_matcher`] when the pattern
+/// surface uses. Both empty patterns and malformed regex map to
+/// [`ToolError::InvalidValue`] so the LLM sees the accepted pattern
+/// syntax in one retry; the regex parser's caret diagnostic flows
+/// through `hint` so the caller can fix the pattern without losing the
+/// position information. Use [`required_matcher`] when the pattern
 /// must be non-empty (e.g. `stacks_containing.function`).
 fn matcher_error_to_tool_error(field: &str, value: &str, err: MatcherError) -> ToolError {
     match err {
@@ -83,9 +84,13 @@ fn matcher_error_to_tool_error(field: &str, value: &str, err: MatcherError) -> T
             field: field.to_owned(),
             value: value.to_owned(),
             accepted: vec!["<non-empty pattern>".to_owned(), "re:<regex>".to_owned()],
+            hint: None,
         },
-        MatcherError::Regex(_) => ToolError::Internal {
-            message: err.to_string(),
+        MatcherError::Regex(_) => ToolError::InvalidValue {
+            field: field.to_owned(),
+            value: value.to_owned(),
+            accepted: vec!["<substring>".to_owned(), "re:<valid regex>".to_owned()],
+            hint: Some(err.to_string()),
         },
     }
 }
@@ -244,6 +249,17 @@ pub fn nearest_function_names(profile: &Profile, matcher: &FunctionMatcher) -> V
         .into_iter()
         .map(|(name, _)| name)
         .collect()
+}
+
+/// Build a `nearest_matches` payload suitable for embedding directly
+/// into [`crate::error::ToolError::FunctionNotFound`]. Caps at
+/// [`crate::error::ERROR_LIST_LIMIT`] entries and truncates each name
+/// to [`crate::error::NEAREST_MATCH_MAX_CHARS`]; the cap on the
+/// underlying min-heap (`NEAREST_K`) already keeps the count small,
+/// but the per-entry length cap matters when generic-laden Rust
+/// monomorphisations weigh in at thousands of characters each.
+pub fn nearest_matches_for_error(profile: &Profile, matcher: &FunctionMatcher) -> Vec<String> {
+    crate::error::truncate_nearest_matches(nearest_function_names(profile, matcher))
 }
 
 /// Same ranking as [`nearest_function_names`] but exposes the raw scores so

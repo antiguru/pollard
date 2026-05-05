@@ -97,7 +97,9 @@ pub async fn source_for_function(
             let Some(resolved) = auto_promote_match(&scored).map(str::to_owned) else {
                 return Err(ToolError::FunctionNotFound {
                     function: args.function.clone(),
-                    nearest_matches: scored.into_iter().map(|(n, _)| n).collect(),
+                    nearest_matches: crate::error::truncate_nearest_matches(
+                        scored.into_iter().map(|(n, _)| n).collect(),
+                    ),
                 });
             };
             let dym = DidYouMean {
@@ -117,6 +119,15 @@ async fn source_for_function_inner(
     did_you_mean: Option<DidYouMean>,
 ) -> Result<SourceListing, ToolError> {
     let matcher = required_matcher("function", function)?;
+    // Validate `module=` before searching, so a typo there returns
+    // `module_not_found` instead of falling through to a misleading
+    // `function_not_found` (see issue: error-shape-fixes).
+    if let Some(m) = args.module.as_deref() {
+        let names = profile.module_names();
+        if !names.iter().any(|n| n == m) {
+            return Err(crate::error::module_not_found(m, names));
+        }
+    }
     let (ctx, _samples_per_line, _total) = attribute(
         profile,
         &matcher,
@@ -285,10 +296,7 @@ fn attribute(
     if matched_pairs.is_empty() {
         return Err(ToolError::FunctionNotFound {
             function: matcher_to_string(matcher),
-            nearest_matches: nearest_function_scored(profile, matcher)
-                .into_iter()
-                .map(|(n, _)| n)
-                .collect(),
+            nearest_matches: crate::matching::nearest_matches_for_error(profile, matcher),
         });
     }
     if matched_pairs.len() > 1 {
@@ -860,6 +868,34 @@ mod tests {
             "expected FunctionNotFound, got {:?}",
             err
         );
+    }
+
+    #[tokio::test]
+    async fn unknown_module_returns_module_not_found() {
+        // two_functions.json has no libs, so any `module=` filter must
+        // surface as `module_not_found`. Crucially, the function name
+        // (`hot`) is correct here — without the up-front module check
+        // this would have surfaced as `function_not_found`, which sent
+        // callers chasing a phantom function-name typo.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let err = source_for_function(
+            &profile,
+            &Args {
+                function: "hot".to_owned(),
+                module: Some("no_such_module.so".to_owned()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+        match err {
+            ToolError::ModuleNotFound { module, .. } => {
+                assert_eq!(module, "no_such_module.so");
+            }
+            other => panic!("expected ModuleNotFound, got {other:?}"),
+        }
     }
 
     #[tokio::test]

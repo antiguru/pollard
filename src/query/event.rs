@@ -33,19 +33,22 @@ pub fn resolve(profile: &Profile, event: Option<&str>) -> Result<EventSource, To
     };
     match marker_lookup(profile, raw) {
         MarkerLookup::StackBearing => Ok(EventSource::Marker(raw.to_owned())),
-        MarkerLookup::Stackless => Err(ToolError::Internal {
-            message: format!(
-                "marker {raw:?} is present but has no `cause.stack` payload, so it can't \
-                 be aggregated as an event; stack-bearing events: {known:?} \
-                 (omit `event` for the default samples track)",
-                known = known_marker_events(profile),
+        MarkerLookup::Stackless => Err(ToolError::InvalidValue {
+            field: "event".to_owned(),
+            value: raw.to_owned(),
+            accepted: known_marker_events(profile),
+            hint: Some(
+                "marker is present but carries no `cause.stack` payload, so it can't be \
+                 aggregated as an event. Pick a stack-bearing marker from `accepted`, or \
+                 omit `event` for the default samples track."
+                    .to_owned(),
             ),
         }),
-        MarkerLookup::Unknown => Err(ToolError::Internal {
-            message: format!(
-                "unknown event {raw:?}; known marker events: {known:?} (omit `event` for the default samples track)",
-                known = known_marker_events(profile),
-            ),
+        MarkerLookup::Unknown => Err(ToolError::InvalidValue {
+            field: "event".to_owned(),
+            value: raw.to_owned(),
+            accepted: known_marker_events(profile),
+            hint: Some("omit `event` for the default samples track".to_owned()),
         }),
     }
 }
@@ -147,12 +150,30 @@ mod tests {
     fn unknown_event_errors_with_suggestions() {
         let p = fixture();
         let err = resolve(&p, Some("not-a-real-event")).unwrap_err();
-        let msg = format!("{err:?}");
-        assert!(msg.contains("not-a-real-event"), "{msg}");
-        assert!(msg.contains("cache-misses"), "{msg}");
-        // The "no such marker" path should not pretend the marker is
-        // stackless — that's a different (and more actionable) error.
-        assert!(!msg.contains("no `cause.stack`"), "{msg}");
+        match err {
+            ToolError::InvalidValue {
+                field,
+                value,
+                accepted,
+                hint,
+            } => {
+                assert_eq!(field, "event");
+                assert_eq!(value, "not-a-real-event");
+                assert!(
+                    accepted.iter().any(|s| s == "cache-misses"),
+                    "accepted={accepted:?}"
+                );
+                // The "no such marker" path should not pretend the marker
+                // is stackless — that's a different and more actionable
+                // error.
+                assert!(
+                    hint.as_deref()
+                        .is_some_and(|s| !s.contains("no `cause.stack`")),
+                    "hint should not mention stackless: {hint:?}"
+                );
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
     }
 
     #[test]
@@ -163,21 +184,32 @@ mod tests {
         // name" apart from "this name exists but isn't aggregatable".
         let p = fixture();
         let err = resolve(&p, Some("mmap")).unwrap_err();
-        let msg = format!("{err:?}");
-        // The actual marker name must appear so the caller sees the match
-        // happened — distinct from the unknown-event message.
-        assert!(msg.contains("mmap"), "expected marker name in msg: {msg}");
-        // Must mention the missing-stack reason so the caller doesn't
-        // mistake this for a typo.
-        assert!(
-            msg.contains("cause.stack") || msg.contains("no stack") || msg.contains("stackless"),
-            "expected stackless explanation in msg: {msg}"
-        );
-        // Suggestions still come from the stack-bearing set.
-        assert!(
-            msg.contains("cache-misses"),
-            "expected stack-bearing suggestion in msg: {msg}"
-        );
+        match err {
+            ToolError::InvalidValue {
+                field,
+                value,
+                accepted,
+                hint,
+            } => {
+                assert_eq!(field, "event");
+                assert_eq!(value, "mmap");
+                // Suggestions still come from the stack-bearing set.
+                assert!(
+                    accepted.iter().any(|s| s == "cache-misses"),
+                    "accepted={accepted:?}"
+                );
+                // The hint must mention the stackless reason so the
+                // caller doesn't mistake this for a typo.
+                let hint = hint.expect("expected hint for stackless marker");
+                assert!(
+                    hint.contains("cause.stack")
+                        || hint.contains("no stack")
+                        || hint.contains("stackless"),
+                    "expected stackless explanation in hint: {hint}"
+                );
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
     }
 
     #[test]

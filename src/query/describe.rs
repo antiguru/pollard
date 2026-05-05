@@ -4,6 +4,7 @@
 
 use crate::profile::Profile;
 use crate::profile::symbolicate::LibSymbolicationOutcome;
+use crate::serde_util::{is_zero_u64, is_zero_usize};
 use schemars::JsonSchema;
 use serde::Serialize;
 
@@ -82,14 +83,6 @@ pub struct ThreadDescription {
     /// milliseconds. May be 0 for event-shaped profiles where every
     /// event lands at the same timestamp; sort by `samples` instead.
     pub duration_ms: u64,
-}
-
-fn is_zero_usize(v: &usize) -> bool {
-    *v == 0
-}
-
-fn is_zero_u64(v: &u64) -> bool {
-    *v == 0
 }
 
 /// Build a [`ProfileDescription`] capped at `top_n` processes (and `top_n`
