@@ -18,28 +18,28 @@ expression: result
     "name": "tokio-runtime-w",
     "pid": "1969186.1",
     "samples": "[n]",
-    "samples_pct": "[pct]"
+    "self_pct": "[pct]"
   },
   "top_processes": [
     {
       "pid": "1969186.1",
       "name": "rustfmt",
       "samples": "[n]",
-      "samples_pct": "[pct]",
+      "self_pct": "[pct]",
       "thread_count": 9
     },
     {
       "pid": "1969186",
       "name": "samply",
       "samples": "[n]",
-      "samples_pct": "[pct]",
+      "self_pct": "[pct]",
       "thread_count": 1
     },
     {
       "pid": "1969186.2",
       "name": "rustfmt",
       "samples": "[n]",
-      "samples_pct": "[pct]",
+      "self_pct": "[pct]",
       "thread_count": 1
     }
   ],
@@ -49,70 +49,70 @@ expression: result
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969260,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969263,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969264,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969267,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969186,
       "name": "rustfmt",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969262,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969265,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969266,
       "name": "tokio-runtime-w",
       "pid": "1969186.1",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     },
     {
       "tid": 1969186,
       "name": "samply",
       "pid": "1969186",
       "samples": "[n]",
-      "samples_pct": "[pct]"
+      "self_pct": "[pct]"
     }
   ],
   "top_modules": [

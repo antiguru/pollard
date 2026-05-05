@@ -14,6 +14,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **breaking** *(query)* unify percentage field naming on `{kind}_pct` ([#65](https://github.com/antiguru/pollard/issues/65)).
+  `summary.dominant_thread.samples_pct`, `summary.top_processes[].samples_pct`, `summary.top_threads[].samples_pct`, and `source_for_function[].samples_pct` are renamed to `self_pct` so every percentage field across the surface uses the same `{kind}_pct` shape (`self_pct` / `total_pct`; `samples` reserved for cases where there's no self/total distinction at all). "Samples on this thread / process" *is* self time for that thread / process, and per-line source samples are self time for that line, so `self_pct` is the natural name and matches what `top_functions` already exposes. Wire-format break for callers that destructured the old name. The convention is documented next to `ProcessEntry::self_pct` and in the design doc.
+
 - *(tools)* document the `re:(?i)` case-insensitive convention on every function-pattern arg ([#67](https://github.com/antiguru/pollard/issues/67)).
   Substring matching is case-sensitive (`memcpy` ≠ `MEMCPY`), which surprises during exploration. The regex form already supports the standard `(?i)` inline flag; the per-arg docs and the `src/matching.rs` module header now spell that out so callers don't have to discover it from the `regex` crate. The canonical one-liner is now `Substring match by default; prefix with `re:` for a regex (use `re:(?i)foo` for case-insensitive).` — same wording at every site so it stays grep-able alongside the #66 line. Default behavior is unchanged.
 
