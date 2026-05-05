@@ -108,12 +108,29 @@ pub struct FrameNode {
 pub struct OmittedSummary {
     pub count: u32,
     pub combined_pct: f32,
+    /// Names of up to [`TOP_OMITTED_CAP`] omitted children, biggest first,
+    /// so the caller can decide whether widening `min_pct` / `max_breadth`
+    /// is worth a second call.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub top_omitted: Vec<OmittedPreview>,
+}
+
+#[derive(Debug, Serialize, JsonSchema)]
+pub struct OmittedPreview {
+    pub function: String,
+    pub pct: f32,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct TruncatedSummary {
+    /// Function name at the depth cutoff — the subtree below this frame was
+    /// dropped because it would exceed `max_depth`.
+    pub function: String,
     pub deepest_descendant_pct: f32,
 }
+
+/// Maximum entries surfaced in [`OmittedSummary::top_omitted`].
+const TOP_OMITTED_CAP: usize = 3;
 
 #[derive(Default)]
 struct AggNode {
@@ -354,6 +371,7 @@ fn build_node(
     if depth > args.max_depth {
         return Some(Node::Truncated {
             truncated: TruncatedSummary {
+                function,
                 deepest_descendant_pct: total_pct,
             },
         });
@@ -371,32 +389,37 @@ fn build_node(
     let mut children = Vec::new();
     let mut omitted_count: u32 = 0;
     let mut omitted_samples: u64 = 0;
+    let mut top_omitted: Vec<OmittedPreview> = Vec::new();
     for (i, (key, child_agg)) in child_entries.iter().enumerate() {
-        let mut emit = true;
-        if i as u32 >= args.max_breadth {
-            emit = false;
-        }
         let child_pct = 100.0 * child_agg.total_samples as f32 / total;
-        if pruned(child_agg.total_samples, child_pct, args) {
-            emit = false;
-        }
-        if emit {
-            if let Some(node) = build_node(
+        let breadth_cut = i as u32 >= args.max_breadth;
+        let prune_cut = pruned(child_agg.total_samples, child_pct, args);
+        let mut emitted = false;
+        if !breadth_cut
+            && !prune_cut
+            && let Some(node) = build_node(
                 child_agg,
                 total_samples,
                 key.0.clone(),
                 key.1.clone(),
                 args,
                 depth + 1,
-            ) {
-                children.push(node);
-            } else {
-                omitted_count += 1;
-                omitted_samples += child_agg.total_samples;
-            }
-        } else {
+            )
+        {
+            children.push(node);
+            emitted = true;
+        }
+        if !emitted {
             omitted_count += 1;
             omitted_samples += child_agg.total_samples;
+            // child_entries is sorted by total_samples desc, so the first
+            // omissions we observe are the heaviest — take the prefix.
+            if top_omitted.len() < TOP_OMITTED_CAP {
+                top_omitted.push(OmittedPreview {
+                    function: key.0.clone(),
+                    pct: child_pct,
+                });
+            }
         }
     }
     if omitted_count > 0 {
@@ -404,6 +427,7 @@ fn build_node(
             omitted: OmittedSummary {
                 count: omitted_count,
                 combined_pct: 100.0 * omitted_samples as f32 / total,
+                top_omitted,
             },
         });
     }
@@ -733,6 +757,67 @@ mod tests {
         .unwrap();
         assert_eq!(tree.event, "cache-misses");
         assert_eq!(tree.total_samples, 2);
+    }
+
+    #[test]
+    fn omitted_marker_surfaces_top_child_names() {
+        // two_functions.json: hot=90, cold=10 at top level. With max_breadth=1
+        // we keep only `hot`, and the omitted marker should name `cold`.
+        let p = fixture();
+        let tree = call_tree(
+            &p,
+            &Args {
+                min_pct: 0.0,
+                max_breadth: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let root = tree.tree.expect("tree present");
+        let Node::Frame(f) = root else {
+            panic!("expected synthetic root frame");
+        };
+        let omitted = f
+            .children
+            .iter()
+            .find_map(|c| match c {
+                Node::Omitted { omitted } => Some(omitted),
+                _ => None,
+            })
+            .expect("expected an Omitted marker");
+        assert_eq!(omitted.count, 1);
+        assert_eq!(omitted.top_omitted.len(), 1);
+        assert_eq!(omitted.top_omitted[0].function, "cold");
+        assert!((omitted.top_omitted[0].pct - 10.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn truncated_marker_includes_function_name() {
+        // linear_chain a→b→c→d. With max_depth=1 the recursion hits depth=2
+        // when entering `b`, so the truncated marker carries `function: "b"`.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let profile = Profile::from_raw(raw);
+        let tree = call_tree(
+            &profile,
+            &Args {
+                min_pct: 0.0,
+                max_depth: 1,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let truncated = find_truncated(tree.tree.as_ref()).expect("expected a Truncated marker");
+        assert_eq!(truncated.function, "b");
+        assert!(truncated.deepest_descendant_pct > 0.0);
+    }
+
+    fn find_truncated(node: Option<&Node>) -> Option<&TruncatedSummary> {
+        match node? {
+            Node::Truncated { truncated } => Some(truncated),
+            Node::Frame(f) => f.children.iter().find_map(|c| find_truncated(Some(c))),
+            Node::Omitted { .. } => None,
+        }
     }
 
     #[test]
