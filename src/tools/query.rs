@@ -37,7 +37,10 @@ pub struct CommonFilterArgs {
     /// name string matched against each thread's `processName`.
     #[serde(default)]
     pub process: Option<String>,
-    /// Optional time range [start_ms, end_ms].
+    /// Optional time range `[start_ms, end_ms]`, **relative to profile
+    /// start** (i.e. the first recorded sample). To pull the matching
+    /// reference frame out of `summary`, copy `time_range_ms` directly,
+    /// or subtract `profile_start_ms` from any absolute timestamp first.
     #[serde(default)]
     pub time_range: Option<[f64; 2]>,
 }

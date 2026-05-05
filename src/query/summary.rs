@@ -32,8 +32,18 @@ pub struct Output {
     pub sample_rate_hz: f64,
     pub total_samples: u64,
     /// `[start_ms, end_ms]` taken from the union of per-thread sample
-    /// times. `[0.0, 0.0]` if the profile has no timed samples.
+    /// times, **relative to profile start** so a caller can paste this
+    /// straight into a `time_range` filter without an offset. The
+    /// underlying clock is whatever samply records (boot-relative on
+    /// Linux); add [`Self::profile_start_ms`] to recover the absolute
+    /// timestamps. `[0.0, 0.0]` if the profile has no timed samples.
     pub time_range_ms: [f64; 2],
+    /// Absolute timestamp (ms, in the profile's native clock) of the
+    /// earliest recorded sample. Subtracted from raw sample times to
+    /// produce [`Self::time_range_ms`] and the values that
+    /// `time_range` filter args are matched against. `0.0` when the
+    /// profile has no timed samples.
+    pub profile_start_ms: f64,
     pub unsymbolicated_pct: f32,
     /// Coarse bucket for `unsymbolicated_pct` so the caller can decide
     /// "should I re-record?" without parsing the raw float.
@@ -75,7 +85,8 @@ pub fn summary(
     // `top_n=0` skips the per-process detail we don't surface here.
     let desc = describe(profile, profile_id, name, path, unsymbolicated_pct, 0);
 
-    let time_range_ms = profile_time_range(profile);
+    let profile_start_ms = profile.start_time_ms();
+    let time_range_ms = profile_time_range(profile, profile_start_ms);
     let dominant_thread = compute_dominant_thread(profile, desc.total_samples);
     let top_modules = compute_top_modules(profile, DEFAULT_MODULE_LIMIT);
 
@@ -106,6 +117,7 @@ pub fn summary(
         sample_rate_hz: desc.sample_rate_hz,
         total_samples: desc.total_samples,
         time_range_ms,
+        profile_start_ms,
         unsymbolicated_pct: desc.unsymbolicated_pct,
         unsymbolicated_bracket: bracket(desc.unsymbolicated_pct),
         dominant_thread,
@@ -131,7 +143,7 @@ fn bracket(pct: f32) -> &'static str {
     }
 }
 
-fn profile_time_range(profile: &Profile) -> [f64; 2] {
+fn profile_time_range(profile: &Profile, profile_start_ms: f64) -> [f64; 2] {
     let mut start = f64::INFINITY;
     let mut end = f64::NEG_INFINITY;
     for t in profile.threads() {
@@ -144,7 +156,7 @@ fn profile_time_range(profile: &Profile) -> [f64; 2] {
         }
     }
     if start.is_finite() && end.is_finite() {
-        [start, end]
+        [start - profile_start_ms, end - profile_start_ms]
     } else {
         [0.0, 0.0]
     }
@@ -275,7 +287,39 @@ mod tests {
         let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
         // Minimal fixture has zero samples; time_range collapses to [0,0].
         assert_eq!(s.time_range_ms, [0.0, 0.0]);
+        assert_eq!(s.profile_start_ms, 0.0);
         assert!(s.dominant_thread.is_none());
         assert!(s.top_modules.is_empty());
+    }
+
+    /// Synthesize a profile whose sample timestamps are boot-relative
+    /// (mimicking samply's actual output) and assert that
+    /// `time_range_ms` is reported relative to the first sample, with
+    /// `profile_start_ms` carrying the absolute anchor. Regression
+    /// guard for issue #64.
+    #[test]
+    fn time_range_ms_is_relative_with_profile_start_offset() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [{
+                "name": "Main",
+                "tid": 1,
+                "pid": 1,
+                "registerTime": 0.0,
+                "stringArray": [],
+                "frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "line": [], "column": [], "nativeSymbol": []},
+                "stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []},
+                "samples": {"length": 3, "stack": [null, null, null], "time": [42646349.0, 42646350.0, 42713794.0]},
+                "funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let s = summary(&profile, "id", "name", "/tmp/p.json", 0.0).unwrap();
+        assert_eq!(s.profile_start_ms, 42_646_349.0);
+        assert_eq!(s.time_range_ms, [0.0, 42_713_794.0 - 42_646_349.0]);
     }
 }

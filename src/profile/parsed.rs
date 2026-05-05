@@ -97,6 +97,27 @@ impl Profile {
             .fold(0.0_f64, f64::max)
     }
 
+    /// Earliest sample timestamp across all threads — the anchor that
+    /// defines "profile-relative time zero".
+    ///
+    /// Sample timestamps in samply's processed-profile schema are
+    /// boot-relative (e.g. tens of millions of ms), so `time_range`
+    /// filter args (documented as profile-relative) must be offset by
+    /// this value before they can be compared with raw sample times.
+    /// `summary.profile_start_ms` exposes the same value so callers
+    /// can convert in either direction.
+    ///
+    /// Returns `0.0` when the profile carries no timed samples — keeps
+    /// the gating loop in [`Self::stack_indices`] arithmetic-clean
+    /// without a special case at the call site.
+    pub fn start_time_ms(&self) -> f64 {
+        let min = self
+            .threads()
+            .filter_map(|t| t.raw().samples.absolute_times().first().copied())
+            .fold(f64::INFINITY, f64::min);
+        if min.is_finite() { min } else { 0.0 }
+    }
+
     /// Resolve a thread handle back to the raw thread.
     pub(crate) fn raw_thread(&self, handle: ThreadHandle) -> &RawThread {
         match handle.process.process_idx {
@@ -202,8 +223,13 @@ impl Profile {
     /// `time_range`, when set, gates each yielded item by its per-sample
     /// timestamp ([`crate::profile::raw::RawSampleTable::absolute_times`]
     /// for [`EventSource::Samples`], `markers.start_time` for
-    /// [`EventSource::Marker`]). Items outside the inclusive range are
-    /// dropped entirely. Pass `None` for the unfiltered behavior.
+    /// [`EventSource::Marker`]). The range is interpreted relative to
+    /// [`Self::start_time_ms`] — i.e. profile-zero — to match the
+    /// public filter contract; raw sample timestamps are offset before
+    /// the comparison so callers never have to know whether the
+    /// profile uses boot-relative or zero-anchored timestamps. Items
+    /// outside the inclusive range are dropped entirely. Pass `None`
+    /// for the unfiltered behavior.
     pub fn stack_indices<'a>(
         &'a self,
         handle: ThreadHandle,
@@ -211,11 +237,18 @@ impl Profile {
         time_range: Option<[f64; 2]>,
     ) -> Box<dyn Iterator<Item = Option<usize>> + 'a> {
         let raw = self.raw_thread(handle);
+        let start = self.start_time_ms();
         // Closure copies the range so each branch's iterator can move
-        // it freely without borrowing `time_range` itself.
+        // it freely without borrowing `time_range` itself. Sample times
+        // are offset by `start` so a [s, e] filter behaves the same way
+        // regardless of whether the profile's clock is boot-relative
+        // (samply) or already zero-anchored (synthetic fixtures).
         let in_range = move |t: f64| match time_range {
             None => true,
-            Some([s, e]) => t >= s && t <= e,
+            Some([s, e]) => {
+                let rel = t - start;
+                rel >= s && rel <= e
+            }
         };
         match source {
             EventSource::Samples => {
