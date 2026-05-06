@@ -89,6 +89,10 @@ pub struct LoadedProfile {
     pub profile_id: String,
     pub name: String,
     pub path: String,
+    /// When set, this is a derived view of the named profile id.
+    /// Absent for profiles loaded from disk.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub base_profile_id: Option<String>,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -171,6 +175,7 @@ impl PollardServer {
                 profile_id: s.id().to_owned(),
                 name: s.name().to_owned(),
                 path: s.path().display().to_string(),
+                base_profile_id: s.base_id().map(String::from),
             })
             .collect();
         let evicted = self

@@ -707,6 +707,63 @@ async fn call_tree_empty_root_function_returns_invalid_value() {
     srv.kill().await;
 }
 
+/// `list_profiles` must mark derived views with `base_profile_id`
+/// pointing back to the base profile, so callers can spot views
+/// vs. profiles loaded from disk. The base entry itself must omit
+/// the field (or carry `null`) — only views set it.
+#[tokio::test]
+async fn list_profiles_reports_view_base_id() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let base_id = srv.load_fixture(1, &path).await;
+
+    // Create a default-transforms view of the loaded profile.
+    let view_resp = srv
+        .call_tool(
+            2,
+            "create_view",
+            serde_json::json!({ "profile_id": base_id }),
+        )
+        .await;
+    let view_id = view_resp["result"]["structuredContent"]["profile_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("create_view did not return a profile_id; response: {view_resp}"))
+        .to_owned();
+    assert_ne!(view_id, base_id, "view id must differ from base id");
+
+    let resp = srv
+        .call_tool(3, "list_profiles", serde_json::json!({}))
+        .await;
+    let profiles = resp["result"]["structuredContent"]["profiles"]
+        .as_array()
+        .expect("profiles missing");
+
+    let view_entry = profiles
+        .iter()
+        .find(|p| p["profile_id"].as_str() == Some(&view_id))
+        .unwrap_or_else(|| panic!("view not found in list_profiles; list={profiles:?}"));
+    assert_eq!(
+        view_entry["base_profile_id"].as_str(),
+        Some(base_id.as_str()),
+        "view entry should report base_profile_id={base_id}; got {view_entry:?}"
+    );
+
+    let base_entry = profiles
+        .iter()
+        .find(|p| p["profile_id"].as_str() == Some(&base_id))
+        .unwrap_or_else(|| panic!("base not found in list_profiles; list={profiles:?}"));
+    // `skip_serializing_if = "Option::is_none"` means the field is absent
+    // (not `null`) for non-view sessions. Accept either to stay robust to
+    // future serialization tweaks.
+    let base_field = base_entry.get("base_profile_id");
+    assert!(
+        base_field.is_none() || base_field.is_some_and(serde_json::Value::is_null),
+        "base entry must not report a base_profile_id; got {base_entry:?}"
+    );
+
+    srv.kill().await;
+}
+
 /// The genuinely-optional `filter` field on `top_functions` must keep
 /// treating empty as "no filter" — that's what callers mean when they
 /// "leave blank". The rejection only fires for required / narrowing
