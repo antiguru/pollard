@@ -6,7 +6,7 @@
   "plugins": [
     {
       "name": "pollard",
-      "source": ".",
+      "source": "./",
       "description": "MCP server that exposes Firefox-format performance profiles (samply, perf-imported) to Claude Code, plus skills for the canonical recording workflow and view-preset cookbook.",
       "version": "0.0.6",
       "license": "MIT OR Apache-2.0",
