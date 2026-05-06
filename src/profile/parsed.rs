@@ -48,6 +48,21 @@ pub struct FrameInfo<'a> {
     pub lib: Option<&'a RawLib>,
 }
 
+/// One frame in a transformed root-to-leaf chain produced by
+/// [`Profile::resolved_chain`]. Owns its strings so callers can hold it
+/// across `&Profile` borrows; the chain has already had hide / rename /
+/// collapse transforms applied, so aggregators can consume it directly
+/// without re-doing per-frame transform checks.
+#[derive(Debug, Clone)]
+pub struct ResolvedFrame {
+    pub function: String,
+    pub module: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub address: Option<i64>,
+}
+
 pub struct ThreadView<'a> {
     profile: &'a Profile,
     handle: ThreadHandle,
@@ -273,6 +288,92 @@ impl Profile {
         })
     }
 
+    /// Resolve `stack_idx` into a frame chain (root-to-leaf), applying
+    /// the profile's transforms. When `expand_inlines` is true, native
+    /// frames fan out into their DWARF inline chain (outer-to-inner)
+    /// before transforms apply, so hide/rename rules see inline frames
+    /// as first-class entries.
+    pub fn resolved_chain(
+        &self,
+        handle: ThreadHandle,
+        stack_idx: usize,
+        expand_inlines: bool,
+    ) -> Vec<ResolvedFrame> {
+        // walk_stack iterates leaf-to-root; collect-then-reverse keeps
+        // order explicit (root-to-leaf) so transforms downstream see
+        // chains in execution order.
+        let leaf_first: Vec<usize> = self.walk_stack(handle, stack_idx).collect();
+        let mut chain: Vec<ResolvedFrame> = Vec::with_capacity(leaf_first.len());
+        for &fi in leaf_first.iter().rev() {
+            let Some(info) = self.frame_info(handle, fi) else {
+                continue;
+            };
+            chain.push(ResolvedFrame {
+                function: info.function_name.to_owned(),
+                module: info.module_name.map(str::to_owned),
+                file: info.file.map(str::to_owned),
+                line: info.line,
+                column: info.column,
+                address: info.address,
+            });
+            if expand_inlines {
+                // Inline chain is innermost-first; emit outer-to-inner
+                // so the deepest inline becomes the leaf.
+                let module = info.module_name.map(str::to_owned);
+                for inl in self.inline_chain(handle, fi).iter().rev() {
+                    chain.push(ResolvedFrame {
+                        function: inl.function.clone(),
+                        module: module.clone(),
+                        file: inl.file.clone(),
+                        line: inl.line,
+                        column: None,
+                        address: None,
+                    });
+                }
+            }
+        }
+        self.apply_transforms(&mut chain);
+        chain
+    }
+
+    fn apply_transforms(&self, chain: &mut Vec<ResolvedFrame>) {
+        let t = &self.transforms;
+        if t.is_identity() {
+            return;
+        }
+        // Hide first so rename and collapse don't see frames the user
+        // told us to drop.
+        if !t.hide_frames.is_empty() || !t.hide_modules.is_empty() {
+            chain.retain(|f| {
+                if t.hide_frames.iter().any(|m| m.matches(&f.function)) {
+                    return false;
+                }
+                if let Some(m) = f.module.as_deref()
+                    && t.hide_modules.iter().any(|mm| mm.matches(m))
+                {
+                    return false;
+                }
+                true
+            });
+        }
+        if !t.rename.is_empty() {
+            for f in chain.iter_mut() {
+                for rule in &t.rename {
+                    if rule.matcher.matches(&f.function) {
+                        f.function = rule.replacement.clone();
+                        break;
+                    }
+                }
+            }
+        }
+        if t.collapse_recursion {
+            // dedup_by closure is called for each pair (a=next, b=prev);
+            // returning true removes `a`, leaving the earlier (root-side)
+            // frame as the surviving representative of the run.
+            chain.dedup_by(|a, b| a.function == b.function && a.module == b.module);
+        }
+    }
+
     /// Iterate the stack-table indices that this thread contributes for
     /// the given event source. `Some(idx)` per sample/marker, `None` to
     /// skip (matching the existing `samples.stack: Vec<Option<usize>>`
@@ -450,5 +551,111 @@ mod tests {
         assert!(view.transforms().is_identity());
         // Same Arc backing → same raw pointer.
         assert!(std::sync::Arc::ptr_eq(&base.raw, &view.raw));
+    }
+
+    #[test]
+    fn resolved_chain_with_identity_matches_walk_stack() {
+        use crate::profile::raw::RawProfile;
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        let stack_idx = p
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+
+        let manual: Vec<String> = p
+            .walk_stack(handle, stack_idx)
+            .filter_map(|fi| p.frame_info(handle, fi).map(|i| i.function_name.to_owned()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev() // walk_stack is leaf-to-root; resolved_chain is root-to-leaf.
+            .collect();
+        let resolved: Vec<String> = p
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(manual, resolved);
+    }
+
+    #[test]
+    fn resolved_chain_hides_matching_function() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::Transforms;
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        let mut t = Transforms::default();
+        // Substring matcher (default form for plain patterns without `re:` prefix).
+        t.hide_frames.push(FunctionMatcher::new("hot").unwrap());
+        let view = Profile::view(&base, t);
+        let handle = view.threads().next().unwrap().handle();
+        for stack_opt in view.stack_indices(
+            handle,
+            &crate::profile::event_source::EventSource::Samples,
+            None,
+        ) {
+            let Some(stack_idx) = stack_opt else { continue };
+            let names: Vec<String> = view
+                .resolved_chain(handle, stack_idx, false)
+                .into_iter()
+                .map(|f| f.function)
+                .collect();
+            assert!(
+                !names.iter().any(|n| n == "hot"),
+                "found hidden frame: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_chain_collapses_consecutive_recursion() {
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::Transforms;
+        let json = r#"{
+          "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+          "libs": [],
+          "threads": [{
+            "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+            "stringArray": ["main", "recurse"],
+            "frameTable": {"length": 2, "address": [-1, -1], "func": [0, 1], "category": [0, 0], "subcategory": [0, 0], "line": [null, null], "column": [null, null], "nativeSymbol": [null, null]},
+            "stackTable": {"length": 4, "frame": [0, 1, 1, 1], "category": [0, 0, 0, 0], "subcategory": [0, 0, 0, 0], "prefix": [null, 0, 1, 2]},
+            "samples": {"length": 1, "stack": [3], "time": [0.0]},
+            "funcTable": {"length": 2, "name": [0, 1], "isJS": [false, false], "relevantForJS": [false, false], "resource": [-1, -1], "fileName": [null, null], "lineNumber": [null, null], "columnNumber": [null, null]},
+            "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+            "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+          }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                collapse_recursion: true,
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(names, vec!["main".to_owned(), "recurse".to_owned()]);
     }
 }
