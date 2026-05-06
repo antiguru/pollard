@@ -341,6 +341,18 @@ impl Profile {
         if t.is_identity() {
             return;
         }
+        // Keep-only first: collapses each maximal run of non-matching
+        // frames into a single placeholder. Runs before `hide_*` so a
+        // frame that matches both a `keep_only_*` and a `hide_*` rule
+        // is still dropped — keep selects the universe, hide trims it.
+        if !t.keep_only_frames.is_empty() || !t.keep_only_modules.is_empty() {
+            apply_keep_only(
+                chain,
+                &t.keep_only_frames,
+                &t.keep_only_modules,
+                crate::profile::transforms::KEEP_ONLY_PLACEHOLDER,
+            );
+        }
         // Hide first so rename and collapse don't see frames the user
         // told us to drop.
         if !t.hide_frames.is_empty() || !t.hide_modules.is_empty() {
@@ -389,6 +401,55 @@ impl Profile {
             collapse_cycles(chain, MAX_CYCLE_LEN);
         }
     }
+}
+
+/// Replace each maximal run of non-matching frames in `chain` with a
+/// single placeholder frame. A frame survives iff its function name
+/// matches any entry in `keep_frames` *or* its module name (when set)
+/// matches any entry in `keep_modules` — the two lists OR together.
+/// Adjacent placeholders are coalesced, so the user always sees one
+/// `<hidden>` per maximal hidden run, regardless of how that run was
+/// detected. Empty `keep_frames` and `keep_modules` is a caller bug
+/// (apply_transforms gates on this); we treat it as a no-op here.
+pub(crate) fn apply_keep_only(
+    chain: &mut Vec<ResolvedFrame>,
+    keep_frames: &[crate::matching::FunctionMatcher],
+    keep_modules: &[crate::matching::FunctionMatcher],
+    placeholder: &str,
+) {
+    if keep_frames.is_empty() && keep_modules.is_empty() {
+        return;
+    }
+    let matches = |f: &ResolvedFrame| -> bool {
+        if keep_frames.iter().any(|m| m.matches(&f.function)) {
+            return true;
+        }
+        if let Some(m) = f.module.as_deref()
+            && keep_modules.iter().any(|mm| mm.matches(m))
+        {
+            return true;
+        }
+        false
+    };
+    let mut out: Vec<ResolvedFrame> = Vec::with_capacity(chain.len());
+    let mut in_run = false;
+    for f in chain.drain(..) {
+        if matches(&f) {
+            out.push(f);
+            in_run = false;
+        } else if !in_run {
+            out.push(ResolvedFrame {
+                function: placeholder.to_owned(),
+                module: None,
+                file: None,
+                line: None,
+                column: None,
+                address: None,
+            });
+            in_run = true;
+        }
+    }
+    *chain = out;
 }
 
 /// Maximum cycle length `collapse_recursion` will fold. Covers
@@ -668,6 +729,87 @@ mod tests {
                 "found hidden frame: {names:?}"
             );
         }
+    }
+
+    #[test]
+    fn resolved_chain_keep_only_collapses_runs_into_placeholder() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::{KEEP_ONLY_PLACEHOLDER, Transforms};
+        // linear_chain has a single stack a→b→c→d (root to leaf).
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                keep_only_frames: vec![FunctionMatcher::new("c").unwrap()],
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                KEEP_ONLY_PLACEHOLDER.to_owned(),
+                "c".to_owned(),
+                KEEP_ONLY_PLACEHOLDER.to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn resolved_chain_keep_only_then_hide_drops_overlap() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::{KEEP_ONLY_PLACEHOLDER, Transforms};
+        // Frame matching both keep_only and hide should be dropped:
+        // keep_only fires first (so the frame survives the keep pass),
+        // then hide drops it. Result should *not* contain "c".
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                keep_only_frames: vec![FunctionMatcher::new("c").unwrap()],
+                hide_frames: vec![FunctionMatcher::new("c").unwrap()],
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert!(!names.iter().any(|n| n == "c"));
+        // Two placeholders may collapse via consecutive-equal logic in
+        // a future change, but with the current pipeline the keep-only
+        // pass leaves them adjacent and only hide runs after, so we
+        // should still see at least one placeholder and nothing else.
+        assert!(names.iter().all(|n| n == KEEP_ONLY_PLACEHOLDER));
     }
 
     #[test]

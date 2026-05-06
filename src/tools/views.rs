@@ -32,6 +32,20 @@ pub struct CreateViewArgs {
     /// Substring by default; prefix with `re:` for a regex.
     #[serde(default)]
     pub hide_modules: Vec<String>,
+    /// Inverse of `hide_frames`: only frames whose function name matches
+    /// any pattern survive. Each maximal run of non-matching frames
+    /// collapses into a single placeholder frame named `<hidden>`. ORs
+    /// with `keep_only_modules` — a frame is kept if it matches any
+    /// `keep_only_*` rule. Substring by default; prefix with `re:` for
+    /// a regex. Applied before `hide_*`, so a frame matching both a
+    /// `keep_only` and a `hide` rule is dropped.
+    #[serde(default)]
+    pub keep_only_frames: Vec<String>,
+    /// Inverse of `hide_modules`: only frames whose module name matches
+    /// any pattern survive. See `keep_only_frames` for OR semantics
+    /// and placeholder behavior.
+    #[serde(default)]
+    pub keep_only_modules: Vec<String>,
     /// When true, repeating adjacent cycles in each stack collapse to one
     /// occurrence — `[A, B, C, A, B, C, X]` becomes `[A, B, C, X]`.
     /// Cycles up to length 8 are detected; the simple consecutive
@@ -106,6 +120,12 @@ pub struct TransformsView {
     pub hide_frames: Vec<String>,
     /// Module-name patterns whose matching frames are dropped.
     pub hide_modules: Vec<String>,
+    /// Function-name patterns; only matching frames survive (with each
+    /// maximal run of non-matching frames replaced by `<hidden>`).
+    pub keep_only_frames: Vec<String>,
+    /// Module-name patterns; only matching frames survive (with each
+    /// maximal run of non-matching frames replaced by `<hidden>`).
+    pub keep_only_modules: Vec<String>,
     /// Sequential rename rules.
     pub rename: Vec<RenameView>,
     pub collapse_recursion: bool,
@@ -128,9 +148,14 @@ impl PollardServer {
         description = "Create a derived view profile that lazily transforms an existing profile. \
         Returns a new `profile_id` you can pass to any other tool. Views share the base profile's \
         raw tables (no extra memory cost) and apply transforms during aggregation: hide frames by \
-        name or module, collapse repeating cycles in stacks, and merge symbols via rename rules. \
-        Argument syntax: `hide_frames` and `hide_modules` use substring match by default; \
-        prefix a pattern with `re:` for a regex (e.g. `re:^tokio::`). \
+        name or module, keep only frames matching a focus list (everything else collapses into a \
+        `<hidden>` placeholder), collapse repeating cycles in stacks, and merge symbols via rename \
+        rules. \
+        Argument syntax: `hide_frames`, `hide_modules`, `keep_only_frames`, and `keep_only_modules` \
+        use substring match by default; prefix a pattern with `re:` for a regex (e.g. `re:^tokio::`). \
+        `keep_only_*` is the inverse of `hide_*`: only matching frames survive, and each maximal \
+        run of non-matching frames collapses into a single `<hidden>` placeholder. `keep_only_*` \
+        runs before `hide_*`, so a frame that matches both is dropped. \
         `rename` rules use the form `re:<pattern> => <replacement>` — the `re:` prefix is \
         required so the ` => ` separator is unambiguous. The replacement supports regex \
         capture references (`$1`, `${name}`); write `$$` for a literal `$`. \
@@ -229,6 +254,16 @@ fn view_of_transforms(t: &Transforms) -> TransformsView {
     TransformsView {
         hide_frames: t.hide_frames.iter().map(matcher_to_string).collect(),
         hide_modules: t.hide_modules.iter().map(matcher_to_string).collect(),
+        keep_only_frames: t
+            .keep_only_frames
+            .iter()
+            .map(matcher_to_string)
+            .collect(),
+        keep_only_modules: t
+            .keep_only_modules
+            .iter()
+            .map(matcher_to_string)
+            .collect(),
         rename: t
             .rename
             .iter()
@@ -257,6 +292,16 @@ fn build_transforms(args: &CreateViewArgs) -> Result<Transforms, ToolError> {
         .iter()
         .map(|s| required_matcher("hide_modules", s))
         .collect::<Result<Vec<_>, _>>()?;
+    let keep_only_frames = args
+        .keep_only_frames
+        .iter()
+        .map(|s| required_matcher("keep_only_frames", s))
+        .collect::<Result<Vec<_>, _>>()?;
+    let keep_only_modules = args
+        .keep_only_modules
+        .iter()
+        .map(|s| required_matcher("keep_only_modules", s))
+        .collect::<Result<Vec<_>, _>>()?;
     let rename = args
         .rename
         .iter()
@@ -265,6 +310,8 @@ fn build_transforms(args: &CreateViewArgs) -> Result<Transforms, ToolError> {
     Ok(Transforms {
         hide_frames,
         hide_modules,
+        keep_only_frames,
+        keep_only_modules,
         collapse_recursion: args.collapse_recursion,
         strip_type_params: args.strip_type_params,
         rename,
@@ -317,6 +364,8 @@ mod tests {
             name: None,
             hide_frames: vec![],
             hide_modules: vec![],
+            keep_only_frames: vec![],
+            keep_only_modules: vec![],
             collapse_recursion: false,
             strip_type_params: false,
             rename: vec![],
@@ -332,6 +381,8 @@ mod tests {
             name: None,
             hide_frames: vec!["malloc".into(), "re:^__".into()],
             hide_modules: vec!["libc.so".into()],
+            keep_only_frames: vec![],
+            keep_only_modules: vec![],
             collapse_recursion: true,
             strip_type_params: false,
             rename: vec!["re:foo => bar".into()],
@@ -384,6 +435,8 @@ mod tests {
             name: None,
             hide_frames: vec![],
             hide_modules: vec![],
+            keep_only_frames: vec![],
+            keep_only_modules: vec![],
             collapse_recursion: false,
             strip_type_params: true,
             rename: vec![],
@@ -394,12 +447,53 @@ mod tests {
     }
 
     #[test]
+    fn build_transforms_compiles_keep_only_lists() {
+        let args = CreateViewArgs {
+            profile_id: "p".into(),
+            name: None,
+            hide_frames: vec![],
+            hide_modules: vec![],
+            keep_only_frames: vec!["materialize".into(), "re:^differential::".into()],
+            keep_only_modules: vec!["timely".into()],
+            collapse_recursion: false,
+            strip_type_params: false,
+            rename: vec![],
+        };
+        let t = build_transforms(&args).unwrap();
+        assert_eq!(t.keep_only_frames.len(), 2);
+        assert_eq!(t.keep_only_modules.len(), 1);
+        assert!(!t.is_identity());
+    }
+
+    #[test]
+    fn keep_only_frames_empty_pattern_rejected() {
+        let args = CreateViewArgs {
+            profile_id: "p".into(),
+            name: None,
+            hide_frames: vec![],
+            hide_modules: vec![],
+            keep_only_frames: vec!["".into()],
+            keep_only_modules: vec![],
+            collapse_recursion: false,
+            strip_type_params: false,
+            rename: vec![],
+        };
+        let err = build_transforms(&args).unwrap_err();
+        match err {
+            ToolError::InvalidValue { field, .. } => assert_eq!(field, "keep_only_frames"),
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn hide_frames_empty_pattern_rejected() {
         let args = CreateViewArgs {
             profile_id: "p".into(),
             name: None,
             hide_frames: vec!["".into()],
             hide_modules: vec![],
+            keep_only_frames: vec![],
+            keep_only_modules: vec![],
             collapse_recursion: false,
             strip_type_params: false,
             rename: vec![],
