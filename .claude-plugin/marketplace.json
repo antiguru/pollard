@@ -8,7 +8,7 @@
       "name": "pollard",
       "source": "./",
       "description": "MCP server that exposes Firefox-format performance profiles (samply, perf-imported) to Claude Code, plus skills for the canonical recording workflow and view-preset cookbook.",
-      "version": "0.0.7",
+      "version": "0.0.8",
       "license": "MIT OR Apache-2.0",
       "keywords": [
         "profiling",
