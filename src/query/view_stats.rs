@@ -153,8 +153,7 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
                         in_run = false;
                     } else if !in_run {
                         kept.push(ResolvedFrame {
-                            function: crate::profile::transforms::KEEP_ONLY_PLACEHOLDER
-                                .to_owned(),
+                            function: crate::profile::transforms::KEEP_ONLY_PLACEHOLDER.to_owned(),
                             module: None,
                             file: None,
                             line: None,

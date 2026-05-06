@@ -254,16 +254,8 @@ fn view_of_transforms(t: &Transforms) -> TransformsView {
     TransformsView {
         hide_frames: t.hide_frames.iter().map(matcher_to_string).collect(),
         hide_modules: t.hide_modules.iter().map(matcher_to_string).collect(),
-        keep_only_frames: t
-            .keep_only_frames
-            .iter()
-            .map(matcher_to_string)
-            .collect(),
-        keep_only_modules: t
-            .keep_only_modules
-            .iter()
-            .map(matcher_to_string)
-            .collect(),
+        keep_only_frames: t.keep_only_frames.iter().map(matcher_to_string).collect(),
+        keep_only_modules: t.keep_only_modules.iter().map(matcher_to_string).collect(),
         rename: t
             .rename
             .iter()

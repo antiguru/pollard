@@ -168,16 +168,16 @@ mod tests {
 
     #[test]
     fn keep_only_breaks_identity() {
-        let t = Transforms {
+        let frames_only = Transforms {
             keep_only_frames: vec![FunctionMatcher::new("foo").unwrap()],
             ..Default::default()
         };
-        assert!(!t.is_identity());
-        let t = Transforms {
+        assert!(!frames_only.is_identity());
+        let modules_only = Transforms {
             keep_only_modules: vec![FunctionMatcher::new("libfoo").unwrap()],
             ..Default::default()
         };
-        assert!(!t.is_identity());
+        assert!(!modules_only.is_identity());
     }
 
     #[test]
