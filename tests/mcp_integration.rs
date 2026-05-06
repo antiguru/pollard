@@ -764,6 +764,100 @@ async fn list_profiles_reports_view_base_id() {
     srv.kill().await;
 }
 
+/// `create_view` must surface per-rule diagnostic counts so users can
+/// spot a typo in `hide_frames` / `hide_modules` / `rename` without
+/// running downstream tools and noticing nothing changed.
+/// `describe_view` must return the same counts plus the composed
+/// transform shape and the immediate parent base id, so the stats
+/// stay queryable after creation.
+#[tokio::test]
+async fn create_and_describe_view_report_rule_stats() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let base_id = srv.load_fixture(1, &path).await;
+
+    // One real-pattern rule (`hot` is a function in two_functions.json) and
+    // one obvious typo. The first must report nonzero matches; the second
+    // must come back with zero — that's the typo signal.
+    let view_resp = srv
+        .call_tool(
+            2,
+            "create_view",
+            serde_json::json!({
+                "profile_id": base_id,
+                "hide_frames": ["hot", "definitely_not_a_real_function"],
+            }),
+        )
+        .await;
+    let sc = &view_resp["result"]["structuredContent"];
+    let view_id = sc["profile_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("create_view missing profile_id; resp={view_resp}"))
+        .to_owned();
+    let stats = sc["rule_stats"]
+        .as_array()
+        .expect("rule_stats missing on create_view response");
+    assert_eq!(stats.len(), 2, "expected one stat per rule; got {stats:?}");
+
+    let real = stats
+        .iter()
+        .find(|s| s["pattern"].as_str() == Some("hot"))
+        .expect("hot rule missing");
+    assert!(
+        real["frames_matched"].as_u64().unwrap_or(0) > 0,
+        "real pattern should match at least one frame: {real}"
+    );
+    let typo = stats
+        .iter()
+        .find(|s| s["pattern"].as_str() == Some("definitely_not_a_real_function"))
+        .expect("typo rule missing");
+    assert_eq!(
+        typo["frames_matched"].as_u64(),
+        Some(0),
+        "typo pattern should report zero matches: {typo}"
+    );
+    assert!(sc["total_base_samples"].as_u64().unwrap_or(0) > 0);
+
+    // describe_view should round-trip the same stats and surface the
+    // composed transform shape.
+    let desc_resp = srv
+        .call_tool(
+            3,
+            "describe_view",
+            serde_json::json!({ "profile_id": view_id }),
+        )
+        .await;
+    let dsc = &desc_resp["result"]["structuredContent"];
+    assert_eq!(dsc["base_profile_id"].as_str(), Some(base_id.as_str()));
+    let hide = dsc["transforms"]["hide_frames"]
+        .as_array()
+        .expect("hide_frames missing");
+    let patterns: Vec<&str> = hide.iter().filter_map(|v| v.as_str()).collect();
+    assert!(patterns.contains(&"hot"));
+    assert!(patterns.contains(&"definitely_not_a_real_function"));
+    let desc_stats = dsc["rule_stats"]
+        .as_array()
+        .expect("rule_stats missing on describe_view");
+    assert_eq!(desc_stats.len(), stats.len());
+
+    // describe_view on a non-view profile must reject with invalid_value
+    // — symmetric with describe_profile only working on loaded profiles.
+    let bad = srv
+        .call_tool(
+            4,
+            "describe_view",
+            serde_json::json!({ "profile_id": base_id }),
+        )
+        .await;
+    assert_eq!(
+        bad["error"]["data"]["error"].as_str(),
+        Some("invalid_value"),
+        "describe_view on a non-view should fail; got {bad}"
+    );
+
+    srv.kill().await;
+}
+
 /// The genuinely-optional `filter` field on `top_functions` must keep
 /// treating empty as "no filter" — that's what callers mean when they
 /// "leave blank". The rejection only fires for required / narrowing

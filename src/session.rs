@@ -21,6 +21,11 @@ pub struct ProfileSession {
     /// for sessions loaded from disk. Surfaces in `list_profiles` so
     /// callers can spot views vs. real loaded profiles.
     base_id: Option<String>,
+    /// Pre-computed per-rule transform statistics for views; `None` for
+    /// non-views. Computed eagerly at view-create time so the same
+    /// numbers are available to `create_view` and any later
+    /// `describe_view` lookup without re-walking the base.
+    view_stats: Option<crate::query::view_stats::ViewStats>,
 }
 
 #[allow(dead_code)]
@@ -59,6 +64,7 @@ impl ProfileSession {
             unsymbolicated_pct,
             lib_outcomes,
             base_id: None,
+            view_stats: None,
         })
     }
 
@@ -103,6 +109,10 @@ impl ProfileSession {
 
     /// Build a derived session that shares the base's raw tables but
     /// applies its own transforms. Lib outcomes are inherited verbatim.
+    /// Per-rule view stats are computed eagerly: one walk of the base's
+    /// samples replays every rule and records frames-matched /
+    /// samples-affected, so silent zero-match rules become observable
+    /// in the create-view response and any later `describe_view`.
     pub fn view(
         base: &ProfileSession,
         view_id: String,
@@ -111,6 +121,7 @@ impl ProfileSession {
     ) -> Self {
         let view_profile =
             std::sync::Arc::new(crate::profile::Profile::view(base.profile(), transforms));
+        let view_stats = crate::query::view_stats::compute_view_stats(&view_profile);
         Self {
             id: view_id,
             name,
@@ -122,7 +133,14 @@ impl ProfileSession {
             unsymbolicated_pct: base.unsymbolicated_pct(),
             lib_outcomes: base.lib_outcomes().to_vec(),
             base_id: Some(base.id().to_owned()),
+            view_stats: Some(view_stats),
         }
+    }
+
+    /// Pre-computed per-rule transform statistics. `Some` only for
+    /// view sessions; `None` for sessions loaded from disk.
+    pub fn view_stats(&self) -> Option<&crate::query::view_stats::ViewStats> {
+        self.view_stats.as_ref()
     }
 }
 

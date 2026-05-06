@@ -384,7 +384,7 @@ impl Profile {
 /// → PerOperatorState::schedule → Subgraph::schedule …`) with
 /// headroom; longer cycles are left alone so unrelated work isn't
 /// folded into a phantom recurrence.
-const MAX_CYCLE_LEN: usize = 8;
+pub(crate) const MAX_CYCLE_LEN: usize = 8;
 
 /// Collapse repeating adjacent cycles in `chain`, in place.
 ///
@@ -396,7 +396,7 @@ const MAX_CYCLE_LEN: usize = 8;
 /// length-1 sub-pattern when both apply. Equality is by
 /// `(function, module)` only; per-frame metadata (file/line/address)
 /// on the surviving copy is whichever the first occurrence carried.
-fn collapse_cycles(chain: &mut Vec<ResolvedFrame>, max_len: usize) {
+pub(crate) fn collapse_cycles(chain: &mut Vec<ResolvedFrame>, max_len: usize) {
     fn frames_eq(a: &ResolvedFrame, b: &ResolvedFrame) -> bool {
         a.function == b.function && a.module == b.module
     }

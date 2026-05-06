@@ -1,10 +1,11 @@
 //! `create_view` MCP tool: derive a transformed lazy view of a profile.
 
 use crate::error::ToolError;
-use crate::matching::{FunctionMatcher, required_matcher};
+use crate::matching::{FunctionMatcher, matcher_to_string, required_matcher};
 use crate::profile::symbolicate::problematic_outcomes;
 use crate::profile::transforms::{RenameRule, Transforms};
 use crate::query::describe::{DEFAULT_TOP_N, ProfileDescription, describe};
+use crate::query::view_stats::{RuleStat, ViewStats};
 use crate::tools::PollardServer;
 use crate::tools::lifecycle::EvictedRef;
 use rmcp::handler::server::wrapper::{Json, Parameters};
@@ -48,10 +49,59 @@ pub struct CreateViewArgs {
 pub struct CreateViewResult {
     pub profile_id: String,
     pub description: ProfileDescription,
+    /// Per-rule diagnostic counts over the base profile's samples.
+    /// A rule with `frames_matched: 0` is the typo signal — the
+    /// pattern compiled but never matched anything in the profile.
+    /// Includes parent rules when stacking views.
+    pub rule_stats: Vec<RuleStat>,
+    /// Total samples in the underlying base profile, the denominator
+    /// for `samples_affected` shares.
+    pub total_base_samples: u64,
     /// Profiles that were evicted from the in-memory cache to make room
     /// for this view. Empty when no eviction was needed.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub evicted: Vec<EvictedRef>,
+}
+
+#[derive(Deserialize, JsonSchema)]
+pub struct DescribeViewArgs {
+    /// View profile id. Use `list_profiles` to find candidates;
+    /// non-view profiles return `not_a_view`.
+    pub profile_id: String,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct DescribeViewResult {
+    pub profile_id: String,
+    /// Immediate parent profile id. For a view stacked on another view
+    /// this is the parent view, not the root base.
+    pub base_profile_id: String,
+    /// Composed transform shape — the full set of rules that fire when
+    /// any tool reads this view, including rules inherited from
+    /// parent views.
+    pub transforms: TransformsView,
+    /// Per-rule diagnostic counts. Same shape as `create_view`'s
+    /// `rule_stats`; reused so callers can re-fetch later without
+    /// re-creating the view.
+    pub rule_stats: Vec<RuleStat>,
+    pub total_base_samples: u64,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct TransformsView {
+    /// Function-name patterns whose matching frames are dropped.
+    pub hide_frames: Vec<String>,
+    /// Module-name patterns whose matching frames are dropped.
+    pub hide_modules: Vec<String>,
+    /// Sequential rename rules.
+    pub rename: Vec<RenameView>,
+    pub collapse_recursion: bool,
+}
+
+#[derive(Serialize, JsonSchema)]
+pub struct RenameView {
+    pub pattern: String,
+    pub replacement: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -105,11 +155,71 @@ impl PollardServer {
                 path: e.path.display().to_string(),
             })
             .collect();
+        let stats = session
+            .view_stats()
+            .cloned()
+            .unwrap_or_else(ViewStats::empty);
         Ok(Json(CreateViewResult {
             profile_id: id,
             description: desc,
+            rule_stats: stats.rule_stats,
+            total_base_samples: stats.total_base_samples,
             evicted,
         }))
+    }
+
+    #[tool(
+        description = "Describe a previously-created view: parent base id, the full composed transform set, \
+        and per-rule frames_matched / samples_affected counts over the base profile's samples. \
+        Symmetric with `describe_profile` for loaded profiles. Use this to confirm a view's rules \
+        are still firing as expected — `frames_matched: 0` typically signals a typo in the original \
+        `create_view` call."
+    )]
+    pub async fn describe_view(
+        &self,
+        Parameters(args): Parameters<DescribeViewArgs>,
+    ) -> Result<Json<DescribeViewResult>, rmcp::ErrorData> {
+        let session = self.registry.get_or_error(&args.profile_id).await?;
+        let Some(base_profile_id) = session.base_id().map(str::to_owned) else {
+            return Err(ToolError::InvalidValue {
+                field: "profile_id".to_owned(),
+                value: args.profile_id.clone(),
+                accepted: vec!["<view profile id>".to_owned()],
+                hint: Some(
+                    "describe_view targets derived views; pass `describe_profile` for loaded profiles"
+                        .to_owned(),
+                ),
+            }
+            .into());
+        };
+        let transforms = view_of_transforms(session.profile().transforms());
+        let stats = session
+            .view_stats()
+            .cloned()
+            .unwrap_or_else(ViewStats::empty);
+        Ok(Json(DescribeViewResult {
+            profile_id: args.profile_id,
+            base_profile_id,
+            transforms,
+            rule_stats: stats.rule_stats,
+            total_base_samples: stats.total_base_samples,
+        }))
+    }
+}
+
+fn view_of_transforms(t: &Transforms) -> TransformsView {
+    TransformsView {
+        hide_frames: t.hide_frames.iter().map(matcher_to_string).collect(),
+        hide_modules: t.hide_modules.iter().map(matcher_to_string).collect(),
+        rename: t
+            .rename
+            .iter()
+            .map(|r| RenameView {
+                pattern: matcher_to_string(&r.matcher),
+                replacement: r.replacement.clone(),
+            })
+            .collect(),
+        collapse_recursion: t.collapse_recursion,
     }
 }
 

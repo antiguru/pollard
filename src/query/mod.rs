@@ -12,3 +12,4 @@ pub mod stacks_containing;
 pub mod summary;
 pub mod top_functions;
 pub mod top_groups;
+pub mod view_stats;
