@@ -7,6 +7,79 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.6](https://github.com/antiguru/pollard/compare/v0.0.5...v0.0.6) - 2026-05-06
+
+### Added
+
+- *(views)* scoped views — process / thread / time_range pre-filter on create_view
+- *(summary)* hints field nudges callers toward create_view
+- *(views)* keep_only_frames / keep_only_modules inverse-hide filter ([#89](https://github.com/antiguru/pollard/pull/89))
+- *(views)* strip_type_params preset transform ([#88](https://github.com/antiguru/pollard/pull/88))
+- *(views)* regex backreferences in rename replacements
+- *(views)* rule hit counts on create_view and describe_view tool
+- *(views)* stack views by composing transforms across the chain
+- *(views)* collapse_recursion folds multi-function cycles up to length 8
+- *(tools)* list_profiles reports view base id
+- *(tools)* create_view MCP tool for derived profiles
+- *(registry)* create_view derives a session from a base
+- *(profile)* resolved_chain helper applies view transforms
+- *(profile)* Arc-share raw tables and add transforms field
+- *(profile)* introduce Transforms value type for views
+- *(query)* compare_functions side-by-side asm diff ([#8](https://github.com/antiguru/pollard/pull/8))
+- *(call_tree)* surface cross-process aggregation on inverted trees
+- *(summary)* accept process / thread / time_range filter
+- *(filter)* warn when bare-name process= matches multiple pids
+- *(call_tree)* surface child names in pruning markers
+- *(summary)* add top_processes and top_threads breakdown
+- *(describe)* cap describe_profile output and drop idle entries
+
+### Fixed
+
+- rustfmt — missing newline before DescribeViewResult struct
+- *(registry)* create_view caches identical views; harden tests
+- *(error)* cap available_* lists, demangle nearest_matches, add module_not_found, route event/regex through invalid_value
+- *(symbolicate)* count hex frames as unsymbolicated; surface per-lib outcomes
+- *(query)* make time_range filter and summary.time_range_ms share a frame
+- *(query)* reject empty function pattern for required/narrowing args
+
+### Other
+
+- *(release-plz)* use action outputs to find release PR branch
+- *(changelog)* record plugin bundle, cookbook, summary hints, regex backrefs
+- *(readme)* document plugin install path alongside MCP-direct install
+- extract version via cargo metadata, not grep/sed
+- skill description voice, doc cleanup, manifest version guard
+- --version, --help, and unknown-arg handling
+- prerequisites + pollard-doctor health-check skill
+- sync plugin manifest versions in release-plz PR
+- marketplace.json and tag-triggered release workflow
+- bundle pollard as a Claude Code plugin with skills
+- surface cookbook through view_presets MCP tool (may be reverted)
+- *(views)* cookbook of canonical hide_modules / hide_frames regex sets
+- *(transforms)* name the keep-only placeholder inline
+- cargo fmt + fix clippy::shadow_unrelated in keep_only test
+- *(view_stats)* cargo fmt
+- *(matching)* cargo fmt
+- *(view_stats)* drop unneeded allow(dead_code)
+- *(view_stats)* cargo fmt
+- *(spec)* tighten create_view cost and lifetime wording
+- *(spec)* document profile views
+- *(views)* end-to-end view re-attributes hidden leaf
+- *(tools)* clarify create_view syntax and collapse_recursion guidance
+- *(query)* folded_stacks consumes resolved_chain
+- *(query)* stacks_containing consumes resolved_chain
+- *(query)* call_tree consumes resolved_chain
+- *(query)* top_functions consumes resolved_chain
+- *(plan)* profile views implementation plan
+- Merge pull request #58 from antiguru/measure-rss
+- *(spec)* bring design doc back in sync with shipped surface
+- *(query)* [**breaking**] unify percentage field naming on {kind}_pct
+- Merge pull request #77 from antiguru/claude/fix-issue-68-oPTKI
+- *(tools)* document `re:` regex prefix on every function-pattern arg
+- *(call_tree)* apply cargo fmt
+- Merge pull request #54 from antiguru/issue-52-marker-no-stack
+- Merge pull request #53 from antiguru/issue-51-empty-pattern
+
 ### Fixed
 
 - *(symbolicate)* don't enable macOS Spotlight on Linux ([#56](https://github.com/antiguru/pollard/issues/56)).
