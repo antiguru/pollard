@@ -14,14 +14,14 @@ Early development. Published to [crates.io](https://crates.io/crates/pollard).
 
 ## Tools
 
-`pollard` exposes 14 MCP tools:
+`pollard` exposes 16 MCP tools:
 
 * **Lifecycle:** `load_profile`, `unload_profile`, `list_profiles`,
-  `describe_profile`, `summary`
+  `create_view`, `describe_profile`, `summary`
 * **Query:** `top_functions`, `top_groups`, `call_tree`, `stacks_containing`,
   `folded_stacks`, `compare_profiles`
 * **Drill-down:** `source_for_function`, `asm_for_function`,
-  `address_to_function`
+  `address_to_function`, `compare_functions`
 
 `top_functions`, `call_tree`, and `compare_profiles` accept an optional
 `event` argument: omit it to aggregate the default samples track

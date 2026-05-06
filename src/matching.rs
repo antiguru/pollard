@@ -15,7 +15,7 @@ use crate::error::ToolError;
 use crate::profile::Profile;
 use regex::Regex;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum FunctionMatcher {
     Substring(String),
     Regex(Regex),

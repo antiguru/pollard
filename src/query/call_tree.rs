@@ -366,25 +366,17 @@ fn accumulate_with_root(
 ) {
     for stack_opt in profile.stack_indices(handle, event, time_range) {
         let Some(stack_idx) = stack_opt else { continue };
-        // Resolve every native frame and (when expand_inlines is set) fan
-        // each one out into its DWARF inline chain. Build root-to-leaf,
-        // reverse once at the end if inverted is requested.
-        let native: Vec<usize> = profile.walk_stack(handle, stack_idx).collect();
-        let mut frames: Vec<(String, Option<String>)> = Vec::with_capacity(native.len());
-        // walk_stack iterates leaf-to-root; reverse to get root-to-leaf.
-        for &fi in native.iter().rev() {
-            let Some(info) = profile.frame_info(handle, fi) else {
-                continue;
-            };
-            let module = info.module_name.map(str::to_owned);
-            frames.push((info.function_name.to_owned(), module.clone()));
-            if expand_inlines {
-                // Inline chain is innermost-first; emit outer-to-inner so
-                // the deepest inline ends up at the leaf side of the tree.
-                for inl in profile.inline_chain(handle, fi).iter().rev() {
-                    frames.push((inl.function.clone(), module.clone()));
-                }
-            }
+        // resolved_chain returns frames root-to-leaf with view transforms
+        // (hide / rename / collapse) already applied — same orientation
+        // accumulate_with_root expects when building the tree top-down.
+        // Reverse once at the end if inverted is requested.
+        let mut frames: Vec<(String, Option<String>)> = profile
+            .resolved_chain(handle, stack_idx, expand_inlines)
+            .into_iter()
+            .map(|f| (f.function, f.module))
+            .collect();
+        if frames.is_empty() {
+            continue;
         }
         if inverted {
             frames.reverse();

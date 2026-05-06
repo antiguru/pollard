@@ -135,42 +135,36 @@ where
             let Some(stack_idx) = stack_opt else { continue };
             total_samples += 1;
 
-            // Build the leaf-to-root chain. When expand_inlines is set, fan
-            // each native frame out into its DWARF inline chain
-            // innermost-first BEFORE the native name, so the deepest
-            // inlined callee becomes the leaf and gets self-time.
-            let mut entries: Vec<(String, Option<String>, Option<String>)> = Vec::new();
-            for frame_idx in profile.walk_stack(handle, stack_idx) {
-                let Some(info) = profile.frame_info(handle, frame_idx) else {
-                    continue;
-                };
-                let module = info.module_name.map(str::to_owned);
-                if expand_inlines {
-                    for inl in profile.inline_chain(handle, frame_idx) {
-                        entries.push((inl.function.clone(), module.clone(), inl.file.clone()));
-                    }
-                }
-                entries.push((
-                    info.function_name.to_owned(),
-                    module,
-                    info.file.map(str::to_owned),
-                ));
-            }
+            // resolved_chain returns root-to-leaf with view transforms
+            // (hide / rename / collapse) and optional inline expansion
+            // already applied. Reverse to leaf-to-root so the existing
+            // self/total accounting — which credits self-time to the
+            // first iterated frame — keeps working unchanged.
+            let mut chain = profile.resolved_chain(handle, stack_idx, expand_inlines);
+            chain.reverse();
 
-            let mut iter = entries.into_iter();
+            let mut iter = chain.into_iter();
             let mut seen_in_stack: std::collections::HashSet<K> = Default::default();
-            if let Some((func, module, file)) = iter.next()
-                && matcher.as_ref().is_none_or(|m| m.matches(&func))
-                && let Some(k) = key_fn(&func, module.as_deref(), file.as_deref())
+            if let Some(frame) = iter.next()
+                && matcher.as_ref().is_none_or(|m| m.matches(&frame.function))
+                && let Some(k) = key_fn(
+                    &frame.function,
+                    frame.module.as_deref(),
+                    frame.file.as_deref(),
+                )
             {
                 let entry = counts.entry(k.clone()).or_default();
                 entry.self_samples += 1;
                 entry.total_samples += 1;
                 seen_in_stack.insert(k);
             }
-            for (func, module, file) in iter {
-                if matcher.as_ref().is_none_or(|m| m.matches(&func))
-                    && let Some(k) = key_fn(&func, module.as_deref(), file.as_deref())
+            for frame in iter {
+                if matcher.as_ref().is_none_or(|m| m.matches(&frame.function))
+                    && let Some(k) = key_fn(
+                        &frame.function,
+                        frame.module.as_deref(),
+                        frame.file.as_deref(),
+                    )
                     && seen_in_stack.insert(k.clone())
                 {
                     counts.entry(k).or_default().total_samples += 1;

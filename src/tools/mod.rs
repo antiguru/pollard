@@ -11,6 +11,7 @@ use std::sync::Arc;
 pub mod drill_down;
 pub mod lifecycle;
 pub mod query;
+pub mod views;
 
 /// The MCP server handler for pollard.
 #[derive(Clone)]
@@ -25,9 +26,12 @@ impl PollardServer {
         }
     }
 
-    /// Combined tool router for all lifecycle, query, and drill-down tools.
+    /// Combined tool router for all lifecycle, query, drill-down, and view tools.
     pub fn tool_router() -> rmcp::handler::server::router::tool::ToolRouter<Self> {
-        Self::lifecycle_router() + Self::query_router() + Self::drill_down_router()
+        Self::lifecycle_router()
+            + Self::query_router()
+            + Self::drill_down_router()
+            + Self::views_router()
     }
 }
 

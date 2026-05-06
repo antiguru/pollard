@@ -38,25 +38,26 @@ pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError
             profile.stack_indices(handle, &EventSource::Samples, args.filter_args.time_range)
         {
             let Some(stack_idx) = stack_opt else { continue };
-            let mut frames: Vec<String> = Vec::new();
+            // resolved_chain is root-to-leaf with view transforms applied —
+            // exactly the orientation flamegraph-folded format expects.
             let mut any_match = matcher.is_none();
-            for frame_idx in profile.walk_stack(handle, stack_idx) {
-                if let Some(info) = profile.frame_info(handle, frame_idx) {
+            let frames: Vec<String> = profile
+                .resolved_chain(handle, stack_idx, false)
+                .into_iter()
+                .map(|f| {
                     if let Some(m) = matcher.as_ref()
-                        && m.matches(info.function_name)
+                        && m.matches(&f.function)
                     {
                         any_match = true;
                     }
                     // Replace any `;` in the function name so the folded
                     // delimiter stays unambiguous.
-                    frames.push(info.function_name.replace(';', ":"));
-                }
-            }
+                    f.function.replace(';', ":")
+                })
+                .collect();
             if !any_match {
                 continue;
             }
-            // walk_stack is leaf-to-root; folded format wants root-to-leaf.
-            frames.reverse();
             if frames.is_empty() {
                 continue;
             }

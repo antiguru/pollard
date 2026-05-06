@@ -16,7 +16,11 @@ use crate::profile::event_source::EventSource;
 use crate::profile::raw::{InlineFrame, Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
-    raw: RawProfile,
+    raw: std::sync::Arc<RawProfile>,
+    /// Frame-chain transforms applied lazily by `resolved_chain`.
+    /// Default = identity; views construct with non-default transforms
+    /// via [`Self::view`].
+    transforms: crate::profile::transforms::Transforms,
     /// Flattened (process, thread) tuples for top-level enumeration.
     threads: Vec<ThreadHandle>,
 }
@@ -44,6 +48,21 @@ pub struct FrameInfo<'a> {
     pub lib: Option<&'a RawLib>,
 }
 
+/// One frame in a transformed root-to-leaf chain produced by
+/// [`Profile::resolved_chain`]. Owns its strings so callers can hold it
+/// across `&Profile` borrows; the chain has already had hide / rename /
+/// collapse transforms applied, so aggregators can consume it directly
+/// without re-doing per-frame transform checks.
+#[derive(Debug, Clone)]
+pub struct ResolvedFrame {
+    pub function: String,
+    pub module: Option<String>,
+    pub file: Option<String>,
+    pub line: Option<u32>,
+    pub column: Option<u32>,
+    pub address: Option<i64>,
+}
+
 pub struct ThreadView<'a> {
     profile: &'a Profile,
     handle: ThreadHandle,
@@ -51,6 +70,23 @@ pub struct ThreadView<'a> {
 
 impl Profile {
     pub fn from_raw(raw: RawProfile) -> Self {
+        Self::new_inner(
+            std::sync::Arc::new(raw),
+            crate::profile::transforms::Transforms::default(),
+        )
+    }
+
+    /// Build a view profile that shares the base's raw tables but
+    /// applies its own transforms. The thread enumeration is identical
+    /// to the base — views never add or remove threads.
+    pub fn view(base: &Self, transforms: crate::profile::transforms::Transforms) -> Self {
+        Self::new_inner(std::sync::Arc::clone(&base.raw), transforms)
+    }
+
+    fn new_inner(
+        raw: std::sync::Arc<RawProfile>,
+        transforms: crate::profile::transforms::Transforms,
+    ) -> Self {
         let mut threads = Vec::new();
         // Top-level threads belong to the implicit "root" process.
         for (i, _) in raw.threads.iter().enumerate() {
@@ -74,7 +110,17 @@ impl Profile {
                 });
             }
         }
-        Self { raw, threads }
+        Self {
+            raw,
+            transforms,
+            threads,
+        }
+    }
+
+    /// Returns the transform set applied by `resolved_chain`. Identity
+    /// for base profiles.
+    pub fn transforms(&self) -> &crate::profile::transforms::Transforms {
+        &self.transforms
     }
 
     pub fn meta(&self) -> &crate::profile::raw::RawMeta {
@@ -242,6 +288,135 @@ impl Profile {
         })
     }
 
+    /// Resolve `stack_idx` into a frame chain (root-to-leaf), applying
+    /// the profile's transforms. When `expand_inlines` is true, native
+    /// frames fan out into their DWARF inline chain (outer-to-inner)
+    /// before transforms apply, so hide/rename rules see inline frames
+    /// as first-class entries.
+    pub fn resolved_chain(
+        &self,
+        handle: ThreadHandle,
+        stack_idx: usize,
+        expand_inlines: bool,
+    ) -> Vec<ResolvedFrame> {
+        // walk_stack iterates leaf-to-root; collect-then-reverse keeps
+        // order explicit (root-to-leaf) so transforms downstream see
+        // chains in execution order.
+        let leaf_first: Vec<usize> = self.walk_stack(handle, stack_idx).collect();
+        let mut chain: Vec<ResolvedFrame> = Vec::with_capacity(leaf_first.len());
+        for &fi in leaf_first.iter().rev() {
+            let Some(info) = self.frame_info(handle, fi) else {
+                continue;
+            };
+            chain.push(ResolvedFrame {
+                function: info.function_name.to_owned(),
+                module: info.module_name.map(str::to_owned),
+                file: info.file.map(str::to_owned),
+                line: info.line,
+                column: info.column,
+                address: info.address,
+            });
+            if expand_inlines {
+                // Inline chain is innermost-first; emit outer-to-inner
+                // so the deepest inline becomes the leaf.
+                let module = info.module_name.map(str::to_owned);
+                for inl in self.inline_chain(handle, fi).iter().rev() {
+                    chain.push(ResolvedFrame {
+                        function: inl.function.clone(),
+                        module: module.clone(),
+                        file: inl.file.clone(),
+                        line: inl.line,
+                        column: None,
+                        address: None,
+                    });
+                }
+            }
+        }
+        self.apply_transforms(&mut chain);
+        chain
+    }
+
+    fn apply_transforms(&self, chain: &mut Vec<ResolvedFrame>) {
+        let t = &self.transforms;
+        if t.is_identity() {
+            return;
+        }
+        // Hide first so rename and collapse don't see frames the user
+        // told us to drop.
+        if !t.hide_frames.is_empty() || !t.hide_modules.is_empty() {
+            chain.retain(|f| {
+                if t.hide_frames.iter().any(|m| m.matches(&f.function)) {
+                    return false;
+                }
+                if let Some(m) = f.module.as_deref()
+                    && t.hide_modules.iter().any(|mm| mm.matches(m))
+                {
+                    return false;
+                }
+                true
+            });
+        }
+        if !t.rename.is_empty() {
+            for f in chain.iter_mut() {
+                // Sequential apply: each rule sees the result of prior
+                // renames, so users can write a normalize-then-merge
+                // pipeline (`foo<.*> => foo`, then `foo => bar`) in one
+                // rename list. View composition relies on this — when a
+                // child view stacks on a parent, the two layers'
+                // rename rules concatenate in parent-first order and
+                // the child's rules fire on top of the parent's
+                // renamed frames.
+                for rule in &t.rename {
+                    if rule.matcher.matches(&f.function) {
+                        f.function = rule.replacement.clone();
+                    }
+                }
+            }
+        }
+        if t.collapse_recursion {
+            collapse_cycles(chain, MAX_CYCLE_LEN);
+        }
+    }
+}
+
+/// Maximum cycle length `collapse_recursion` will fold. Covers
+/// depth-3 interleaved recursion (e.g. timely's `Subgraph::schedule
+/// → PerOperatorState::schedule → Subgraph::schedule …`) with
+/// headroom; longer cycles are left alone so unrelated work isn't
+/// folded into a phantom recurrence.
+const MAX_CYCLE_LEN: usize = 8;
+
+/// Collapse repeating adjacent cycles in `chain`, in place.
+///
+/// For each cycle length `k` from `max_len` down to `1`, scans
+/// left-to-right and drains a duplicate adjacent run of length `k`
+/// when found, staying at the same position so a tripled or
+/// quadrupled cycle collapses fully in one pass. Long-to-short
+/// ordering means a length-3 cycle wins over a coincidentally-equal
+/// length-1 sub-pattern when both apply. Equality is by
+/// `(function, module)` only; per-frame metadata (file/line/address)
+/// on the surviving copy is whichever the first occurrence carried.
+fn collapse_cycles(chain: &mut Vec<ResolvedFrame>, max_len: usize) {
+    fn frames_eq(a: &ResolvedFrame, b: &ResolvedFrame) -> bool {
+        a.function == b.function && a.module == b.module
+    }
+    fn slice_eq(a: &[ResolvedFrame], b: &[ResolvedFrame]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| frames_eq(x, y))
+    }
+    for k in (1..=max_len).rev() {
+        let mut i = 0;
+        while i + 2 * k <= chain.len() {
+            if slice_eq(&chain[i..i + k], &chain[i + k..i + 2 * k]) {
+                chain.drain(i + k..i + 2 * k);
+                // Don't advance — same window may match again.
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+impl Profile {
     /// Iterate the stack-table indices that this thread contributes for
     /// the given event source. `Some(idx)` per sample/marker, `None` to
     /// skip (matching the existing `samples.stack: Vec<Option<usize>>`
@@ -409,5 +584,234 @@ mod tests {
     fn duration_ms_is_zero_for_empty_profile() {
         let p = fixture();
         assert_eq!(p.duration_ms(), 0.0);
+    }
+
+    #[test]
+    fn view_shares_raw_tables_and_threads() {
+        let base = fixture();
+        let view = Profile::view(&base, crate::profile::transforms::Transforms::default());
+        assert_eq!(base.threads().count(), view.threads().count());
+        assert!(view.transforms().is_identity());
+        // Same Arc backing → same raw pointer.
+        assert!(std::sync::Arc::ptr_eq(&base.raw, &view.raw));
+    }
+
+    #[test]
+    fn resolved_chain_with_identity_matches_walk_stack() {
+        use crate::profile::raw::RawProfile;
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        let stack_idx = p
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+
+        let manual: Vec<String> = p
+            .walk_stack(handle, stack_idx)
+            .filter_map(|fi| p.frame_info(handle, fi).map(|i| i.function_name.to_owned()))
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev() // walk_stack is leaf-to-root; resolved_chain is root-to-leaf.
+            .collect();
+        let resolved: Vec<String> = p
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(manual, resolved);
+    }
+
+    #[test]
+    fn resolved_chain_hides_matching_function() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::Transforms;
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        let mut t = Transforms::default();
+        // Substring matcher (default form for plain patterns without `re:` prefix).
+        t.hide_frames.push(FunctionMatcher::new("hot").unwrap());
+        let view = Profile::view(&base, t);
+        let handle = view.threads().next().unwrap().handle();
+        for stack_opt in view.stack_indices(
+            handle,
+            &crate::profile::event_source::EventSource::Samples,
+            None,
+        ) {
+            let Some(stack_idx) = stack_opt else { continue };
+            let names: Vec<String> = view
+                .resolved_chain(handle, stack_idx, false)
+                .into_iter()
+                .map(|f| f.function)
+                .collect();
+            assert!(
+                !names.iter().any(|n| n == "hot"),
+                "found hidden frame: {names:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_chain_collapses_consecutive_recursion() {
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::Transforms;
+        let json = r#"{
+          "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+          "libs": [],
+          "threads": [{
+            "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+            "stringArray": ["main", "recurse"],
+            "frameTable": {"length": 2, "address": [-1, -1], "func": [0, 1], "category": [0, 0], "subcategory": [0, 0], "line": [null, null], "column": [null, null], "nativeSymbol": [null, null]},
+            "stackTable": {"length": 4, "frame": [0, 1, 1, 1], "category": [0, 0, 0, 0], "subcategory": [0, 0, 0, 0], "prefix": [null, 0, 1, 2]},
+            "samples": {"length": 1, "stack": [3], "time": [0.0]},
+            "funcTable": {"length": 2, "name": [0, 1], "isJS": [false, false], "relevantForJS": [false, false], "resource": [-1, -1], "fileName": [null, null], "lineNumber": [null, null], "columnNumber": [null, null]},
+            "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+            "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+          }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                collapse_recursion: true,
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(names, vec!["main".to_owned(), "recurse".to_owned()]);
+    }
+
+    #[test]
+    fn resolved_chain_renames_apply_sequentially() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::{RenameRule, Transforms};
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        // First rule: `hot` -> `mid`. Second rule: `mid` -> `final`.
+        // Sequential apply means a frame named `hot` ends up `final` —
+        // i.e. the second rule sees the result of the first. This is
+        // also what view stacking depends on: each layer's renames see
+        // the result of the layers below.
+        let view = Profile::view(
+            &base,
+            Transforms {
+                rename: vec![
+                    RenameRule {
+                        matcher: FunctionMatcher::new("hot").unwrap(),
+                        replacement: "mid".to_owned(),
+                    },
+                    RenameRule {
+                        matcher: FunctionMatcher::new("mid").unwrap(),
+                        replacement: "final".to_owned(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let mut saw_final = false;
+        for stack_opt in view.stack_indices(
+            handle,
+            &crate::profile::event_source::EventSource::Samples,
+            None,
+        ) {
+            let Some(stack_idx) = stack_opt else { continue };
+            let names: Vec<String> = view
+                .resolved_chain(handle, stack_idx, false)
+                .into_iter()
+                .map(|f| f.function)
+                .collect();
+            assert!(
+                !names.iter().any(|n| n == "hot" || n == "mid"),
+                "intermediate names should not survive: {names:?}"
+            );
+            if names.iter().any(|n| n == "final") {
+                saw_final = true;
+            }
+        }
+        assert!(
+            saw_final,
+            "at least one stack should rename through to `final`"
+        );
+    }
+
+    #[test]
+    fn resolved_chain_collapses_multi_function_cycle() {
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::Transforms;
+        // Stack chain (root-to-leaf): A → B → C → A → B → C → X.
+        // The (A,B,C) cycle repeats once, so collapse_recursion should
+        // reduce the chain to [A, B, C, X]. This is the timely case:
+        // alternating multi-frame cycles consecutive `dedup_by` could
+        // never fold.
+        let json = r#"{
+          "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+          "libs": [],
+          "threads": [{
+            "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+            "stringArray": ["A", "B", "C", "X"],
+            "frameTable": {"length": 4, "address": [-1, -1, -1, -1], "func": [0, 1, 2, 3], "category": [0, 0, 0, 0], "subcategory": [0, 0, 0, 0], "line": [null, null, null, null], "column": [null, null, null, null], "nativeSymbol": [null, null, null, null]},
+            "stackTable": {"length": 7, "frame": [0, 1, 2, 0, 1, 2, 3], "category": [0, 0, 0, 0, 0, 0, 0], "subcategory": [0, 0, 0, 0, 0, 0, 0], "prefix": [null, 0, 1, 2, 3, 4, 5]},
+            "samples": {"length": 1, "stack": [6], "time": [0.0]},
+            "funcTable": {"length": 4, "name": [0, 1, 2, 3], "isJS": [false, false, false, false], "relevantForJS": [false, false, false, false], "resource": [-1, -1, -1, -1], "fileName": [null, null, null, null], "lineNumber": [null, null, null, null], "columnNumber": [null, null, null, null]},
+            "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+            "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+          }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                collapse_recursion: true,
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "A".to_owned(),
+                "B".to_owned(),
+                "C".to_owned(),
+                "X".to_owned()
+            ]
+        );
     }
 }
