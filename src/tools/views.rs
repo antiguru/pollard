@@ -118,7 +118,9 @@ pub struct ViewPresetsResult {
     /// and is embedded via `include_str!` so this tool always matches
     /// the doc shipped with the binary.
     pub cookbook: &'static str,
-}#[derive(Serialize, JsonSchema)]
+}
+
+#[derive(Serialize, JsonSchema)]
 pub struct DescribeViewResult {
     pub profile_id: String,
     /// Immediate parent profile id. For a view stacked on another view
