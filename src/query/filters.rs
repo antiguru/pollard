@@ -252,6 +252,151 @@ impl Filter {
             Some([s, e]) => time_ms >= s && time_ms <= e,
         }
     }
+
+    /// True when no scope predicate is set — caller can skip composition
+    /// entirely. Loaded (non-view) profiles always carry this default.
+    pub fn is_unset(&self) -> bool {
+        self.thread.is_none() && self.process.is_none() && self.time_range.is_none()
+    }
+
+    /// Compose a request-time filter (`self`) under a view's pre-filter
+    /// (`scope`). Per the design notes on issue #90, per-call filters
+    /// must be a sub-slice of the view's scope: a scoped view pins a
+    /// process/thread/window once, and the per-call filter can only
+    /// further narrow within it.
+    ///
+    /// Field-by-field rules:
+    /// - **thread**: when both are set they must select the same
+    ///   thread. We accept literal equality (same `Tid` or same `Name`)
+    ///   only — name↔tid pairs would require resolving against the
+    ///   profile to be sound, and silent acceptance of a mismatch is
+    ///   exactly the confusing failure mode the design rejects.
+    /// - **process**: same equality rule, with one exception — a bare
+    ///   `Pid` view scope accepts a per-call `Pid` with the matching
+    ///   `value` and an additional `suffix`, since a suffixed pid is a
+    ///   strict sub-slice of the bare pid that covers it.
+    /// - **time_range**: per-call `[s', e']` must satisfy
+    ///   `s' >= s && e' <= e` against the view's `[s, e]`.
+    ///
+    /// On conflict, returns [`ToolError::InvalidValue`] with `field`
+    /// pointing at the offending dimension and a hint that names the
+    /// scope so the caller can correct in one retry.
+    pub fn compose_under_scope(self, scope: &Filter) -> Result<Filter, ToolError> {
+        if scope.is_unset() {
+            return Ok(self);
+        }
+        let thread = match (scope.thread.as_ref(), self.thread) {
+            (None, t) => t,
+            (Some(s), None) => Some(s.clone()),
+            (Some(s), Some(t)) => {
+                if !thread_filter_eq(s, &t) {
+                    return Err(scope_conflict_error(
+                        "thread",
+                        thread_filter_label(s),
+                        thread_filter_label(&t),
+                    ));
+                }
+                Some(t)
+            }
+        };
+        let process = match (scope.process.as_ref(), self.process) {
+            (None, p) => p,
+            (Some(s), None) => Some(s.clone()),
+            (Some(s), Some(p)) => {
+                let kept = process_filter_subslice(s, &p).map_err(|()| {
+                    scope_conflict_error(
+                        "process",
+                        process_filter_label(s),
+                        process_filter_label(&p),
+                    )
+                })?;
+                Some(kept)
+            }
+        };
+        let time_range = match (scope.time_range, self.time_range) {
+            (None, t) => t,
+            (Some(s), None) => Some(s),
+            (Some([ss, se]), Some([rs, re])) => {
+                if rs < ss || re > se {
+                    return Err(scope_conflict_error(
+                        "time_range",
+                        format!("[{ss}, {se}]"),
+                        format!("[{rs}, {re}]"),
+                    ));
+                }
+                Some([rs, re])
+            }
+        };
+        Ok(Filter {
+            thread,
+            process,
+            time_range,
+        })
+    }
+}
+
+fn thread_filter_eq(a: &ThreadFilter, b: &ThreadFilter) -> bool {
+    match (a, b) {
+        (ThreadFilter::Tid(x), ThreadFilter::Tid(y)) => x == y,
+        (ThreadFilter::Name(x), ThreadFilter::Name(y)) => x == y,
+        _ => false,
+    }
+}
+
+fn thread_filter_label(t: &ThreadFilter) -> String {
+    match t {
+        ThreadFilter::Tid(n) => format!("tid:{n}"),
+        ThreadFilter::Name(n) => n.clone(),
+    }
+}
+
+fn process_filter_label(p: &ProcessFilter) -> String {
+    match p {
+        ProcessFilter::Pid(p) => format!("pid:{p}"),
+        ProcessFilter::Name(n) => n.clone(),
+    }
+}
+
+/// Returns the more specific of (`scope`, `request`) when `request` is a
+/// sub-slice of `scope`; `Err(())` otherwise. A bare-pid scope accepts a
+/// suffixed pid with the matching `value` (samply's `.N` sub-process is
+/// a strict sub-slice of the OS pid bucket); everything else must match
+/// literally.
+fn process_filter_subslice(
+    scope: &ProcessFilter,
+    request: &ProcessFilter,
+) -> Result<ProcessFilter, ()> {
+    use crate::profile::raw::Pid;
+    match (scope, request) {
+        (ProcessFilter::Pid(s), ProcessFilter::Pid(r)) => {
+            if s.value != r.value {
+                return Err(());
+            }
+            match (s.suffix, r.suffix) {
+                (None, _) => Ok(ProcessFilter::Pid(*r)), // bare scope, request more specific (or equal)
+                (Some(a), Some(b)) if a == b => Ok(ProcessFilter::Pid(Pid {
+                    value: s.value,
+                    suffix: Some(a),
+                })),
+                _ => Err(()),
+            }
+        }
+        (ProcessFilter::Name(s), ProcessFilter::Name(r)) if s == r => {
+            Ok(ProcessFilter::Name(r.clone()))
+        }
+        _ => Err(()),
+    }
+}
+
+fn scope_conflict_error(field: &'static str, scope: String, request: String) -> ToolError {
+    ToolError::InvalidValue {
+        field: field.to_owned(),
+        value: request,
+        accepted: vec!["<unset>".to_owned(), scope.clone()],
+        hint: Some(format!(
+            "view scope pins {field}={scope}; per-call {field} must be unset or a sub-slice"
+        )),
+    }
 }
 
 #[cfg(test)]
@@ -671,6 +816,155 @@ mod tests {
                 assert!(clamped_range[1] <= 100.0);
             }
             other => panic!("expected OutOfBounds, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compose_under_scope_passthrough_when_scope_unset() {
+        let scope = Filter::default();
+        let request = Filter {
+            thread: Some(ThreadFilter::Tid(7)),
+            ..Default::default()
+        };
+        let merged = request.clone().compose_under_scope(&scope).unwrap();
+        // Field-by-field equality: clone-and-compare avoids needing PartialEq on Filter.
+        assert!(matches!(merged.thread, Some(ThreadFilter::Tid(7))));
+    }
+
+    #[test]
+    fn compose_under_scope_inherits_when_request_unset() {
+        let scope = Filter {
+            thread: Some(ThreadFilter::Tid(7)),
+            time_range: Some([10.0, 100.0]),
+            ..Default::default()
+        };
+        let merged = Filter::default().compose_under_scope(&scope).unwrap();
+        assert!(matches!(merged.thread, Some(ThreadFilter::Tid(7))));
+        assert_eq!(merged.time_range, Some([10.0, 100.0]));
+    }
+
+    #[test]
+    fn compose_under_scope_accepts_equal_thread() {
+        let scope = Filter {
+            thread: Some(ThreadFilter::Tid(7)),
+            ..Default::default()
+        };
+        let req = Filter {
+            thread: Some(ThreadFilter::Tid(7)),
+            ..Default::default()
+        };
+        req.compose_under_scope(&scope).unwrap();
+    }
+
+    #[test]
+    fn compose_under_scope_rejects_thread_conflict() {
+        let scope = Filter {
+            thread: Some(ThreadFilter::Tid(7)),
+            ..Default::default()
+        };
+        let req = Filter {
+            thread: Some(ThreadFilter::Tid(8)),
+            ..Default::default()
+        };
+        let err = req.compose_under_scope(&scope).unwrap_err();
+        match err {
+            ToolError::InvalidValue { field, hint, .. } => {
+                assert_eq!(field, "thread");
+                assert!(hint.unwrap().contains("scope pins"));
+            }
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compose_under_scope_rejects_thread_kind_mismatch() {
+        let scope = Filter {
+            thread: Some(ThreadFilter::Name("worker".into())),
+            ..Default::default()
+        };
+        let req = Filter {
+            thread: Some(ThreadFilter::Tid(7)),
+            ..Default::default()
+        };
+        let err = req.compose_under_scope(&scope).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn compose_under_scope_accepts_suffixed_pid_under_bare_scope() {
+        let scope = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: None,
+            })),
+            ..Default::default()
+        };
+        let req = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: Some(1),
+            })),
+            ..Default::default()
+        };
+        let merged = req.compose_under_scope(&scope).unwrap();
+        match merged.process {
+            Some(ProcessFilter::Pid(p)) => {
+                assert_eq!(p.value, 100);
+                assert_eq!(p.suffix, Some(1));
+            }
+            other => panic!("expected pinned suffixed pid, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn compose_under_scope_rejects_widening_pid() {
+        let scope = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: Some(1),
+            })),
+            ..Default::default()
+        };
+        // Bare pid is wider than a suffixed scope pid → rejected.
+        let req = Filter {
+            process: Some(ProcessFilter::Pid(crate::profile::raw::Pid {
+                value: 100,
+                suffix: None,
+            })),
+            ..Default::default()
+        };
+        let err = req.compose_under_scope(&scope).unwrap_err();
+        assert!(matches!(err, ToolError::InvalidValue { .. }));
+    }
+
+    #[test]
+    fn compose_under_scope_accepts_inner_time_range() {
+        let scope = Filter {
+            time_range: Some([10.0, 100.0]),
+            ..Default::default()
+        };
+        let req = Filter {
+            time_range: Some([20.0, 50.0]),
+            ..Default::default()
+        };
+        let merged = req.compose_under_scope(&scope).unwrap();
+        assert_eq!(merged.time_range, Some([20.0, 50.0]));
+    }
+
+    #[test]
+    fn compose_under_scope_rejects_widening_time_range() {
+        let scope = Filter {
+            time_range: Some([10.0, 100.0]),
+            ..Default::default()
+        };
+        let req = Filter {
+            time_range: Some([5.0, 200.0]),
+            ..Default::default()
+        };
+        let err = req.compose_under_scope(&scope).unwrap_err();
+        match err {
+            ToolError::InvalidValue { field, .. } => assert_eq!(field, "time_range"),
+            other => panic!("expected InvalidValue, got {other:?}"),
         }
     }
 

@@ -386,7 +386,7 @@ impl PollardServer {
                     ("descendants", top_functions::SortBy::Descendants),
                 ],
             )?,
-            filter_args: parse_filter(&args.common)?,
+            filter_args: parse_filter(&args.common)?.compose_under_scope(session.view_scope())?,
             expand_inlines: args.expand_inlines.unwrap_or(false),
             event,
         };
@@ -427,7 +427,7 @@ impl PollardServer {
                     ("descendants", top_groups::SortBy::Descendants),
                 ],
             )?,
-            filter_args: parse_filter(&args.common)?,
+            filter_args: parse_filter(&args.common)?.compose_under_scope(session.view_scope())?,
             expand_inlines: args.expand_inlines.unwrap_or(false),
             directory_depth: args.directory_depth,
         };
@@ -447,7 +447,7 @@ impl PollardServer {
         let event = crate::query::event::resolve(session.profile(), args.event.as_deref())?;
         let defaults = call_tree::Args::default();
         let q_args = call_tree::Args {
-            filter_args: parse_filter(&args.common)?,
+            filter_args: parse_filter(&args.common)?.compose_under_scope(session.view_scope())?,
             inverted: args.inverted.unwrap_or(false),
             root_function: args.root_function.clone(),
             paths_to: args.paths_to.clone(),
@@ -472,7 +472,7 @@ impl PollardServer {
     ) -> Result<Json<FoldedStacksOutput>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
         let q_args = folded::Args {
-            filter_args: parse_filter(&args.common)?,
+            filter_args: parse_filter(&args.common)?.compose_under_scope(session.view_scope())?,
             function_filter: args.function_filter.clone(),
         };
         let folded = folded::folded_stacks(session.profile(), &q_args)?;
@@ -508,7 +508,16 @@ impl PollardServer {
                 ],
             )?,
             min_delta_pct: args.min_delta_pct,
-            filter_args: parse_filter(&args.common)?,
+            // Per-call filter must compose with both sides' view scopes.
+            // We only need to pass one effective filter to the aggregator
+            // (it's applied symmetrically), but we validate against B's
+            // scope so a per-call filter that conflicts with B doesn't
+            // silently apply only to A.
+            filter_args: {
+                let parsed = parse_filter(&args.common)?;
+                parsed.clone().compose_under_scope(session_b.view_scope())?;
+                parsed.compose_under_scope(session_a.view_scope())?
+            },
             expand_inlines: args.expand_inlines.unwrap_or(false),
             align_by: parse_string_enum(
                 "align_by",
@@ -535,7 +544,7 @@ impl PollardServer {
     ) -> Result<Json<stacks_containing::Output>, ErrorData> {
         let session = get_session(self, &args.profile_id).await?;
         let q_args = stacks_containing::Args {
-            filter_args: parse_filter(&args.common)?,
+            filter_args: parse_filter(&args.common)?.compose_under_scope(session.view_scope())?,
             function: args.function.clone(),
             limit: args.limit.unwrap_or(0),
         };

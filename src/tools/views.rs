@@ -5,9 +5,11 @@ use crate::matching::{FunctionMatcher, matcher_to_string, required_matcher};
 use crate::profile::symbolicate::problematic_outcomes;
 use crate::profile::transforms::{RenameRule, Transforms};
 use crate::query::describe::{DEFAULT_TOP_N, ProfileDescription, describe};
+use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
 use crate::query::view_stats::{RuleStat, ViewStats};
 use crate::tools::PollardServer;
 use crate::tools::lifecycle::EvictedRef;
+use crate::tools::query::{CommonFilterArgs, parse_filter};
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
 use schemars::JsonSchema;
@@ -70,6 +72,17 @@ pub struct CreateViewArgs {
     /// `re:<(.*) as .*::Schedule>::schedule => $1::schedule`.
     #[serde(default)]
     pub rename: Vec<String>,
+    /// View scope: pin a process / thread / time_range once at view
+    /// creation so every downstream tool call inherits the slice
+    /// without re-passing it. Per-call filters on the resulting view
+    /// must be a sub-slice — any conflicting per-call filter is
+    /// rejected with `invalid_value` so the caller can correct in one
+    /// retry. Same syntax as the per-call filter args:
+    /// `thread="tid:NNN"` or a thread name; `process="pid:NNN"` /
+    /// `"pid:NNN.M"` or a process name; `time_range=[start_ms, end_ms]`
+    /// relative to profile start.
+    #[serde(flatten)]
+    pub scope: CommonFilterArgs,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -107,11 +120,35 @@ pub struct DescribeViewResult {
     /// any tool reads this view, including rules inherited from
     /// parent views.
     pub transforms: TransformsView,
+    /// Composed view scope (process / thread / time_range) inherited
+    /// from every layer above this view. Omitted when no scope is set
+    /// anywhere in the chain.
+    #[serde(skip_serializing_if = "ScopeView::is_empty")]
+    pub scope: ScopeView,
     /// Per-rule diagnostic counts. Same shape as `create_view`'s
     /// `rule_stats`; reused so callers can re-fetch later without
     /// re-creating the view.
     pub rule_stats: Vec<RuleStat>,
     pub total_base_samples: u64,
+}
+
+/// Stable wire shape for a view's pre-filter (process / thread /
+/// time_range). Keeps `describe_view` JSON-stable when individual
+/// fields are unset.
+#[derive(Default, Serialize, JsonSchema)]
+pub struct ScopeView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_range: Option<[f64; 2]>,
+}
+
+impl ScopeView {
+    fn is_empty(&self) -> bool {
+        self.thread.is_none() && self.process.is_none() && self.time_range.is_none()
+    }
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -165,6 +202,11 @@ impl PollardServer {
         Set `strip_type_params=true` to drop balanced `<…>` segments from frame names \
         before `rename` rules fire — `OrdValBatch<RowRowLayout<…>>` collapses to \
         `OrdValBatch`, so rules can target the normalized name. \
+        Pass `process` / `thread` / `time_range` to pin a scope on the view — every downstream \
+        tool call inherits the slice without re-passing it. Per-call filters on the resulting \
+        view must be a sub-slice of the view scope (e.g. a `time_range`-scoped view accepts a \
+        narrower per-call `time_range` but rejects a wider one). Same syntax as the per-call \
+        filter args. \
         Re-creating the same view returns the same id; unload_profile frees a view without \
         touching the base."
     )]
@@ -173,9 +215,22 @@ impl PollardServer {
         Parameters(args): Parameters<CreateViewArgs>,
     ) -> Result<Json<CreateViewResult>, rmcp::ErrorData> {
         let transforms = build_transforms(&args)?;
+        let scope = parse_filter(&args.scope)?;
+        // Best-effort up-front validation of the scope against the
+        // immediate base — surfaces the same `thread_not_found` /
+        // `process_not_found` / `out_of_bounds` error shape the caller
+        // would otherwise see on the *next* query, but at the
+        // create-view step where it's actionable. Intermediate parents
+        // already validated their own scopes when they were created;
+        // composition only narrows.
+        if let Some(session) = self.registry.get(&args.profile_id).await {
+            scope.validate_thread(session.profile())?;
+            scope.validate_process(session.profile())?;
+            scope.validate_time_range(session.profile())?;
+        }
         let (id, evicted) = self
             .registry
-            .create_view(&args.profile_id, args.name.as_deref(), transforms)
+            .create_view(&args.profile_id, args.name.as_deref(), transforms, scope)
             .await?;
         let session =
             self.registry.get(&id).await.ok_or_else(|| {
@@ -236,6 +291,7 @@ impl PollardServer {
             .into());
         };
         let transforms = view_of_transforms(session.profile().transforms());
+        let scope = view_of_scope(session.view_scope());
         let stats = session
             .view_stats()
             .cloned()
@@ -244,9 +300,24 @@ impl PollardServer {
             profile_id: args.profile_id,
             base_profile_id,
             transforms,
+            scope,
             rule_stats: stats.rule_stats,
             total_base_samples: stats.total_base_samples,
         }))
+    }
+}
+
+fn view_of_scope(filter: &Filter) -> ScopeView {
+    ScopeView {
+        thread: filter.thread.as_ref().map(|t| match t {
+            ThreadFilter::Tid(n) => format!("tid:{n}"),
+            ThreadFilter::Name(n) => n.clone(),
+        }),
+        process: filter.process.as_ref().map(|p| match p {
+            ProcessFilter::Pid(p) => format!("pid:{p}"),
+            ProcessFilter::Name(n) => n.clone(),
+        }),
+        time_range: filter.time_range,
     }
 }
 
@@ -361,6 +432,7 @@ mod tests {
             collapse_recursion: false,
             strip_type_params: false,
             rename: vec![],
+            scope: Default::default(),
         };
         let t = build_transforms(&args).unwrap();
         assert!(t.is_identity());
@@ -378,6 +450,7 @@ mod tests {
             collapse_recursion: true,
             strip_type_params: false,
             rename: vec!["re:foo => bar".into()],
+            scope: Default::default(),
         };
         let t = build_transforms(&args).unwrap();
         assert_eq!(t.hide_frames.len(), 2);
@@ -432,6 +505,7 @@ mod tests {
             collapse_recursion: false,
             strip_type_params: true,
             rename: vec![],
+            scope: Default::default(),
         };
         let t = build_transforms(&args).unwrap();
         assert!(t.strip_type_params);
@@ -450,6 +524,7 @@ mod tests {
             collapse_recursion: false,
             strip_type_params: false,
             rename: vec![],
+            scope: Default::default(),
         };
         let t = build_transforms(&args).unwrap();
         assert_eq!(t.keep_only_frames.len(), 2);
@@ -469,6 +544,7 @@ mod tests {
             collapse_recursion: false,
             strip_type_params: false,
             rename: vec![],
+            scope: Default::default(),
         };
         let err = build_transforms(&args).unwrap_err();
         match err {
@@ -489,6 +565,7 @@ mod tests {
             collapse_recursion: false,
             strip_type_params: false,
             rename: vec![],
+            scope: Default::default(),
         };
         let err = build_transforms(&args).unwrap_err();
         match err {

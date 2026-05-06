@@ -140,6 +140,13 @@ impl SessionRegistry {
     /// raw tables but applying `transforms`. Returns the new view id and
     /// any sessions evicted to make room.
     ///
+    /// `scope` pins a process / thread / time_range pre-filter on the
+    /// view; it composes with any parent view's scope using the same
+    /// sub-slice rule that gates per-call filters at query time
+    /// ([`crate::query::filters::Filter::compose_under_scope`]). Pass
+    /// [`crate::query::filters::Filter::default()`] for an unscoped
+    /// view.
+    ///
     /// Errors with `ProfileNotFound` / `ProfileEvicted` if the base is
     /// not currently loaded (we don't auto-reload — that would block the
     /// caller on re-symbolication without warning).
@@ -148,9 +155,17 @@ impl SessionRegistry {
         base_id: &str,
         name: Option<&str>,
         transforms: crate::profile::transforms::Transforms,
+        scope: crate::query::filters::Filter,
     ) -> Result<(String, Vec<EvictedSession>), ToolError> {
         let base = self.get_or_error(base_id).await?;
-        let view_id = view_id_from(base_id, &transforms);
+        // Compose scope with the parent chain *before* hashing so the
+        // resulting view id is stable on the effective scope (the same
+        // semantic state the session will end up storing). A child
+        // whose own `scope` is unset still inherits the parent's scope,
+        // and re-creating the same shape returns the cached id.
+        let parent_scope = self.compose_parent_scope(&base);
+        let composed_scope = scope.compose_under_scope(&parent_scope)?;
+        let view_id = view_id_from(base_id, &transforms, &composed_scope);
         {
             let mut inner = self.inner.write().await;
             // Cache hit: same (base_id, transforms) already registered.
@@ -171,7 +186,8 @@ impl SessionRegistry {
         // root-first. A loaded (non-view) profile carries the identity
         // transform, so composing over a real base is a no-op.
         let composed = self.compose_with_chain(&base, transforms).await?;
-        let session = ProfileSession::view(&base, view_id.clone(), view_name, composed);
+        let session =
+            ProfileSession::view(&base, view_id.clone(), view_name, composed, composed_scope);
         let mut inner = self.inner.write().await;
         let mut evicted = Vec::new();
         while inner.sessions.len() >= self.capacity {
@@ -212,6 +228,19 @@ impl SessionRegistry {
     /// still evict an intermediate view; callers see the same
     /// `ProfileNotFound` / `ProfileEvicted` shape they'd get from any
     /// other id lookup.
+    /// Resolve the effective view scope inherited from `immediate_base`
+    /// — the scope already stored on the immediate parent session.
+    /// Per-session scopes are pre-composed at create time, so the
+    /// immediate base carries the cumulative scope of every ancestor;
+    /// no chain walk needed. Loaded (non-view) profiles carry the
+    /// empty default.
+    fn compose_parent_scope(
+        &self,
+        immediate_base: &ProfileSession,
+    ) -> crate::query::filters::Filter {
+        immediate_base.view_scope().clone()
+    }
+
     async fn compose_with_chain(
         &self,
         immediate_base: &ProfileSession,
@@ -236,16 +265,21 @@ impl SessionRegistry {
     }
 }
 
-fn view_id_from(base_id: &str, transforms: &crate::profile::transforms::Transforms) -> String {
+fn view_id_from(
+    base_id: &str,
+    transforms: &crate::profile::transforms::Transforms,
+    scope: &crate::query::filters::Filter,
+) -> String {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut h = DefaultHasher::new();
     base_id.hash(&mut h);
-    // Hash a compact, stable representation of transforms. We Debug-print
-    // them: the Debug impl is derived and stable across releases on the
-    // same struct shape; re-add an explicit hash if we ever need
-    // cross-process compatibility (we don't today).
+    // Hash a compact, stable representation of transforms + scope.
+    // Debug-print: the Debug impls are derived and stable across
+    // releases on the same struct shapes; re-add an explicit hash if
+    // we ever need cross-process compatibility (we don't today).
     format!("{transforms:?}").hash(&mut h);
+    format!("{scope:?}").hash(&mut h);
     format!("{base_id}.v{:08x}", h.finish() as u32)
 }
 
@@ -307,7 +341,7 @@ mod tests {
             .await
             .unwrap();
         let (view_id_1, _) = registry
-            .create_view(&base_id, None, Default::default())
+            .create_view(&base_id, None, Default::default(), Default::default())
             .await
             .unwrap();
         let s1 = registry
@@ -315,7 +349,7 @@ mod tests {
             .await
             .expect("view should be loaded");
         let (view_id_2, _) = registry
-            .create_view(&base_id, None, Default::default())
+            .create_view(&base_id, None, Default::default(), Default::default())
             .await
             .unwrap();
         let s2 = registry
@@ -346,7 +380,7 @@ mod tests {
             .await
             .unwrap();
         let (id_a, _) = registry
-            .create_view(&base_id, None, Transforms::default())
+            .create_view(&base_id, None, Transforms::default(), Default::default())
             .await
             .unwrap();
         let (id_b, _) = registry
@@ -357,6 +391,7 @@ mod tests {
                     collapse_recursion: true,
                     ..Default::default()
                 },
+                Default::default(),
             )
             .await
             .unwrap();
@@ -377,7 +412,7 @@ mod tests {
             .await
             .unwrap();
         let (view_id, evicted) = registry
-            .create_view(&base_id, None, Default::default())
+            .create_view(&base_id, None, Default::default(), Default::default())
             .await
             .unwrap();
         // capacity=1, but the base must remain so the view can read it.
@@ -387,6 +422,126 @@ mod tests {
         );
         assert!(registry.get(&view_id).await.is_some());
         assert!(evicted.is_empty(), "no eviction expected; we keep the base");
+    }
+
+    #[tokio::test]
+    async fn create_view_persists_scope_on_session() {
+        use crate::query::filters::{Filter, ThreadFilter};
+        let registry = SessionRegistry::new(2);
+        let (base_id, _) = registry
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                None,
+            )
+            .await
+            .unwrap();
+        let scope = Filter {
+            thread: Some(ThreadFilter::Tid(1)),
+            ..Default::default()
+        };
+        let (view_id, _) = registry
+            .create_view(&base_id, None, Default::default(), scope.clone())
+            .await
+            .unwrap();
+        let view = registry.get(&view_id).await.unwrap();
+        // view_scope should round-trip exactly — composition with the
+        // base's identity scope is a no-op.
+        assert!(matches!(
+            view.view_scope().thread,
+            Some(ThreadFilter::Tid(1))
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_view_distinct_scopes_yield_distinct_ids() {
+        use crate::query::filters::{Filter, ThreadFilter};
+        let registry = SessionRegistry::new(4);
+        let (base_id, _) = registry
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                None,
+            )
+            .await
+            .unwrap();
+        let (id_a, _) = registry
+            .create_view(&base_id, None, Default::default(), Filter::default())
+            .await
+            .unwrap();
+        let (id_b, _) = registry
+            .create_view(
+                &base_id,
+                None,
+                Default::default(),
+                Filter {
+                    thread: Some(ThreadFilter::Tid(1)),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(id_a, id_b, "different scopes must produce different ids");
+    }
+
+    #[tokio::test]
+    async fn stacked_view_inherits_parent_scope() {
+        use crate::query::filters::{Filter, ThreadFilter};
+        let registry = SessionRegistry::new(4);
+        let (base_id, _) = registry
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                None,
+            )
+            .await
+            .unwrap();
+        // Parent pins thread; child has unset scope and should inherit.
+        let parent_scope = Filter {
+            thread: Some(ThreadFilter::Tid(1)),
+            ..Default::default()
+        };
+        let (parent_id, _) = registry
+            .create_view(&base_id, None, Default::default(), parent_scope)
+            .await
+            .unwrap();
+        let (child_id, _) = registry
+            .create_view(&parent_id, None, Default::default(), Filter::default())
+            .await
+            .unwrap();
+        let child = registry.get(&child_id).await.unwrap();
+        assert!(matches!(
+            child.view_scope().thread,
+            Some(ThreadFilter::Tid(1))
+        ));
+    }
+
+    #[tokio::test]
+    async fn stacked_view_child_scope_must_be_sub_slice() {
+        use crate::query::filters::{Filter, ThreadFilter};
+        let registry = SessionRegistry::new(4);
+        let (base_id, _) = registry
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                None,
+            )
+            .await
+            .unwrap();
+        let parent_scope = Filter {
+            thread: Some(ThreadFilter::Tid(1)),
+            ..Default::default()
+        };
+        let (parent_id, _) = registry
+            .create_view(&base_id, None, Default::default(), parent_scope)
+            .await
+            .unwrap();
+        // Child tries to widen to a different tid → must be rejected.
+        let bad = Filter {
+            thread: Some(ThreadFilter::Tid(2)),
+            ..Default::default()
+        };
+        let err = registry
+            .create_view(&parent_id, None, Default::default(), bad)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, ToolError::InvalidValue { .. }));
     }
 
     #[tokio::test]
@@ -409,7 +564,7 @@ mod tests {
             ..Default::default()
         };
         let (parent_id, _) = registry
-            .create_view(&base_id, Some("hide-hot"), parent_t)
+            .create_view(&base_id, Some("hide-hot"), parent_t, Default::default())
             .await
             .unwrap();
         let child_t = Transforms {
@@ -417,7 +572,7 @@ mod tests {
             ..Default::default()
         };
         let (child_id, _) = registry
-            .create_view(&parent_id, Some("hide-both"), child_t)
+            .create_view(&parent_id, Some("hide-both"), child_t, Default::default())
             .await
             .unwrap();
         let child = registry.get(&child_id).await.unwrap();

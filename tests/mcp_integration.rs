@@ -858,6 +858,87 @@ async fn create_and_describe_view_report_rule_stats() {
     srv.kill().await;
 }
 
+/// `create_view` accepts `process` / `thread` / `time_range` scope
+/// arguments. The scope round-trips on `describe_view`, and per-call
+/// filters that conflict with a pinned scope are rejected with
+/// `invalid_value` — the sub-slice contract from issue #90.
+#[tokio::test]
+async fn create_view_pins_scope_and_rejects_widening_per_call_filter() {
+    let mut srv = Server::spawn().await;
+    let path = fixture("two_functions.json");
+    let base_id = srv.load_fixture(1, &path).await;
+
+    // Pin a thread scope on the view. tid 1 is the only thread in the
+    // fixture, so the scope is a no-op for results — what we care about
+    // is that it round-trips and gates per-call filters.
+    let view_resp = srv
+        .call_tool(
+            2,
+            "create_view",
+            serde_json::json!({
+                "profile_id": base_id,
+                "thread": "tid:1",
+            }),
+        )
+        .await;
+    let view_id = view_resp["result"]["structuredContent"]["profile_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("create_view missing profile_id; resp={view_resp}"))
+        .to_owned();
+
+    // describe_view exposes the pinned scope.
+    let desc_resp = srv
+        .call_tool(
+            3,
+            "describe_view",
+            serde_json::json!({ "profile_id": view_id }),
+        )
+        .await;
+    let dsc = &desc_resp["result"]["structuredContent"];
+    assert_eq!(
+        dsc["scope"]["thread"].as_str(),
+        Some("tid:1"),
+        "scope.thread should round-trip; got {dsc}"
+    );
+
+    // A per-call filter that picks a *different* thread must be
+    // rejected with invalid_value (sub-slice contract).
+    let bad = srv
+        .call_tool(
+            4,
+            "top_functions",
+            serde_json::json!({ "profile_id": view_id, "thread": "tid:2" }),
+        )
+        .await;
+    assert_eq!(
+        bad["error"]["data"]["error"].as_str(),
+        Some("invalid_value"),
+        "conflicting per-call thread should be rejected; got {bad}"
+    );
+    assert_eq!(
+        bad["error"]["data"]["field"].as_str(),
+        Some("thread"),
+        "expected field=thread; got {bad}"
+    );
+
+    // A per-call filter that matches the scope's thread is accepted —
+    // sub-slice (equality counts) — and returns aggregated results.
+    let ok = srv
+        .call_tool(
+            5,
+            "top_functions",
+            serde_json::json!({ "profile_id": view_id, "thread": "tid:1" }),
+        )
+        .await;
+    let sc = &ok["result"]["structuredContent"];
+    assert!(
+        sc["functions"].as_array().is_some_and(|a| !a.is_empty()),
+        "matching per-call thread should aggregate; got {ok}"
+    );
+
+    srv.kill().await;
+}
+
 /// The genuinely-optional `filter` field on `top_functions` must keep
 /// treating empty as "no filter" — that's what callers mean when they
 /// "leave blank". The rejection only fires for required / narrowing
