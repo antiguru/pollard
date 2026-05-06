@@ -17,13 +17,13 @@ that's malformed for reasons external to pollard.
 ### 1. Binaries on PATH
 
 ```sh
-command -v pollard
-samply --version
+pollard --version
+samply  --version
 ```
 
-- `pollard` missing → `cargo install pollard`. Don't try
-  `pollard --version`; pollard accepts no CLI args today and would
-  hang on stdio waiting for an MCP client.
+- `pollard: command not found` → `cargo install pollard`
+- `pollard --version` prints but is older than expected →
+  `cargo install pollard --force` to overwrite.
 - `samply: command not found` → `cargo install --locked samply`
 
 If `cargo` itself is missing, point the user at <https://rustup.rs/>
