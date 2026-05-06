@@ -151,14 +151,22 @@ impl SessionRegistry {
     ) -> Result<(String, Vec<EvictedSession>), ToolError> {
         let base = self.get_or_error(base_id).await?;
         let view_id = view_id_from(base_id, &transforms);
+        {
+            let mut inner = self.inner.write().await;
+            // Cache hit: same (base_id, transforms) already registered.
+            // Touch LRU order and return the existing id without rebuilding
+            // the underlying ProfileSession.
+            if inner.sessions.contains_key(&view_id) {
+                inner.order.retain(|x| x != &view_id);
+                inner.order.push_back(view_id.clone());
+                return Ok((view_id, Vec::new()));
+            }
+        }
         let view_name = name
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{}#view", base.name()));
         let session = ProfileSession::view(&base, view_id.clone(), view_name, transforms);
         let mut inner = self.inner.write().await;
-        if inner.sessions.contains_key(&view_id) {
-            inner.order.retain(|x| x != &view_id);
-        }
         let mut evicted = Vec::new();
         while inner.sessions.len() >= self.capacity {
             let Some(victim_id) = inner.order.pop_front() else {
@@ -262,15 +270,60 @@ mod tests {
             .create_view(&base_id, None, Default::default())
             .await
             .unwrap();
+        let s1 = registry
+            .get(&view_id_1)
+            .await
+            .expect("view should be loaded");
         let (view_id_2, _) = registry
             .create_view(&base_id, None, Default::default())
             .await
             .unwrap();
+        let s2 = registry
+            .get(&view_id_2)
+            .await
+            .expect("view should still be loaded");
         assert_eq!(
             view_id_1, view_id_2,
             "same transforms should yield same view id"
         );
         assert_ne!(view_id_1, base_id);
+        // Repeat call must not rebuild the session.
+        assert!(
+            std::sync::Arc::ptr_eq(&s1, &s2),
+            "re-creating the same view should reuse the existing session"
+        );
+    }
+
+    #[tokio::test]
+    async fn create_view_distinct_transforms_yield_distinct_ids() {
+        use crate::profile::transforms::Transforms;
+        let registry = SessionRegistry::new(4);
+        let (base_id, _) = registry
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                None,
+            )
+            .await
+            .unwrap();
+        let (id_a, _) = registry
+            .create_view(&base_id, None, Transforms::default())
+            .await
+            .unwrap();
+        let (id_b, _) = registry
+            .create_view(
+                &base_id,
+                None,
+                Transforms {
+                    collapse_recursion: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_ne!(
+            id_a, id_b,
+            "different transforms must produce different ids"
+        );
     }
 
     #[tokio::test]
