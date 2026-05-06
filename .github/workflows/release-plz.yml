@@ -24,6 +24,13 @@ jobs:
           fetch-depth: 0
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+      - name: release-plz - publish on merged release
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: release-plz - update release PR
         id: release-plz
         uses: MarcoIeni/release-plz-action@v0.5
@@ -33,9 +40,16 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       # release-plz force-pushes the release branch on every run, so this
-      # follow-up commit is reapplied after each release-pr step rather
+      # follow-up commit is reapplied after each release-pr update rather
       # than persisting across runs. The plugin-release workflow's
       # verify-tag check is the safety net if this step ever fails.
+      #
+      # This step checks out the release PR branch to amend it. It MUST
+      # stay last in the job — the publish step above tags+publishes
+      # whatever HEAD points at, so any later step that left HEAD on
+      # the bumped PR branch would cause an unmerged release to be
+      # tagged and shipped to crates.io. (That is how v0.0.7 was
+      # published without #104 ever being merged.)
       - name: Sync plugin manifest versions to Cargo.toml
         if: steps.release-plz.outputs.prs != '[]'
         env:
@@ -69,10 +83,3 @@ jobs:
           git add .claude-plugin/plugin.json .claude-plugin/marketplace.json
           git commit -m "chore: sync plugin manifests to v${cargo_version}"
           git push origin "$pr_branch"
-
-      - name: release-plz - publish on merged release
-        uses: MarcoIeni/release-plz-action@v0.5
-        with:
-          command: release
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

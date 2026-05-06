@@ -5,11 +5,22 @@ name: Release plugin
 # README, LICENSE-*) into a `.skill` zip and attaches it to the
 # release release-plz already created — so MCP-only users keep the
 # crates.io install path while plugin users get a one-shot artifact.
+#
+# Also runnable manually via workflow_dispatch with an existing tag
+# input — packages whatever is on the dispatch branch and uploads to
+# that tag's release. Useful for attaching a fresh bundle to an
+# already-cut release without bumping the version.
 
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)attach the plugin bundle to (e.g. v0.0.6)'
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -22,7 +33,7 @@ jobs:
 
       - name: Verify version tag matches plugin manifests
         env:
-          REF: ${{ github.ref_name }}
+          REF: ${{ inputs.tag || github.ref_name }}
         run: |
           tag_version="${REF#v}"
           plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
@@ -41,5 +52,5 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
+          tag_name: ${{ inputs.tag || github.ref_name }}
           files: dist/*.skill
