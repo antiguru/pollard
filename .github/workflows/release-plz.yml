@@ -25,6 +25,7 @@ jobs:
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
       - name: release-plz - update release PR
+        id: release-plz
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release-pr
@@ -36,14 +37,15 @@ jobs:
       # than persisting across runs. The plugin-release workflow's
       # verify-tag check is the safety net if this step ever fails.
       - name: Sync plugin manifest versions to Cargo.toml
+        if: steps.release-plz.outputs.prs != '[]'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRS_JSON: ${{ steps.release-plz.outputs.prs }}
         run: |
           set -euo pipefail
-          pr_branch=$(gh pr list --label release --state open --base main \
-            --json headRefName --jq '.[0].headRefName // empty')
-          if [ -z "$pr_branch" ]; then
-            echo "No open release-plz PR; nothing to sync."
+          pr_branch=$(echo "$PRS_JSON" | jq -r '.[0].head_branch // empty')
+          if [ -z "$pr_branch" ] || [ "$pr_branch" = "null" ]; then
+            echo "No release-plz PR branch in outputs; nothing to sync."
             exit 0
           fi
           git fetch origin "$pr_branch"
