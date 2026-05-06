@@ -77,6 +77,7 @@ async fn lists_all_tools() {
         "compare_profiles",
         "compare_functions",
         "summary",
+        "create_view",
     ] {
         assert!(names.contains(expected), "missing tool: {}", expected);
     }
