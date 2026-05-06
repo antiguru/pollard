@@ -16,7 +16,11 @@ use crate::profile::event_source::EventSource;
 use crate::profile::raw::{InlineFrame, Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
-    raw: RawProfile,
+    raw: std::sync::Arc<RawProfile>,
+    /// Frame-chain transforms applied lazily by `resolved_chain`.
+    /// Default = identity; views construct with non-default transforms
+    /// via [`Self::view`].
+    transforms: crate::profile::transforms::Transforms,
     /// Flattened (process, thread) tuples for top-level enumeration.
     threads: Vec<ThreadHandle>,
 }
@@ -51,6 +55,23 @@ pub struct ThreadView<'a> {
 
 impl Profile {
     pub fn from_raw(raw: RawProfile) -> Self {
+        Self::new_inner(
+            std::sync::Arc::new(raw),
+            crate::profile::transforms::Transforms::default(),
+        )
+    }
+
+    /// Build a view profile that shares the base's raw tables but
+    /// applies its own transforms. The thread enumeration is identical
+    /// to the base — views never add or remove threads.
+    pub fn view(base: &Self, transforms: crate::profile::transforms::Transforms) -> Self {
+        Self::new_inner(std::sync::Arc::clone(&base.raw), transforms)
+    }
+
+    fn new_inner(
+        raw: std::sync::Arc<RawProfile>,
+        transforms: crate::profile::transforms::Transforms,
+    ) -> Self {
         let mut threads = Vec::new();
         // Top-level threads belong to the implicit "root" process.
         for (i, _) in raw.threads.iter().enumerate() {
@@ -74,7 +95,17 @@ impl Profile {
                 });
             }
         }
-        Self { raw, threads }
+        Self {
+            raw,
+            transforms,
+            threads,
+        }
+    }
+
+    /// Returns the transform set applied by `resolved_chain`. Identity
+    /// for base profiles.
+    pub fn transforms(&self) -> &crate::profile::transforms::Transforms {
+        &self.transforms
     }
 
     pub fn meta(&self) -> &crate::profile::raw::RawMeta {
@@ -409,5 +440,15 @@ mod tests {
     fn duration_ms_is_zero_for_empty_profile() {
         let p = fixture();
         assert_eq!(p.duration_ms(), 0.0);
+    }
+
+    #[test]
+    fn view_shares_raw_tables_and_threads() {
+        let base = fixture();
+        let view = Profile::view(&base, crate::profile::transforms::Transforms::default());
+        assert_eq!(base.threads().count(), view.threads().count());
+        assert!(view.transforms().is_identity());
+        // Same Arc backing → same raw pointer.
+        assert!(std::sync::Arc::ptr_eq(&base.raw, &view.raw));
     }
 }
