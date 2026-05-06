@@ -36,6 +36,15 @@ jobs:
       # follow-up commit is reapplied after each release-pr step rather
       # than persisting across runs. The plugin-release workflow's
       # verify-tag check is the safety net if this step ever fails.
+      #
+      # CRITICAL: this step temporarily checks out the release-plz PR
+      # branch (Cargo.toml version bumped). The next step runs
+      # `release-plz release`, which tags+publishes whatever HEAD points
+      # at, so we MUST restore HEAD to the original trigger SHA before
+      # exiting — otherwise release-plz tags the bumped version off an
+      # unmerged PR branch and pushes it to crates.io. (This is exactly
+      # how v0.0.7 was published without #104 ever being merged.) The
+      # trap below handles all exit paths, including early returns.
       - name: Sync plugin manifest versions to Cargo.toml
         if: steps.release-plz.outputs.prs != '[]'
         env:
@@ -43,6 +52,8 @@ jobs:
           PRS_JSON: ${{ steps.release-plz.outputs.prs }}
         run: |
           set -euo pipefail
+          original_sha=$(git rev-parse HEAD)
+          trap 'git checkout --quiet --detach "$original_sha" 2>/dev/null || true' EXIT
           pr_branch=$(echo "$PRS_JSON" | jq -r '.[0].head_branch // empty')
           if [ -z "$pr_branch" ] || [ "$pr_branch" = "null" ]; then
             echo "No release-plz PR branch in outputs; nothing to sync."
