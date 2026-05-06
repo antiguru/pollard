@@ -221,7 +221,7 @@ impl PollardServer {
         Parameters(args): Parameters<SummaryArgs>,
     ) -> Result<Json<summary::Output>, rmcp::ErrorData> {
         let session = self.registry.get_or_error(&args.profile_id).await?;
-        let filter = parse_filter(&args.common)?;
+        let filter = parse_filter(&args.common)?.compose_under_scope(session.view_scope())?;
         let mut result = summary::summary(
             session.profile(),
             session.id(),

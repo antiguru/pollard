@@ -26,6 +26,11 @@ pub struct ProfileSession {
     /// numbers are available to `create_view` and any later
     /// `describe_view` lookup without re-walking the base.
     view_stats: Option<crate::query::view_stats::ViewStats>,
+    /// View pre-filter — the `process` / `thread` / `time_range` scope
+    /// pinned at `create_view` time, applied alongside any per-call
+    /// `CommonFilterArgs` at query time. [`Filter::default()`] for
+    /// loaded (non-view) profiles.
+    view_scope: crate::query::filters::Filter,
 }
 
 #[allow(dead_code)]
@@ -65,6 +70,7 @@ impl ProfileSession {
             lib_outcomes,
             base_id: None,
             view_stats: None,
+            view_scope: crate::query::filters::Filter::default(),
         })
     }
 
@@ -118,6 +124,7 @@ impl ProfileSession {
         view_id: String,
         name: String,
         transforms: crate::profile::transforms::Transforms,
+        view_scope: crate::query::filters::Filter,
     ) -> Self {
         let view_profile =
             std::sync::Arc::new(crate::profile::Profile::view(base.profile(), transforms));
@@ -134,6 +141,7 @@ impl ProfileSession {
             lib_outcomes: base.lib_outcomes().to_vec(),
             base_id: Some(base.id().to_owned()),
             view_stats: Some(view_stats),
+            view_scope,
         }
     }
 
@@ -141,6 +149,14 @@ impl ProfileSession {
     /// view sessions; `None` for sessions loaded from disk.
     pub fn view_stats(&self) -> Option<&crate::query::view_stats::ViewStats> {
         self.view_stats.as_ref()
+    }
+
+    /// View pre-filter (process / thread / time_range scope). Applied
+    /// alongside any per-call filter at query time. Returns the default
+    /// empty filter for loaded (non-view) profiles, so callers can use
+    /// it unconditionally.
+    pub fn view_scope(&self) -> &crate::query::filters::Filter {
+        &self.view_scope
     }
 }
 
