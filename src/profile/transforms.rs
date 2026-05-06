@@ -18,7 +18,7 @@ pub struct Transforms {
     pub hide_modules: Vec<FunctionMatcher>,
     /// Inverse of `hide_frames`: only frames whose function name matches
     /// at least one entry survive. Runs of consecutive non-matching
-    /// frames collapse into a single [`KEEP_ONLY_PLACEHOLDER`] frame.
+    /// frames collapse into a single placeholder frame named `<hidden>`.
     /// Combined with `keep_only_modules` as an OR — a frame is kept if
     /// it matches *any* `keep_only_*` rule across either list. Empty
     /// lists in both fields disable the filter (no placeholders are
