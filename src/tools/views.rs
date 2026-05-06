@@ -63,6 +63,12 @@ impl PollardServer {
         Returns a new `profile_id` you can pass to any other tool. Views share the base profile's \
         raw tables (no extra memory cost) and apply transforms during aggregation: hide frames by \
         name or module, collapse consecutive recursion, and merge symbols via rename rules. \
+        Argument syntax: `hide_frames` and `hide_modules` use substring match by default; \
+        prefix a pattern with `re:` for a regex (e.g. `re:^tokio::`). \
+        `rename` rules use the form `re:<pattern> => <replacement>` — the `re:` prefix is \
+        required so the ` => ` separator is unambiguous. \
+        Set `collapse_recursion=true` when a recursive call dominates and each recursion site \
+        should count as one frame in every aggregation. \
         Re-creating the same view returns the same id; unload_profile frees a view without \
         touching the base."
     )]
@@ -230,7 +236,10 @@ mod tests {
     #[test]
     fn rename_with_invalid_regex_returns_invalid_value() {
         let err = parse_rename_rule("re:[bad => replacement").unwrap_err();
-        assert!(matches!(err, ToolError::InvalidValue { .. }));
+        match err {
+            ToolError::InvalidValue { field, .. } => assert_eq!(field, "rename"),
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
     }
 
     #[test]
