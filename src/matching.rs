@@ -485,10 +485,7 @@ mod tests {
         // The motivating case from issue #87: a single rule folds the
         // trait-vs-inherent monomorphisation pair down to one symbol.
         let m = FunctionMatcher::new("re:<(.*) as .*::Schedule>::schedule").unwrap();
-        let out = m.replace(
-            "<MyOp as timely::Schedule>::schedule",
-            "$1::schedule",
-        );
+        let out = m.replace("<MyOp as timely::Schedule>::schedule", "$1::schedule");
         assert_eq!(out, "MyOp::schedule");
     }
 
