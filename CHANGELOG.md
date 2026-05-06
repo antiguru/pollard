@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.0.7](https://github.com/antiguru/pollard/compare/v0.0.6...v0.0.7) - 2026-05-06
+## [0.0.8](https://github.com/antiguru/pollard/compare/v0.0.6...v0.0.8) - 2026-05-06
+
+Fix release by synchronizing versions. The work below actually
+landed here, not in the orphaned 0.0.7 tag.
 
 ### Other
 
@@ -15,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - *(release-plz)* restore HEAD to trigger SHA after manifest sync
 - *(plugin-release)* allow manual dispatch against an existing tag
 - use "./" relative-path source instead of bare "."
+
+## [0.0.7](https://github.com/antiguru/pollard/compare/v0.0.6...v0.0.7) - 2026-05-06
+
+Exists purely because of a broken release script, shouldn't exist. Do not use.
 
 ## [0.0.6](https://github.com/antiguru/pollard/compare/v0.0.5...v0.0.6) - 2026-05-06
 
