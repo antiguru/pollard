@@ -31,6 +31,9 @@ hardware counter instead.
 `top_groups` currently aggregates samples only.
 
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
+See `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` for
+copy-paste `hide_modules` / `hide_frames` regex sets covering common
+Rust noise (tracing-subscriber, tokio internals, stdlib glue).
 
 ## Install
 

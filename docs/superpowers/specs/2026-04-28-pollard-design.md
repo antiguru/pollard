@@ -164,6 +164,8 @@ A subsequent unrelated `load_profile` call can still evict the base; the view's 
 A rule with `frames_matched: 0` is the typo signal — without it, callers can only infer mistyped patterns by running downstream tools and noticing nothing changed.
 The flat list includes inherited parent rules when stacking views; `total_base_samples` is the denominator for the `samples_affected` shares.
 
+For canonical `hide_modules` / `hide_frames` regex sets (tracing-subscriber, tokio runtime, Rust stdlib glue), see the cookbook in `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` — kept as docs rather than code presets so the curated content can drift with upstream crates without baking yesterday's noise filters into the binary.
+
 #### `describe_view(profile_id) -> { profile_id, base_profile_id, transforms, rule_stats, total_base_samples }`
 
 Symmetric with `describe_profile` for views: returns the immediate parent's id, the full composed `transforms` shape (`hide_frames`, `hide_modules`, `rename`, `collapse_recursion`), and the same `rule_stats` / `total_base_samples` `create_view` produced.
