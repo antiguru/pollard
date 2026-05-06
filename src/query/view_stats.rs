@@ -157,8 +157,7 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
             if t.strip_type_params {
                 let mut sp_seen = false;
                 for f in chain.iter_mut() {
-                    let stripped =
-                        crate::profile::transforms::strip_type_params_from(&f.function);
+                    let stripped = crate::profile::transforms::strip_type_params_from(&f.function);
                     if stripped != f.function {
                         sp_frames += 1;
                         sp_seen = true;
