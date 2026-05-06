@@ -135,7 +135,7 @@ success, `profile_not_found` if the id is unknown.
 What is currently loaded.
 Each entry on a derived view also carries `base_profile_id`, so callers can distinguish views from real loaded profiles.
 
-#### `create_view(profile_id, name?, hide_frames?, hide_modules?, collapse_recursion?, rename?) -> { profile_id, description, evicted }`
+#### `create_view(profile_id, name?, hide_frames?, hide_modules?, collapse_recursion?, rename?) -> { profile_id, description, rule_stats, total_base_samples, evicted }`
 
 Build a derived view of a loaded profile that lazily transforms aggregations.
 The base profile's raw frame, string, and stack tables are Arc-shared, so a view's marginal cost is the `Transforms` value plus per-thread / per-lib metadata — independent of sample count.
@@ -159,6 +159,16 @@ The child sees the union of both layers' `hide_*` and `rename` rules, and `colla
 
 Eviction: the LRU loop in `create_view` skips the view's base, so registering a view never evicts the profile it depends on (transient over-capacity is accepted).
 A subsequent unrelated `load_profile` call can still evict the base; the view's id then remains queryable because the view's own `Arc<ProfileSession>` keeps its `Arc<RawProfile>` (cloned from the base at view creation) alive.
+
+`rule_stats` reports per-rule diagnostic counters (`rule_index`, `kind`, `pattern`, `frames_matched`, `samples_affected`) computed by replaying every rule against the base's samples once at view-create time.
+A rule with `frames_matched: 0` is the typo signal — without it, callers can only infer mistyped patterns by running downstream tools and noticing nothing changed.
+The flat list includes inherited parent rules when stacking views; `total_base_samples` is the denominator for the `samples_affected` shares.
+
+#### `describe_view(profile_id) -> { profile_id, base_profile_id, transforms, rule_stats, total_base_samples }`
+
+Symmetric with `describe_profile` for views: returns the immediate parent's id, the full composed `transforms` shape (`hide_frames`, `hide_modules`, `rename`, `collapse_recursion`), and the same `rule_stats` / `total_base_samples` `create_view` produced.
+Lets callers re-fetch the diagnostic counts without re-creating the view.
+Returns `invalid_value` when given a non-view (loaded) profile id; use `describe_profile` for those.
 
 #### `summary(profile_id, thread?, process?, time_range?) -> Summary`
 
