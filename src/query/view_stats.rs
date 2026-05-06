@@ -19,8 +19,8 @@ pub struct RuleStat {
     /// Index within the rule's kind list (0-based). For `collapse_recursion`
     /// always 0 — there's only one such rule per composed transform.
     pub rule_index: usize,
-    /// `"hide_frames"`, `"hide_modules"`, `"rename"`, or
-    /// `"collapse_recursion"`.
+    /// `"hide_frames"`, `"hide_modules"`, `"rename"`,
+    /// `"strip_type_params"`, or `"collapse_recursion"`.
     pub kind: String,
     /// User-facing pattern: `re:<regex>` for regex matchers, raw
     /// substring for substring matchers, `<matcher> => <replacement>`
@@ -82,6 +82,8 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
     let mut rn_samples: Vec<u64> = vec![0; t.rename.len()];
     let mut cl_frames: u64 = 0;
     let mut cl_samples: u64 = 0;
+    let mut sp_frames: u64 = 0;
+    let mut sp_samples: u64 = 0;
 
     for thread in profile.threads() {
         let handle = thread.handle();
@@ -148,6 +150,26 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
                 }
             }
 
+            // Strip pass. Counts every frame whose name actually
+            // changes — names without `<…>` segments are no-ops and
+            // don't show up here, so a zero count is the typo signal
+            // ("did the option even fire?").
+            if t.strip_type_params {
+                let mut sp_seen = false;
+                for f in chain.iter_mut() {
+                    let stripped =
+                        crate::profile::transforms::strip_type_params_from(&f.function);
+                    if stripped != f.function {
+                        sp_frames += 1;
+                        sp_seen = true;
+                        f.function = stripped;
+                    }
+                }
+                if sp_seen {
+                    sp_samples += 1;
+                }
+            }
+
             // Rename pass. Sequential: a rule sees the result of any
             // previous rename — same contract as `apply_transforms`.
             let mut rn_seen = vec![false; t.rename.len()];
@@ -211,6 +233,15 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
             ),
             frames_matched: rn_frames[i],
             samples_affected: rn_samples[i],
+        });
+    }
+    if t.strip_type_params {
+        rule_stats.push(RuleStat {
+            rule_index: 0,
+            kind: "strip_type_params".to_owned(),
+            pattern: String::new(),
+            frames_matched: sp_frames,
+            samples_affected: sp_samples,
         });
     }
     if t.collapse_recursion {
@@ -313,6 +344,25 @@ mod tests {
             .unwrap();
         assert_eq!(r.pattern, "d => leaf");
         assert!(r.frames_matched > 0);
+    }
+
+    #[test]
+    fn strip_type_params_emits_stat_when_enabled() {
+        let base = linear_profile();
+        let view = Profile::view(
+            &base,
+            Transforms {
+                strip_type_params: true,
+                ..Default::default()
+            },
+        );
+        let stats = compute_view_stats(&view);
+        let count = stats
+            .rule_stats
+            .iter()
+            .filter(|r| r.kind == "strip_type_params")
+            .count();
+        assert_eq!(count, 1);
     }
 
     #[test]

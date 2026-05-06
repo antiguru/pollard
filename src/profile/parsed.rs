@@ -356,6 +356,18 @@ impl Profile {
                 true
             });
         }
+        if t.strip_type_params {
+            // Strip before rename so user rules see the normalized
+            // name (`OrdValBatch<…>` → `OrdValBatch`); composing it
+            // the other way would force every rule to encode a
+            // bracket-tolerant pattern.
+            for f in chain.iter_mut() {
+                let stripped = crate::profile::transforms::strip_type_params_from(&f.function);
+                if stripped != f.function {
+                    f.function = stripped;
+                }
+            }
+        }
         if !t.rename.is_empty() {
             for f in chain.iter_mut() {
                 // Sequential apply: each rule sees the result of prior
@@ -853,5 +865,58 @@ mod tests {
                 "X".to_owned()
             ]
         );
+    }
+
+    #[test]
+    fn resolved_chain_strip_type_params_runs_before_rename() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::{RenameRule, Transforms};
+        // Issue #88: nested generics blow up output. With
+        // strip_type_params on, the matcher only has to recognise the
+        // base name — the rule below would never fire if `<X<Y>>` was
+        // still attached to `OrdValBatch`.
+        let json = r#"{
+          "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+          "libs": [],
+          "threads": [{
+            "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+            "stringArray": ["OrdValBatch<RowRowLayout<((Row, Row), Ts, i64)>>"],
+            "frameTable": {"length": 1, "address": [-1], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]},
+            "stackTable": {"length": 1, "frame": [0], "category": [0], "subcategory": [0], "prefix": [null]},
+            "samples": {"length": 1, "stack": [0], "time": [0.0]},
+            "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+            "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+            "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+          }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                strip_type_params: true,
+                rename: vec![RenameRule {
+                    matcher: FunctionMatcher::new("OrdValBatch").unwrap(),
+                    replacement: "Batch".to_owned(),
+                }],
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(names, vec!["Batch".to_owned()]);
     }
 }

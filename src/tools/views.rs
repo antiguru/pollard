@@ -38,6 +38,15 @@ pub struct CreateViewArgs {
     /// same-symbol case is just length 1.
     #[serde(default)]
     pub collapse_recursion: bool,
+    /// When true, balanced `<…>` segments are removed from each
+    /// frame's function name before `rename` rules fire — so
+    /// `OrdValBatch<RowRowLayout<((Row, Row), Ts, i64)>>` becomes
+    /// `OrdValBatch` and the rules can target the normalized name.
+    /// Generic-bearing languages (Rust, C++ templates, C#, Java
+    /// generics) all benefit; the trade-off is that any literal `<`
+    /// or `>` in a symbol is also stripped.
+    #[serde(default)]
+    pub strip_type_params: bool,
     /// Function-name rename rules. Each entry must be `re:<pattern> => <replacement>`.
     /// The `re:` prefix is mandatory: substring renames aren't useful enough to
     /// justify a second syntax in v1. The replacement supports regex capture
@@ -100,6 +109,7 @@ pub struct TransformsView {
     /// Sequential rename rules.
     pub rename: Vec<RenameView>,
     pub collapse_recursion: bool,
+    pub strip_type_params: bool,
 }
 
 #[derive(Serialize, JsonSchema)]
@@ -127,6 +137,9 @@ impl PollardServer {
         Set `collapse_recursion=true` when a recurrence dominates and each occurrence should \
         count as one. Repeating adjacent cycles up to length 8 collapse: `[A,B,C,A,B,C,X]` \
         becomes `[A,B,C,X]`. \
+        Set `strip_type_params=true` to drop balanced `<…>` segments from frame names \
+        before `rename` rules fire — `OrdValBatch<RowRowLayout<…>>` collapses to \
+        `OrdValBatch`, so rules can target the normalized name. \
         Re-creating the same view returns the same id; unload_profile frees a view without \
         touching the base."
     )]
@@ -225,6 +238,7 @@ fn view_of_transforms(t: &Transforms) -> TransformsView {
             })
             .collect(),
         collapse_recursion: t.collapse_recursion,
+        strip_type_params: t.strip_type_params,
     }
 }
 
@@ -252,6 +266,7 @@ fn build_transforms(args: &CreateViewArgs) -> Result<Transforms, ToolError> {
         hide_frames,
         hide_modules,
         collapse_recursion: args.collapse_recursion,
+        strip_type_params: args.strip_type_params,
         rename,
     })
 }
@@ -303,6 +318,7 @@ mod tests {
             hide_frames: vec![],
             hide_modules: vec![],
             collapse_recursion: false,
+            strip_type_params: false,
             rename: vec![],
         };
         let t = build_transforms(&args).unwrap();
@@ -317,6 +333,7 @@ mod tests {
             hide_frames: vec!["malloc".into(), "re:^__".into()],
             hide_modules: vec!["libc.so".into()],
             collapse_recursion: true,
+            strip_type_params: false,
             rename: vec!["re:foo => bar".into()],
         };
         let t = build_transforms(&args).unwrap();
@@ -361,6 +378,22 @@ mod tests {
     }
 
     #[test]
+    fn build_transforms_threads_strip_type_params() {
+        let args = CreateViewArgs {
+            profile_id: "p".into(),
+            name: None,
+            hide_frames: vec![],
+            hide_modules: vec![],
+            collapse_recursion: false,
+            strip_type_params: true,
+            rename: vec![],
+        };
+        let t = build_transforms(&args).unwrap();
+        assert!(t.strip_type_params);
+        assert!(!t.is_identity());
+    }
+
+    #[test]
     fn hide_frames_empty_pattern_rejected() {
         let args = CreateViewArgs {
             profile_id: "p".into(),
@@ -368,6 +401,7 @@ mod tests {
             hide_frames: vec!["".into()],
             hide_modules: vec![],
             collapse_recursion: false,
+            strip_type_params: false,
             rename: vec![],
         };
         let err = build_transforms(&args).unwrap_err();
