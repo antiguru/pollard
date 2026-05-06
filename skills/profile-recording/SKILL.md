@@ -11,6 +11,24 @@ format are `samply record` (record a fresh profile) and `samply import`
 that matches what the user has in hand, run the command, then call
 `load_profile`.
 
+## Prerequisites
+
+Installing the plugin only registered the MCP server config — the
+`pollard` binary and `samply` still have to be on `PATH`. Verify
+before recording, and install whatever's missing:
+
+```sh
+command -v pollard >/dev/null || cargo install pollard
+samply --version >/dev/null    || cargo install --locked samply
+```
+
+(Don't run `pollard --version` — it has no CLI today and would hang
+on stdio waiting for an MCP client. `command -v` is the safe check.)
+
+If diagnosis goes deeper than these two checks (MCP server unreachable,
+`load_profile` failing on a known-good file, etc.) the `pollard-doctor`
+skill in this plugin walks through the full health check.
+
 ## When to use which path
 
 | User has | Use |
