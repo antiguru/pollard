@@ -46,6 +46,19 @@ impl Transforms {
             && !self.collapse_recursion
             && self.rename.is_empty()
     }
+
+    /// Append `other` after `self` to compose two transform layers.
+    /// `hide_*` lists union (a frame matching any layer's hide rule is
+    /// dropped). `rename` rules concatenate in `[self, other]` order
+    /// and fire sequentially during `apply_transforms`, so an `other`
+    /// rule sees the result of any matching `self` rule.
+    /// `collapse_recursion` is the logical OR.
+    pub fn extend_from(&mut self, other: Transforms) {
+        self.hide_frames.extend(other.hide_frames);
+        self.hide_modules.extend(other.hide_modules);
+        self.rename.extend(other.rename);
+        self.collapse_recursion |= other.collapse_recursion;
+    }
 }
 
 #[cfg(test)]

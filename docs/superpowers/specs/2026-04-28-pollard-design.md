@@ -153,6 +153,10 @@ The order of application is fixed: hide, then rename, then collapse, after frame
 `create_view` is idempotent: a second call with identical `(base_id, transforms)` returns the existing view's id and reuses its `ProfileSession`.
 `unload_profile(view_id)` frees the view without touching the base.
 
+Views compose: passing another view's id as `profile_id` stacks transforms in parent-first order.
+The child sees the union of both layers' `hide_*` and `rename` rules, and `collapse_recursion` is the OR.
+`rename` rules fire sequentially (each rule sees the result of prior renames), so a stacked layer can match symbols a parent already rewrote.
+
 Eviction: the LRU loop in `create_view` skips the view's base, so registering a view never evicts the profile it depends on (transient over-capacity is accepted).
 A subsequent unrelated `load_profile` call can still evict the base; the view's id then remains queryable because the view's own `Arc<ProfileSession>` keeps its `Arc<RawProfile>` (cloned from the base at view creation) alive.
 

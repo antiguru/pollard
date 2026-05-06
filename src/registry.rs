@@ -165,7 +165,13 @@ impl SessionRegistry {
         let view_name = name
             .map(str::to_owned)
             .unwrap_or_else(|| format!("{}#view", base.name()));
-        let session = ProfileSession::view(&base, view_id.clone(), view_name, transforms);
+        // Compose with every layer above this view's immediate base so
+        // stacking views accumulates rules instead of replacing them.
+        // Walk from the immediate base upward, then apply rules
+        // root-first. A loaded (non-view) profile carries the identity
+        // transform, so composing over a real base is a no-op.
+        let composed = self.compose_with_chain(&base, transforms).await?;
+        let session = ProfileSession::view(&base, view_id.clone(), view_name, composed);
         let mut inner = self.inner.write().await;
         let mut evicted = Vec::new();
         while inner.sessions.len() >= self.capacity {
@@ -193,6 +199,40 @@ impl SessionRegistry {
         inner.order.push_back(view_id.clone());
         inner.sessions.insert(view_id.clone(), Arc::new(session));
         Ok((view_id, evicted))
+    }
+
+    /// Walk the parent chain from `immediate_base` to the loaded root
+    /// and concatenate every layer's transforms in root-first order,
+    /// finishing with `child`. Returns the composed `Transforms` that
+    /// should be stored on the new view's `Profile`.
+    ///
+    /// Errors if any intermediate parent is no longer loaded. That's
+    /// rare in practice — `create_view` already guards the immediate
+    /// base from eviction, but unrelated `load_profile` traffic can
+    /// still evict an intermediate view; callers see the same
+    /// `ProfileNotFound` / `ProfileEvicted` shape they'd get from any
+    /// other id lookup.
+    async fn compose_with_chain(
+        &self,
+        immediate_base: &ProfileSession,
+        child: crate::profile::transforms::Transforms,
+    ) -> Result<crate::profile::transforms::Transforms, ToolError> {
+        let mut layers = vec![immediate_base.profile().transforms().clone()];
+        let mut current = immediate_base.base_id().map(str::to_owned);
+        while let Some(id) = current {
+            let parent = self.get_or_error(&id).await?;
+            layers.push(parent.profile().transforms().clone());
+            current = parent.base_id().map(str::to_owned);
+        }
+        // `layers` is child-first (immediate, then walking up); we want
+        // root-first so renames cascade in declaration order.
+        layers.reverse();
+        let mut composed = crate::profile::transforms::Transforms::default();
+        for layer in layers {
+            composed.extend_from(layer);
+        }
+        composed.extend_from(child);
+        Ok(composed)
     }
 }
 
@@ -347,5 +387,50 @@ mod tests {
         );
         assert!(registry.get(&view_id).await.is_some());
         assert!(evicted.is_empty(), "no eviction expected; we keep the base");
+    }
+
+    #[tokio::test]
+    async fn stacked_view_composes_parent_transforms() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::transforms::Transforms;
+        let registry = SessionRegistry::new(4);
+        let (base_id, _) = registry
+            .load(
+                std::path::Path::new("tests/fixtures/two_functions.json"),
+                None,
+            )
+            .await
+            .unwrap();
+        // Parent view hides `hot`. Child view stacked on top hides `cold`.
+        // The child should see both rules — composition extends, not
+        // replaces.
+        let parent_t = Transforms {
+            hide_frames: vec![FunctionMatcher::new("hot").unwrap()],
+            ..Default::default()
+        };
+        let (parent_id, _) = registry
+            .create_view(&base_id, Some("hide-hot"), parent_t)
+            .await
+            .unwrap();
+        let child_t = Transforms {
+            hide_frames: vec![FunctionMatcher::new("cold").unwrap()],
+            ..Default::default()
+        };
+        let (child_id, _) = registry
+            .create_view(&parent_id, Some("hide-both"), child_t)
+            .await
+            .unwrap();
+        let child = registry.get(&child_id).await.unwrap();
+        let composed = child.profile().transforms();
+        assert_eq!(
+            composed.hide_frames.len(),
+            2,
+            "child view should carry both layers' hide rules"
+        );
+        // Order matters for `rename`, but for `hide` we only care that
+        // both names are present. Assert by debug round-trip.
+        let dbg = format!("{:?}", composed.hide_frames);
+        assert!(dbg.contains("hot"), "hot rule missing from {dbg}");
+        assert!(dbg.contains("cold"), "cold rule missing from {dbg}");
     }
 }

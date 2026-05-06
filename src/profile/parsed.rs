@@ -358,10 +358,17 @@ impl Profile {
         }
         if !t.rename.is_empty() {
             for f in chain.iter_mut() {
+                // Sequential apply: each rule sees the result of prior
+                // renames, so users can write a normalize-then-merge
+                // pipeline (`foo<.*> => foo`, then `foo => bar`) in one
+                // rename list. View composition relies on this — when a
+                // child view stacks on a parent, the two layers'
+                // rename rules concatenate in parent-first order and
+                // the child's rules fire on top of the parent's
+                // renamed frames.
                 for rule in &t.rename {
                     if rule.matcher.matches(&f.function) {
                         f.function = rule.replacement.clone();
-                        break;
                     }
                 }
             }
@@ -693,6 +700,62 @@ mod tests {
             .map(|f| f.function)
             .collect();
         assert_eq!(names, vec!["main".to_owned(), "recurse".to_owned()]);
+    }
+
+    #[test]
+    fn resolved_chain_renames_apply_sequentially() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::{RenameRule, Transforms};
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        // First rule: `hot` -> `mid`. Second rule: `mid` -> `final`.
+        // Sequential apply means a frame named `hot` ends up `final` —
+        // i.e. the second rule sees the result of the first. This is
+        // also what view stacking depends on: each layer's renames see
+        // the result of the layers below.
+        let view = Profile::view(
+            &base,
+            Transforms {
+                rename: vec![
+                    RenameRule {
+                        matcher: FunctionMatcher::new("hot").unwrap(),
+                        replacement: "mid".to_owned(),
+                    },
+                    RenameRule {
+                        matcher: FunctionMatcher::new("mid").unwrap(),
+                        replacement: "final".to_owned(),
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let mut saw_final = false;
+        for stack_opt in view.stack_indices(
+            handle,
+            &crate::profile::event_source::EventSource::Samples,
+            None,
+        ) {
+            let Some(stack_idx) = stack_opt else { continue };
+            let names: Vec<String> = view
+                .resolved_chain(handle, stack_idx, false)
+                .into_iter()
+                .map(|f| f.function)
+                .collect();
+            assert!(
+                !names.iter().any(|n| n == "hot" || n == "mid"),
+                "intermediate names should not survive: {names:?}"
+            );
+            if names.iter().any(|n| n == "final") {
+                saw_final = true;
+            }
+        }
+        assert!(
+            saw_final,
+            "at least one stack should rename through to `final`"
+        );
     }
 
     #[test]
