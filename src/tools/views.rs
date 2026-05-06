@@ -40,7 +40,11 @@ pub struct CreateViewArgs {
     pub collapse_recursion: bool,
     /// Function-name rename rules. Each entry must be `re:<pattern> => <replacement>`.
     /// The `re:` prefix is mandatory: substring renames aren't useful enough to
-    /// justify a second syntax in v1.
+    /// justify a second syntax in v1. The replacement supports regex capture
+    /// references — `$1`, `${name}` interpolate groups from the pattern, and
+    /// a literal `$` is written `$$` — so a single rule can fold a
+    /// trait-vs-inherent monomorphisation pair like
+    /// `re:<(.*) as .*::Schedule>::schedule => $1::schedule`.
     #[serde(default)]
     pub rename: Vec<String>,
 }
@@ -118,7 +122,8 @@ impl PollardServer {
         Argument syntax: `hide_frames` and `hide_modules` use substring match by default; \
         prefix a pattern with `re:` for a regex (e.g. `re:^tokio::`). \
         `rename` rules use the form `re:<pattern> => <replacement>` — the `re:` prefix is \
-        required so the ` => ` separator is unambiguous. \
+        required so the ` => ` separator is unambiguous. The replacement supports regex \
+        capture references (`$1`, `${name}`); write `$$` for a literal `$`. \
         Set `collapse_recursion=true` when a recurrence dominates and each occurrence should \
         count as one. Repeating adjacent cycles up to length 8 collapse: `[A,B,C,A,B,C,X]` \
         becomes `[A,B,C,X]`. \

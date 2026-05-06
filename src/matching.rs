@@ -59,6 +59,20 @@ impl FunctionMatcher {
             Self::Regex(re) => re.is_match(function_name),
         }
     }
+
+    /// Apply `replacement` to `input` using this matcher.
+    ///
+    /// For [`Self::Regex`], delegates to [`Regex::replace`] so capture
+    /// references (`$1`, `${name}`) interpolate; a literal `$` in the
+    /// replacement must be written `$$`. For [`Self::Substring`], swaps
+    /// in the replacement wholesale — substring renames don't have
+    /// capture groups, and that mirrors the previous literal behavior.
+    pub fn replace(&self, input: &str, replacement: &str) -> String {
+        match self {
+            Self::Substring(_) => replacement.to_owned(),
+            Self::Regex(re) => re.replace(input, replacement).into_owned(),
+        }
+    }
 }
 
 fn decode_html_entities(s: &str) -> String {
@@ -464,6 +478,34 @@ mod tests {
             FunctionMatcher::new("").unwrap_err(),
             MatcherError::Empty
         ));
+    }
+
+    #[test]
+    fn regex_replace_interpolates_capture_groups() {
+        // The motivating case from issue #87: a single rule folds the
+        // trait-vs-inherent monomorphisation pair down to one symbol.
+        let m = FunctionMatcher::new("re:<(.*) as .*::Schedule>::schedule").unwrap();
+        let out = m.replace(
+            "<MyOp as timely::Schedule>::schedule",
+            "$1::schedule",
+        );
+        assert_eq!(out, "MyOp::schedule");
+    }
+
+    #[test]
+    fn regex_replace_supports_named_groups_and_dollar_escape() {
+        let m = FunctionMatcher::new("re:^pre_(?P<rest>.*)").unwrap();
+        assert_eq!(m.replace("pre_foo", "${rest}_post"), "foo_post");
+        // `$$` round-trips to a literal `$`.
+        assert_eq!(m.replace("pre_foo", "$$rest"), "$rest");
+    }
+
+    #[test]
+    fn substring_replace_overwrites_whole_input() {
+        // Substring matchers don't have capture groups; preserve the
+        // pre-issue-87 behavior where the whole frame is overwritten.
+        let m = FunctionMatcher::new("malloc").unwrap();
+        assert_eq!(m.replace("__libc_malloc", "alloc"), "alloc");
     }
 
     #[test]
