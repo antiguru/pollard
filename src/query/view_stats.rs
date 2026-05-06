@@ -6,8 +6,6 @@
 //! users can only infer the miss by running downstream tools and
 //! noticing nothing changed.
 
-#![allow(dead_code)]
-
 use crate::matching::matcher_to_string;
 use crate::profile::Profile;
 use crate::profile::event_source::EventSource;
