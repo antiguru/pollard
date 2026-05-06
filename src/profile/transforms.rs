@@ -33,9 +33,12 @@ pub struct Transforms {
 pub struct RenameRule {
     /// Compiled matcher that decides whether a frame is renamed.
     pub matcher: FunctionMatcher,
-    /// Replacement string. Always literal — no capture-group interpolation
-    /// in v1, since `merge_functions` is for symbol fusion, not regex
-    /// templating.
+    /// Replacement string passed to [`regex::Regex::replace`] when
+    /// `matcher` is a regex, so `$1` / `${name}` interpolate the
+    /// capture groups; a literal `$` must be written `$$`. For
+    /// substring matchers (not currently producible through the tool
+    /// surface) the replacement is used verbatim — the matched frame
+    /// is overwritten with this string in full.
     pub replacement: String,
 }
 

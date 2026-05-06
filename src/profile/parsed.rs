@@ -368,7 +368,7 @@ impl Profile {
                 // renamed frames.
                 for rule in &t.rename {
                     if rule.matcher.matches(&f.function) {
-                        f.function = rule.replacement.clone();
+                        f.function = rule.matcher.replace(&f.function, &rule.replacement);
                     }
                 }
             }
@@ -756,6 +756,46 @@ mod tests {
             saw_final,
             "at least one stack should rename through to `final`"
         );
+    }
+
+    #[test]
+    fn resolved_chain_rename_supports_regex_backreferences() {
+        use crate::matching::FunctionMatcher;
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::{RenameRule, Transforms};
+        // Issue #87: regex captures must interpolate in the
+        // replacement so a single rule can fold structurally similar
+        // names (e.g. trait-vs-inherent monomorphisations) instead of
+        // requiring one rule per concrete name.
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                rename: vec![RenameRule {
+                    matcher: FunctionMatcher::new("re:^(.)(.*)$").unwrap(),
+                    replacement: "${2}_${1}".to_owned(),
+                }],
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let mut renamed: Vec<String> = Vec::new();
+        for stack_opt in view.stack_indices(
+            handle,
+            &crate::profile::event_source::EventSource::Samples,
+            None,
+        ) {
+            let Some(stack_idx) = stack_opt else { continue };
+            for f in view.resolved_chain(handle, stack_idx, false) {
+                if !renamed.contains(&f.function) {
+                    renamed.push(f.function);
+                }
+            }
+        }
+        renamed.sort();
+        assert_eq!(renamed, vec!["old_c".to_owned(), "ot_h".to_owned()]);
     }
 
     #[test]

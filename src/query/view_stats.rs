@@ -156,7 +156,7 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
                     if rule.matcher.matches(&f.function) {
                         rn_frames[i] += 1;
                         rn_seen[i] = true;
-                        f.function = rule.replacement.clone();
+                        f.function = rule.matcher.replace(&f.function, &rule.replacement);
                     }
                 }
             }
