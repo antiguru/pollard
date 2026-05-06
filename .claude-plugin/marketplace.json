@@ -1,0 +1,22 @@
+{
+  "name": "pollard",
+  "owner": {
+    "name": "antiguru"
+  },
+  "plugins": [
+    {
+      "name": "pollard",
+      "source": ".",
+      "description": "MCP server that exposes Firefox-format performance profiles (samply, perf-imported) to Claude Code, plus skills for the canonical recording workflow and view-preset cookbook.",
+      "version": "0.0.5",
+      "license": "MIT OR Apache-2.0",
+      "keywords": [
+        "profiling",
+        "mcp",
+        "samply",
+        "firefox-profiler",
+        "perf"
+      ]
+    }
+  ]
+}
