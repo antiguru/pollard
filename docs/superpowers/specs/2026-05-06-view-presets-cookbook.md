@@ -7,6 +7,11 @@ keep showing up when reading Rust profiles with `create_view`. These are
 `rule_stats` afterwards (`frames_matched: 0` means the pattern compiled
 but never matched anything in this profile, which is the typo signal).
 
+This document is also exposed verbatim through the `view_presets` MCP
+tool (the file is `include_str!`-embedded), so MCP clients that can't
+read the repository filesystem still reach the same content with one
+tool call.
+
 Why a cookbook instead of a `presets=[...]` argument: preset content
 drifts as upstream crates rename internals, and pinning a curated list
 in code biases users toward whatever was popular when it was written. A
