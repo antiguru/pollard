@@ -103,7 +103,7 @@ agent itself wants to record (via Bash, not via an MCP tool). The
 `load_profile` flow works on any Firefox-format profile JSON regardless of
 origin.
 
-## MCP tool surface (14 tools)
+## MCP tool surface (16 tools)
 
 Tools are organized into four groups: session management, describe, query,
 and drill-down.
@@ -133,6 +133,28 @@ success, `profile_not_found` if the id is unknown.
 #### `list_profiles() -> [ProfileMetadata]`
 
 What is currently loaded.
+Each entry on a derived view also carries `base_profile_id`, so callers can distinguish views from real loaded profiles.
+
+#### `create_view(profile_id, name?, hide_frames?, hide_modules?, collapse_recursion?, rename?) -> { profile_id, description, evicted }`
+
+Build a derived view of a loaded profile that lazily transforms aggregations.
+The base profile's raw tables are shared via `Arc`, so a view costs only the hash-map entry and the `Transforms` value.
+Every other tool (`top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`, `compare_profiles`, ...) accepts the returned `profile_id` and applies the transforms during aggregation.
+
+Transforms:
+
+* `hide_frames: [string]` drops frames whose function name matches; substring by default, `re:` prefix for regex.
+* `hide_modules: [string]` drops frames whose module name matches.
+* `collapse_recursion: bool` collapses runs of consecutive same-symbol frames to one frame; set when a recursive call dominates.
+* `rename: [string]` rewrites function names; each entry is `re:<pattern> => <replacement>` so the ` => ` separator is unambiguous.
+
+The order of application is fixed: hide, then rename, then collapse, after frame resolution and inline expansion.
+
+`create_view` is idempotent: a second call with identical `(base_id, transforms)` returns the existing view's id and reuses its `ProfileSession`.
+`unload_profile(view_id)` frees the view without touching the base.
+
+Eviction: the LRU loop in `create_view` skips the view's base, so registering a view never evicts the profile it depends on (transient over-capacity is accepted).
+A subsequent unrelated `load_profile` call can still evict the base; in that case the view's id remains queryable as long as either side holds an `Arc<ProfileSession>` reference to the underlying `Arc<RawProfile>`.
 
 #### `summary(profile_id, thread?, process?, time_range?) -> Summary`
 
@@ -600,6 +622,7 @@ Two layered mechanisms:
    environment variable. When `load_profile` would exceed N, the
    least-recently-touched profile is evicted. Eviction is logged to the
    server's stderr.
+   A view's base is exempt from this loop while the view is registered: registering a view never evicts the profile it depends on.
 
 Tool calls referencing an evicted id return `profile_evicted` with the
 original path, letting the LLM re-load on demand. Re-loading triggers
