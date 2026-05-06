@@ -1,0 +1,45 @@
+name: Release plugin
+
+# Triggers when release-plz pushes a `v*` tag for a pollard release.
+# Packages the Claude Code plugin bundle (.claude-plugin/, skills/,
+# README, LICENSE-*) into a `.skill` zip and attaches it to the
+# release release-plz already created — so MCP-only users keep the
+# crates.io install path while plugin users get a one-shot artifact.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Verify version tag matches plugin manifests
+        env:
+          REF: ${{ github.ref_name }}
+        run: |
+          tag_version="${REF#v}"
+          plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
+          marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
+          if [ "$tag_version" != "$plugin_version" ] || [ "$tag_version" != "$marketplace_version" ]; then
+            echo "::error::Tag $REF (version $tag_version) disagrees with plugin.json ($plugin_version) / marketplace.json ($marketplace_version). Bump both manifests in the release-plz PR before tagging."
+            exit 1
+          fi
+
+      - name: Package plugin
+        run: |
+          mkdir -p dist
+          zip -r "dist/pollard.skill" \
+            .claude-plugin/ skills/ LICENSE-APACHE LICENSE-MIT README.md
+
+      - name: Upload to release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          files: dist/*.skill

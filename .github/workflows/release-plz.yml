@@ -24,7 +24,53 @@ jobs:
           fetch-depth: 0
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
-      - name: Run release-plz
+      - name: release-plz - update release PR
         uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # release-plz force-pushes the release branch on every run, so this
+      # follow-up commit is reapplied after each release-pr step rather
+      # than persisting across runs. The plugin-release workflow's
+      # verify-tag check is the safety net if this step ever fails.
+      - name: Sync plugin manifest versions to Cargo.toml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_branch=$(gh pr list --label release --state open --base main \
+            --json headRefName --jq '.[0].headRefName // empty')
+          if [ -z "$pr_branch" ]; then
+            echo "No open release-plz PR; nothing to sync."
+            exit 0
+          fi
+          git fetch origin "$pr_branch"
+          git checkout "$pr_branch"
+          cargo_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "pollard") | .version')
+          plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
+          marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
+          if [ "$cargo_version" = "$plugin_version" ] && [ "$cargo_version" = "$marketplace_version" ]; then
+            echo "Plugin manifests already at v${cargo_version}."
+            exit 0
+          fi
+          jq --arg v "$cargo_version" '.version = $v' \
+            .claude-plugin/plugin.json > .claude-plugin/plugin.json.tmp
+          mv .claude-plugin/plugin.json.tmp .claude-plugin/plugin.json
+          jq --arg v "$cargo_version" '.plugins[0].version = $v' \
+            .claude-plugin/marketplace.json > .claude-plugin/marketplace.json.tmp
+          mv .claude-plugin/marketplace.json.tmp .claude-plugin/marketplace.json
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add .claude-plugin/plugin.json .claude-plugin/marketplace.json
+          git commit -m "chore: sync plugin manifests to v${cargo_version}"
+          git push origin "$pr_branch"
+
+      - name: release-plz - publish on merged release
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

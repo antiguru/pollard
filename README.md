@@ -31,27 +31,57 @@ hardware counter instead.
 `top_groups` currently aggregates samples only.
 
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
+See `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` for
+copy-paste `hide_modules` / `hide_frames` regex sets covering common
+Rust noise (tracing-subscriber, tokio internals, stdlib glue). The same
+cookbook ships as the `pollard:view-presets` skill — see
+`.claude-plugin/` for the bundled plugin layout that registers both the
+MCP server and the skills.
 
 ## Install
+
+The `pollard` binary always has to be on your `PATH` — the plugin
+bundle does not ship it. Install with cargo:
 
 ```sh
 cargo install pollard
 ```
 
-Or install the latest from this repository:
+Or build the latest from this repository:
 
 ```sh
 cargo install --git https://github.com/antiguru/pollard
 ```
 
-Either form puts a `pollard` binary on your `PATH`.
-Register it with Claude Code as a user-scoped MCP server:
+Then pick one of two ways to register pollard with Claude Code.
+
+### Option 1 — Claude Code plugin (recommended)
+
+Installs the MCP server *and* the bundled skills (`profile-recording`,
+`view-presets`, `pollard-doctor`) in one step:
+
+```text
+/plugin marketplace add antiguru/pollard
+/plugin install pollard@antiguru
+```
+
+Skills surface as `/pollard:<skill>` alongside everything else the
+user has installed. If a tool call fails after install, run
+`/pollard:pollard-doctor` — the doctor walks the install in dependency
+order and surfaces the exact remediation.
+
+### Option 2 — MCP server only
+
+If you only want the tools and not the skills, register the binary
+directly as a user-scoped MCP server:
 
 ```sh
 claude mcp add pollard pollard --scope user
 ```
 
-After that, `load_profile`, `top_functions`, `call_tree` and the rest of the tools listed above are available in any Claude Code session.
+Either path makes `load_profile`, `top_functions`, `call_tree` and
+the rest of the tools listed above available in any Claude Code
+session.
 
 ## Build from source
 
