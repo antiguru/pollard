@@ -89,6 +89,29 @@ impl ProfileSession {
     pub fn lib_outcomes(&self) -> &[LibSymbolicationOutcome] {
         &self.lib_outcomes
     }
+
+    /// Build a derived session that shares the base's raw tables but
+    /// applies its own transforms. Lib outcomes are inherited verbatim.
+    pub fn view(
+        base: &ProfileSession,
+        view_id: String,
+        name: String,
+        transforms: crate::profile::transforms::Transforms,
+    ) -> Self {
+        let view_profile =
+            std::sync::Arc::new(crate::profile::Profile::view(base.profile(), transforms));
+        Self {
+            id: view_id,
+            name,
+            // Path is the *base* path; views are not on disk but reusing
+            // the base path keeps `re-load by path` working when the view
+            // is evicted (re-loading drops the view, restores the base).
+            path: base.path().to_path_buf(),
+            profile: view_profile,
+            unsymbolicated_pct: base.unsymbolicated_pct(),
+            lib_outcomes: base.lib_outcomes().to_vec(),
+        }
+    }
 }
 
 #[allow(dead_code)]
