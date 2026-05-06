@@ -1,6 +1,6 @@
 ---
 name: view-presets
-description: Apply canonical hide_modules / hide_frames regex sets to a loaded profile via pollard's create_view. Use when a Rust profile is dominated by framework noise — tracing-subscriber Layered walls, tokio runtime internals, or Rust stdlib glue (drop, format, panic) — and you want to focus on user code.
+description: Applies canonical hide_modules / hide_frames regex sets to a loaded profile via pollard's create_view. Use when a Rust profile is dominated by framework noise — tracing-subscriber Layered walls, tokio runtime internals, or Rust stdlib glue (drop, format, panic) — and you want to focus on user code.
 ---
 
 # View presets for pollard

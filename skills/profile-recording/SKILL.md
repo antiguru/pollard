@@ -1,6 +1,6 @@
 ---
 name: profile-recording
-description: Record a performance profile with samply (or convert an existing perf.data via samply import) and load it into pollard for analysis. Use when the user wants to profile a binary, a one-shot command, an already-running process, or analyze an existing perf.data file.
+description: Records a performance profile with samply (or converts an existing perf.data via samply import) and loads it into pollard for analysis. Use when the user wants to profile a binary, a one-shot command, an already-running process, or analyze an existing perf.data file.
 ---
 
 # Recording a profile for pollard

@@ -700,6 +700,8 @@ skills/
 
 Skill content is hand-maintained and intentionally short. `view-presets` mirrors the cookbook in `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` rather than embedding the whole doc verbatim — the doc covers more rationale than the agent needs at invocation time, while the skill is tuned to be paste-ready.
 
+The duplication is deliberate but creates drift risk. The convention: when adding or revising a regex set, edit the cookbook first (it carries the rationale), then port the new block into `skills/view-presets/SKILL.md` stripped of the meta-discussion. Reviewers should reject changes to one without the other when the regex content itself moves; pure rationale tweaks stay in the cookbook only.
+
 ## Project setup
 
 The repository structure, lints, and CI follow the patterns established in

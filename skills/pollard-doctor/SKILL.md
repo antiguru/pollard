@@ -1,6 +1,6 @@
 ---
 name: pollard-doctor
-description: Diagnose a broken pollard install — MCP server unreachable, missing binaries, profile load failures, unsymbolicated frames. Use when any pollard tool call fails, when load_profile errors out, or when the user reports "the profiler isn't working."
+description: Diagnoses a broken pollard install — MCP server unreachable, missing binaries, profile load failures, unsymbolicated frames. Use when any pollard tool call fails, when load_profile errors out, or when the user reports "the profiler isn't working."
 ---
 
 # Pollard doctor
