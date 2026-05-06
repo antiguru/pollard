@@ -111,16 +111,6 @@ pub struct DescribeViewArgs {
 }
 
 #[derive(Serialize, JsonSchema)]
-pub struct ViewPresetsResult {
-    /// Markdown cookbook of canonical `hide_modules` / `hide_frames`
-    /// regex sets for `create_view`. Source of truth lives in
-    /// `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md`
-    /// and is embedded via `include_str!` so this tool always matches
-    /// the doc shipped with the binary.
-    pub cookbook: &'static str,
-}
-
-#[derive(Serialize, JsonSchema)]
 pub struct DescribeViewResult {
     pub profile_id: String,
     /// Immediate parent profile id. For a view stacked on another view
@@ -218,9 +208,7 @@ impl PollardServer {
         narrower per-call `time_range` but rejects a wider one). Same syntax as the per-call \
         filter args. \
         Re-creating the same view returns the same id; unload_profile frees a view without \
-        touching the base. \
-        Call `view_presets` for copy-paste `hide_modules` / `hide_frames` regex sets covering \
-        common Rust noise (tracing-subscriber walls, tokio runtime internals, stdlib glue)."
+        touching the base."
     )]
     pub async fn create_view(
         &self,
@@ -315,25 +303,6 @@ impl PollardServer {
             scope,
             rule_stats: stats.rule_stats,
             total_base_samples: stats.total_base_samples,
-        }))
-    }
-
-    #[tool(
-        description = "Return a markdown cookbook of canonical `hide_modules` / `hide_frames` \
-        regex sets for `create_view`. Covers the three families that keep getting rewritten on \
-        every Rust profile: `tracing-subscriber` `Layered<…>` walls, `tokio` runtime internals \
-        (scheduler, poll loop, timer wheel, mio), and Rust stdlib glue (drop_in_place, format, \
-        panic / unwind). \
-        Call this before composing a `create_view` invocation, paste the relevant blocks into \
-        `hide_modules` / `hide_frames`, then check `rule_stats` to confirm each pattern matched \
-        something. The cookbook is documentation, not a curated list of named presets — drop \
-        rules that don't help on your profile and add project-specific ones on a stacked view."
-    )]
-    pub async fn view_presets(&self) -> Result<Json<ViewPresetsResult>, rmcp::ErrorData> {
-        Ok(Json(ViewPresetsResult {
-            cookbook: include_str!(
-                "../../docs/superpowers/specs/2026-05-06-view-presets-cookbook.md"
-            ),
         }))
     }
 }

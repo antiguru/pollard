@@ -164,13 +164,7 @@ A subsequent unrelated `load_profile` call can still evict the base; the view's 
 A rule with `frames_matched: 0` is the typo signal — without it, callers can only infer mistyped patterns by running downstream tools and noticing nothing changed.
 The flat list includes inherited parent rules when stacking views; `total_base_samples` is the denominator for the `samples_affected` shares.
 
-For canonical `hide_modules` / `hide_frames` regex sets (tracing-subscriber, tokio runtime, Rust stdlib glue), see the cookbook in `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md`. The `view_presets` MCP tool returns the same markdown verbatim (`include_str!`-embedded), so MCP clients that can't read the repo still have the cookbook one tool call away. Kept as docs rather than a `presets=[name]` argument so the curated content can drift with upstream crates without baking yesterday's noise filters into the binary.
-
-#### `view_presets() -> { cookbook: string }`
-
-Returns the markdown cookbook of canonical `hide_modules` / `hide_frames` regex sets, embedded at compile time from `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md`.
-Lets MCP clients reach the cookbook content without filesystem access to the repo.
-The doc is the source of truth — this tool is a transport for it, not a separate curated list.
+For canonical `hide_modules` / `hide_frames` regex sets (tracing-subscriber, tokio runtime, Rust stdlib glue), see the cookbook in `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md`. The same cookbook is announced through the `view-presets` Claude skill bundled in `.claude-plugin/` — see *Plugin layout* below. Kept as docs (and a skill that mirrors the doc) rather than a `presets=[name]` argument on `create_view` so the curated content can drift with upstream crates without baking yesterday's noise filters into the binary.
 
 #### `describe_view(profile_id) -> { profile_id, base_profile_id, transforms, rule_stats, total_base_samples }`
 
@@ -685,6 +679,26 @@ Two implications:
   immutable parsed profile). No global locks in the hot path.
 - `load_profile` for two different paths runs concurrently. Loading the
   same path twice deduplicates: the second call awaits the first.
+
+## Plugin layout
+
+The repo doubles as a Claude Code plugin so installing pollard registers both the MCP server and the bundled skills in one step. The MCP server alone gives the agent the *tools*; the skills give it discoverable *workflows* that name those tools — solving the "MCP servers don't announce themselves" problem.
+
+Layout at the repo root:
+
+```
+.claude-plugin/
+  plugin.json              # MCP server registration; minimal manifest
+skills/
+  profile-recording/
+    SKILL.md               # samply record / samply import / load_profile
+  view-presets/
+    SKILL.md               # cookbook regex sets for create_view
+```
+
+`plugin.json` registers the `pollard` binary as an `mcpServers` entry — installation assumes the binary is on `PATH` (standard `cargo install pollard` outcome). Skills are auto-discovered from `skills/<name>/SKILL.md` under the plugin root, no separate registration step.
+
+Skill content is hand-maintained and intentionally short. `view-presets` mirrors the cookbook in `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` rather than embedding the whole doc verbatim — the doc covers more rationale than the agent needs at invocation time, while the skill is tuned to be paste-ready.
 
 ## Project setup
 

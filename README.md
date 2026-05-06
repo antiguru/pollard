@@ -14,10 +14,10 @@ Early development. Published to [crates.io](https://crates.io/crates/pollard).
 
 ## Tools
 
-`pollard` exposes 17 MCP tools:
+`pollard` exposes 16 MCP tools:
 
 * **Lifecycle:** `load_profile`, `unload_profile`, `list_profiles`,
-  `create_view`, `describe_profile`, `summary`, `view_presets`
+  `create_view`, `describe_profile`, `summary`
 * **Query:** `top_functions`, `top_groups`, `call_tree`, `stacks_containing`,
   `folded_stacks`, `compare_profiles`
 * **Drill-down:** `source_for_function`, `asm_for_function`,
@@ -31,11 +31,12 @@ hardware counter instead.
 `top_groups` currently aggregates samples only.
 
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
-The `view_presets` tool returns a copy-paste cookbook of `hide_modules`
-/ `hide_frames` regex sets covering common Rust noise (tracing-subscriber,
-tokio internals, stdlib glue) — embedded from
-`docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` so the doc
-and the tool always agree.
+See `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` for
+copy-paste `hide_modules` / `hide_frames` regex sets covering common
+Rust noise (tracing-subscriber, tokio internals, stdlib glue). The same
+cookbook ships as the `pollard:view-presets` skill — see
+`.claude-plugin/` for the bundled plugin layout that registers both the
+MCP server and the skills.
 
 ## Install
 

@@ -1,0 +1,25 @@
+{
+  "name": "pollard",
+  "version": "0.0.5",
+  "description": "Read Firefox-format performance profiles (samply, perf-imported) from Claude Code via an MCP server. Bundles skills for the canonical recording workflow and view-preset cookbook.",
+  "author": {
+    "name": "antiguru",
+    "url": "https://github.com/antiguru"
+  },
+  "homepage": "https://github.com/antiguru/pollard",
+  "repository": "https://github.com/antiguru/pollard",
+  "license": "MIT OR Apache-2.0",
+  "keywords": [
+    "profiling",
+    "mcp",
+    "samply",
+    "firefox-profiler",
+    "perf"
+  ],
+  "mcpServers": {
+    "pollard": {
+      "command": "pollard",
+      "args": []
+    }
+  }
+}
