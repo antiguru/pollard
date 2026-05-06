@@ -48,7 +48,8 @@ jobs:
           fi
           git fetch origin "$pr_branch"
           git checkout "$pr_branch"
-          cargo_version=$(grep '^version = ' Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
+          cargo_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "pollard") | .version')
           plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
           marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
           if [ "$cargo_version" = "$plugin_version" ] && [ "$cargo_version" = "$marketplace_version" ]; then
