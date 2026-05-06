@@ -138,7 +138,7 @@ Each entry on a derived view also carries `base_profile_id`, so callers can dist
 #### `create_view(profile_id, name?, hide_frames?, hide_modules?, collapse_recursion?, rename?) -> { profile_id, description, evicted }`
 
 Build a derived view of a loaded profile that lazily transforms aggregations.
-The base profile's raw tables are shared via `Arc`, so a view costs only the hash-map entry and the `Transforms` value.
+The base profile's raw frame, string, and stack tables are Arc-shared, so a view's marginal cost is the `Transforms` value plus per-thread / per-lib metadata — independent of sample count.
 Every other tool (`top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`, `compare_profiles`, ...) accepts the returned `profile_id` and applies the transforms during aggregation.
 
 Transforms:
@@ -154,7 +154,7 @@ The order of application is fixed: hide, then rename, then collapse, after frame
 `unload_profile(view_id)` frees the view without touching the base.
 
 Eviction: the LRU loop in `create_view` skips the view's base, so registering a view never evicts the profile it depends on (transient over-capacity is accepted).
-A subsequent unrelated `load_profile` call can still evict the base; in that case the view's id remains queryable as long as either side holds an `Arc<ProfileSession>` reference to the underlying `Arc<RawProfile>`.
+A subsequent unrelated `load_profile` call can still evict the base; the view's id then remains queryable because the view's own `Arc<ProfileSession>` keeps its `Arc<RawProfile>` (cloned from the base at view creation) alive.
 
 #### `summary(profile_id, thread?, process?, time_range?) -> Summary`
 
