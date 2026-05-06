@@ -367,13 +367,49 @@ impl Profile {
             }
         }
         if t.collapse_recursion {
-            // dedup_by closure is called for each pair (a=next, b=prev);
-            // returning true removes `a`, leaving the earlier (root-side)
-            // frame as the surviving representative of the run.
-            chain.dedup_by(|a, b| a.function == b.function && a.module == b.module);
+            collapse_cycles(chain, MAX_CYCLE_LEN);
         }
     }
+}
 
+/// Maximum cycle length `collapse_recursion` will fold. Covers
+/// depth-3 interleaved recursion (e.g. timely's `Subgraph::schedule
+/// → PerOperatorState::schedule → Subgraph::schedule …`) with
+/// headroom; longer cycles are left alone so unrelated work isn't
+/// folded into a phantom recurrence.
+const MAX_CYCLE_LEN: usize = 8;
+
+/// Collapse repeating adjacent cycles in `chain`, in place.
+///
+/// For each cycle length `k` from `max_len` down to `1`, scans
+/// left-to-right and drains a duplicate adjacent run of length `k`
+/// when found, staying at the same position so a tripled or
+/// quadrupled cycle collapses fully in one pass. Long-to-short
+/// ordering means a length-3 cycle wins over a coincidentally-equal
+/// length-1 sub-pattern when both apply. Equality is by
+/// `(function, module)` only; per-frame metadata (file/line/address)
+/// on the surviving copy is whichever the first occurrence carried.
+fn collapse_cycles(chain: &mut Vec<ResolvedFrame>, max_len: usize) {
+    fn frames_eq(a: &ResolvedFrame, b: &ResolvedFrame) -> bool {
+        a.function == b.function && a.module == b.module
+    }
+    fn slice_eq(a: &[ResolvedFrame], b: &[ResolvedFrame]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(x, y)| frames_eq(x, y))
+    }
+    for k in (1..=max_len).rev() {
+        let mut i = 0;
+        while i + 2 * k <= chain.len() {
+            if slice_eq(&chain[i..i + k], &chain[i + k..i + 2 * k]) {
+                chain.drain(i + k..i + 2 * k);
+                // Don't advance — same window may match again.
+            } else {
+                i += 1;
+            }
+        }
+    }
+}
+
+impl Profile {
     /// Iterate the stack-table indices that this thread contributes for
     /// the given event source. `Some(idx)` per sample/marker, `None` to
     /// skip (matching the existing `samples.stack: Vec<Option<usize>>`
@@ -657,5 +693,62 @@ mod tests {
             .map(|f| f.function)
             .collect();
         assert_eq!(names, vec!["main".to_owned(), "recurse".to_owned()]);
+    }
+
+    #[test]
+    fn resolved_chain_collapses_multi_function_cycle() {
+        use crate::profile::raw::RawProfile;
+        use crate::profile::transforms::Transforms;
+        // Stack chain (root-to-leaf): A → B → C → A → B → C → X.
+        // The (A,B,C) cycle repeats once, so collapse_recursion should
+        // reduce the chain to [A, B, C, X]. This is the timely case:
+        // alternating multi-frame cycles consecutive `dedup_by` could
+        // never fold.
+        let json = r#"{
+          "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+          "libs": [],
+          "threads": [{
+            "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+            "stringArray": ["A", "B", "C", "X"],
+            "frameTable": {"length": 4, "address": [-1, -1, -1, -1], "func": [0, 1, 2, 3], "category": [0, 0, 0, 0], "subcategory": [0, 0, 0, 0], "line": [null, null, null, null], "column": [null, null, null, null], "nativeSymbol": [null, null, null, null]},
+            "stackTable": {"length": 7, "frame": [0, 1, 2, 0, 1, 2, 3], "category": [0, 0, 0, 0, 0, 0, 0], "subcategory": [0, 0, 0, 0, 0, 0, 0], "prefix": [null, 0, 1, 2, 3, 4, 5]},
+            "samples": {"length": 1, "stack": [6], "time": [0.0]},
+            "funcTable": {"length": 4, "name": [0, 1, 2, 3], "isJS": [false, false, false, false], "relevantForJS": [false, false, false, false], "resource": [-1, -1, -1, -1], "fileName": [null, null, null, null], "lineNumber": [null, null, null, null], "columnNumber": [null, null, null, null]},
+            "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+            "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+          }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let base = Profile::from_raw(raw);
+        let view = Profile::view(
+            &base,
+            Transforms {
+                collapse_recursion: true,
+                ..Default::default()
+            },
+        );
+        let handle = view.threads().next().unwrap().handle();
+        let stack_idx = view
+            .stack_indices(
+                handle,
+                &crate::profile::event_source::EventSource::Samples,
+                None,
+            )
+            .find_map(|s| s)
+            .unwrap();
+        let names: Vec<String> = view
+            .resolved_chain(handle, stack_idx, false)
+            .into_iter()
+            .map(|f| f.function)
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                "A".to_owned(),
+                "B".to_owned(),
+                "C".to_owned(),
+                "X".to_owned()
+            ]
+        );
     }
 }

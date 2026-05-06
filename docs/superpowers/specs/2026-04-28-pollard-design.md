@@ -145,7 +145,7 @@ Transforms:
 
 * `hide_frames: [string]` drops frames whose function name matches; substring by default, `re:` prefix for regex.
 * `hide_modules: [string]` drops frames whose module name matches.
-* `collapse_recursion: bool` collapses runs of consecutive same-symbol frames to one frame; set when a recursive call dominates.
+* `collapse_recursion: bool` collapses repeating adjacent cycles up to length 8 in each stack; `[A, B, C, A, B, C, X]` becomes `[A, B, C, X]`. Equality is by `(function_name, module_name)`. Generalises the consecutive same-symbol case (cycle length 1) to multi-function recurrences such as timely's `Subgraph::schedule → PerOperatorState::schedule → Subgraph::schedule …`.
 * `rename: [string]` rewrites function names; each entry is `re:<pattern> => <replacement>` so the ` => ` separator is unambiguous.
 
 The order of application is fixed: hide, then rename, then collapse, after frame resolution and inline expansion.

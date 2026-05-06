@@ -16,9 +16,13 @@ pub struct Transforms {
     /// Compiled module-name matchers. Frames whose `module_name` matches
     /// any entry are dropped from the chain.
     pub hide_modules: Vec<FunctionMatcher>,
-    /// When true, runs of consecutive frames sharing
-    /// `(function_name, module_name)` collapse to a single frame in the
-    /// resolved chain.
+    /// When true, repeating adjacent cycles in the resolved chain
+    /// collapse to one occurrence — `[A, B, C, A, B, C, X]` becomes
+    /// `[A, B, C, X]`. Cycles up to length 8 are detected; equality is by
+    /// `(function_name, module_name)`. This generalises the simple
+    /// "consecutive same-symbol frames" case (cycle length 1) to multi-
+    /// function recurrences such as timely's `Subgraph::schedule
+    /// → PerOperatorState::schedule → Subgraph::schedule …`.
     pub collapse_recursion: bool,
     /// Rename rules applied to `function_name` after hide filters and
     /// before recursion collapse.

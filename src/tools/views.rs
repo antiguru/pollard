@@ -31,8 +31,10 @@ pub struct CreateViewArgs {
     /// Substring by default; prefix with `re:` for a regex.
     #[serde(default)]
     pub hide_modules: Vec<String>,
-    /// When true, runs of consecutive same-symbol frames collapse to one
-    /// frame in every aggregation.
+    /// When true, repeating adjacent cycles in each stack collapse to one
+    /// occurrence — `[A, B, C, A, B, C, X]` becomes `[A, B, C, X]`.
+    /// Cycles up to length 8 are detected; the simple consecutive
+    /// same-symbol case is just length 1.
     #[serde(default)]
     pub collapse_recursion: bool,
     /// Function-name rename rules. Each entry must be `re:<pattern> => <replacement>`.
@@ -62,13 +64,14 @@ impl PollardServer {
         description = "Create a derived view profile that lazily transforms an existing profile. \
         Returns a new `profile_id` you can pass to any other tool. Views share the base profile's \
         raw tables (no extra memory cost) and apply transforms during aggregation: hide frames by \
-        name or module, collapse consecutive recursion, and merge symbols via rename rules. \
+        name or module, collapse repeating cycles in stacks, and merge symbols via rename rules. \
         Argument syntax: `hide_frames` and `hide_modules` use substring match by default; \
         prefix a pattern with `re:` for a regex (e.g. `re:^tokio::`). \
         `rename` rules use the form `re:<pattern> => <replacement>` — the `re:` prefix is \
         required so the ` => ` separator is unambiguous. \
-        Set `collapse_recursion=true` when a recursive call dominates and each recursion site \
-        should count as one frame in every aggregation. \
+        Set `collapse_recursion=true` when a recurrence dominates and each occurrence should \
+        count as one. Repeating adjacent cycles up to length 8 collapse: `[A,B,C,A,B,C,X]` \
+        becomes `[A,B,C,X]`. \
         Re-creating the same view returns the same id; unload_profile frees a view without \
         touching the base."
     )]
