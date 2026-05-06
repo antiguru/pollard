@@ -263,7 +263,11 @@ mod tests {
             },
         );
         let stats = compute_view_stats(&view);
-        let r = stats.rule_stats.iter().find(|r| r.kind == "hide_frames").unwrap();
+        let r = stats
+            .rule_stats
+            .iter()
+            .find(|r| r.kind == "hide_frames")
+            .unwrap();
         assert_eq!(r.pattern, "d");
         assert!(r.frames_matched > 0, "rule should match at least once");
         assert!(r.samples_affected > 0);
@@ -281,7 +285,11 @@ mod tests {
             },
         );
         let stats = compute_view_stats(&view);
-        let r = stats.rule_stats.iter().find(|r| r.kind == "hide_frames").unwrap();
+        let r = stats
+            .rule_stats
+            .iter()
+            .find(|r| r.kind == "hide_frames")
+            .unwrap();
         assert_eq!(r.frames_matched, 0);
         assert_eq!(r.samples_affected, 0);
     }
@@ -300,7 +308,11 @@ mod tests {
             },
         );
         let stats = compute_view_stats(&view);
-        let r = stats.rule_stats.iter().find(|r| r.kind == "rename").unwrap();
+        let r = stats
+            .rule_stats
+            .iter()
+            .find(|r| r.kind == "rename")
+            .unwrap();
         assert_eq!(r.pattern, "d => leaf");
         assert!(r.frames_matched > 0);
     }
