@@ -2,7 +2,8 @@
 //!
 //! Computed once at view-create time so callers can confirm each rule
 //! actually fired. Silent zero-match rules typically signal a typo in
-//! `hide_frames` / `hide_modules` / `rename` — without this counter
+//! `hide_frames` / `hide_modules` / `keep_only_frames` /
+//! `keep_only_modules` / `rename` — without this counter
 //! users can only infer the miss by running downstream tools and
 //! noticing nothing changed.
 
@@ -19,8 +20,9 @@ pub struct RuleStat {
     /// Index within the rule's kind list (0-based). For `collapse_recursion`
     /// always 0 — there's only one such rule per composed transform.
     pub rule_index: usize,
-    /// `"hide_frames"`, `"hide_modules"`, `"rename"`,
-    /// `"strip_type_params"`, or `"collapse_recursion"`.
+    /// `"hide_frames"`, `"hide_modules"`, `"keep_only_frames"`,
+    /// `"keep_only_modules"`, `"rename"`, `"strip_type_params"`, or
+    /// `"collapse_recursion"`.
     pub kind: String,
     /// User-facing pattern: `re:<regex>` for regex matchers, raw
     /// substring for substring matchers, `<matcher> => <replacement>`
@@ -78,6 +80,10 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
     let mut hf_samples: Vec<u64> = vec![0; t.hide_frames.len()];
     let mut hm_frames: Vec<u64> = vec![0; t.hide_modules.len()];
     let mut hm_samples: Vec<u64> = vec![0; t.hide_modules.len()];
+    let mut kf_frames: Vec<u64> = vec![0; t.keep_only_frames.len()];
+    let mut kf_samples: Vec<u64> = vec![0; t.keep_only_frames.len()];
+    let mut km_frames: Vec<u64> = vec![0; t.keep_only_modules.len()];
+    let mut km_samples: Vec<u64> = vec![0; t.keep_only_modules.len()];
     let mut rn_frames: Vec<u64> = vec![0; t.rename.len()];
     let mut rn_samples: Vec<u64> = vec![0; t.rename.len()];
     let mut cl_frames: u64 = 0;
@@ -111,6 +117,63 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
                     column: info.column,
                     address: info.address,
                 });
+            }
+
+            // Keep-only pass. Mirrors `apply_keep_only`: a frame
+            // survives iff any rule matches; runs of non-matching
+            // frames collapse to a single placeholder. Diagnostics
+            // count every matching rule independently for both
+            // counters, matching the hide-pass shape so an overlap
+            // between two patterns shows up as both rules' work.
+            if !t.keep_only_frames.is_empty() || !t.keep_only_modules.is_empty() {
+                let mut kf_seen = vec![false; t.keep_only_frames.len()];
+                let mut km_seen = vec![false; t.keep_only_modules.len()];
+                let mut kept: Vec<ResolvedFrame> = Vec::with_capacity(chain.len());
+                let mut in_run = false;
+                for f in chain.drain(..) {
+                    let mut keep = false;
+                    for (i, m) in t.keep_only_frames.iter().enumerate() {
+                        if m.matches(&f.function) {
+                            kf_frames[i] += 1;
+                            kf_seen[i] = true;
+                            keep = true;
+                        }
+                    }
+                    if let Some(mm) = f.module.as_deref() {
+                        for (i, mp) in t.keep_only_modules.iter().enumerate() {
+                            if mp.matches(mm) {
+                                km_frames[i] += 1;
+                                km_seen[i] = true;
+                                keep = true;
+                            }
+                        }
+                    }
+                    if keep {
+                        kept.push(f);
+                        in_run = false;
+                    } else if !in_run {
+                        kept.push(ResolvedFrame {
+                            function: crate::profile::transforms::KEEP_ONLY_PLACEHOLDER.to_owned(),
+                            module: None,
+                            file: None,
+                            line: None,
+                            column: None,
+                            address: None,
+                        });
+                        in_run = true;
+                    }
+                }
+                chain = kept;
+                for (i, &seen) in kf_seen.iter().enumerate() {
+                    if seen {
+                        kf_samples[i] += 1;
+                    }
+                }
+                for (i, &seen) in km_seen.iter().enumerate() {
+                    if seen {
+                        km_samples[i] += 1;
+                    }
+                }
             }
 
             // Hide pass. Production semantics: a frame is dropped if
@@ -203,6 +266,24 @@ pub fn compute_view_stats(profile: &Profile) -> ViewStats {
     }
 
     let mut rule_stats: Vec<RuleStat> = Vec::new();
+    for (i, m) in t.keep_only_frames.iter().enumerate() {
+        rule_stats.push(RuleStat {
+            rule_index: i,
+            kind: "keep_only_frames".to_owned(),
+            pattern: matcher_to_string(m),
+            frames_matched: kf_frames[i],
+            samples_affected: kf_samples[i],
+        });
+    }
+    for (i, m) in t.keep_only_modules.iter().enumerate() {
+        rule_stats.push(RuleStat {
+            rule_index: i,
+            kind: "keep_only_modules".to_owned(),
+            pattern: matcher_to_string(m),
+            frames_matched: km_frames[i],
+            samples_affected: km_samples[i],
+        });
+    }
     for (i, m) in t.hide_frames.iter().enumerate() {
         rule_stats.push(RuleStat {
             rule_index: i,
@@ -362,6 +443,48 @@ mod tests {
             .filter(|r| r.kind == "strip_type_params")
             .count();
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn keep_only_frames_rule_counts_kept_frames() {
+        let base = linear_profile();
+        let view = Profile::view(
+            &base,
+            Transforms {
+                keep_only_frames: vec![FunctionMatcher::new("c").unwrap()],
+                ..Default::default()
+            },
+        );
+        let stats = compute_view_stats(&view);
+        let r = stats
+            .rule_stats
+            .iter()
+            .find(|r| r.kind == "keep_only_frames")
+            .unwrap();
+        assert_eq!(r.pattern, "c");
+        // linear_chain has 100 samples, each with frame c once.
+        assert_eq!(r.frames_matched, 100);
+        assert_eq!(r.samples_affected, 100);
+    }
+
+    #[test]
+    fn keep_only_typo_reports_zero_matches() {
+        let base = linear_profile();
+        let view = Profile::view(
+            &base,
+            Transforms {
+                keep_only_frames: vec![FunctionMatcher::new("notarealframename").unwrap()],
+                ..Default::default()
+            },
+        );
+        let stats = compute_view_stats(&view);
+        let r = stats
+            .rule_stats
+            .iter()
+            .find(|r| r.kind == "keep_only_frames")
+            .unwrap();
+        assert_eq!(r.frames_matched, 0);
+        assert_eq!(r.samples_affected, 0);
     }
 
     #[test]
