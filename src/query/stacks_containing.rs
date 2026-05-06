@@ -68,21 +68,18 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
         {
             let Some(stack_idx) = stack_opt else { continue };
             total_samples += 1;
-            let mut frames: Vec<(String, Option<String>, bool)> = Vec::new();
+            // resolved_chain is root-to-leaf with view transforms applied,
+            // matching the orientation this listing wants to emit.
             let mut any_match = false;
-            for frame_idx in profile.walk_stack(handle, stack_idx) {
-                if let Some(info) = profile.frame_info(handle, frame_idx) {
-                    let m = matcher.matches(info.function_name);
+            let frames: Vec<(String, Option<String>, bool)> = profile
+                .resolved_chain(handle, stack_idx, false)
+                .into_iter()
+                .map(|f| {
+                    let m = matcher.matches(&f.function);
                     any_match |= m;
-                    frames.push((
-                        info.function_name.to_owned(),
-                        info.module_name.map(str::to_owned),
-                        m,
-                    ));
-                }
-            }
-            // walk_stack is leaf-to-root; reverse to root-to-leaf
-            frames.reverse();
+                    (f.function, f.module, m)
+                })
+                .collect();
             if any_match {
                 matched_frame_samples += 1;
                 *counts.entry(frames).or_default() += 1;
