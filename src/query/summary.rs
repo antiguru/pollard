@@ -67,6 +67,16 @@ pub struct Output {
     pub top_modules: Vec<ModuleEntry>,
     pub top_self_functions: Vec<FunctionEntry>,
     pub top_total_functions: Vec<FunctionEntry>,
+    /// Discoverability nudges toward `create_view` when a heuristic fires
+    /// against the summary as it stands. Each entry is a one-line human-
+    /// readable hint naming the transform argument that would help.
+    /// Triggers (cheap, one heuristic per hint, computed during summary):
+    /// dominant function looks recursive (`collapse_recursion`), a single
+    /// module dominates the stacks (`hide_modules`), and frame names
+    /// carry generic / type parameters (`strip_type_params`). Empty when
+    /// nothing fires. See issue #93.
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
+    pub hints: Vec<String>,
     /// Per-lib symbolication outcomes worth flagging — non-`Loaded`
     /// libs, plus loaded libs whose every address lookup missed (a
     /// stale-binary signature; see issue #80). Empty when every lib
@@ -184,6 +194,14 @@ pub fn summary(
         },
     )?;
 
+    let hints = compute_hints(
+        profile,
+        &filter_args,
+        &by_total.functions,
+        &by_self.functions,
+        &top_modules,
+    );
+
     Ok(Output {
         profile_id: desc.profile_id,
         name: desc.name,
@@ -201,12 +219,107 @@ pub fn summary(
         top_modules,
         top_self_functions: by_self.functions,
         top_total_functions: by_total.functions,
+        hints,
         // Filled in by the lifecycle tool wrapper, which has access to
         // [`crate::session::ProfileSession::lib_outcomes`]. Default
         // empty so non-tool callers (tests, ad-hoc diagnostics) don't
         // need to think about it.
         lib_diagnostics: Vec::new(),
     })
+}
+
+/// Threshold (% of stacks) above which the dominant function triggers a
+/// recursion check against the stack walk.
+const RECURSION_DOMINANCE_PCT: f32 = 30.0;
+/// Threshold (% of stacks) above which the leading module triggers the
+/// `hide_modules` hint.
+const MODULE_DOMINANCE_PCT: f32 = 40.0;
+
+/// Build the `hints` payload from already-computed summary slices.
+///
+/// One heuristic per hint, no extra full traversal — only the recursion
+/// probe touches the stack table, and only when the dominant function
+/// already crosses [`RECURSION_DOMINANCE_PCT`]. Hints are skipped
+/// silently when the relevant slice is empty (e.g. an unsymbolicated
+/// recording with no top function), so the field stays absent in
+/// degenerate cases instead of emitting noise.
+fn compute_hints(
+    profile: &Profile,
+    filter: &Filter,
+    by_total: &[FunctionEntry],
+    by_self: &[FunctionEntry],
+    top_modules: &[ModuleEntry],
+) -> Vec<String> {
+    let mut hints = Vec::new();
+
+    if let Some(top) = by_total.first()
+        && top.total_pct > RECURSION_DOMINANCE_PCT
+        && function_recurs_in_any_stack(profile, filter, &top.function)
+    {
+        hints.push(format!(
+            "{} looks recursive — try create_view(collapse_recursion=true)",
+            top.function
+        ));
+    }
+
+    if let Some(m) = top_modules.first()
+        && m.total_pct > MODULE_DOMINANCE_PCT
+    {
+        hints.push(format!(
+            "module {} dominates ({:.0}% of stacks) — try create_view(hide_modules=[\"{}\"]) to focus on application code",
+            m.module, m.total_pct, m.module
+        ));
+    }
+
+    if by_self
+        .iter()
+        .chain(by_total.iter())
+        .any(|f| has_type_params(&f.function))
+    {
+        hints.push(
+            "frame names carry type parameters — try create_view(strip_type_params=true) to normalize".into(),
+        );
+    }
+
+    hints
+}
+
+/// True iff `name` contains a balanced or unbalanced `<…>` segment —
+/// a `<` followed (eventually) by a `>` in the same string. Cheap
+/// substring-only check; the actual `strip_type_params` transform
+/// uses a depth counter on apply.
+fn has_type_params(name: &str) -> bool {
+    match name.find('<') {
+        Some(i) => name[i + 1..].contains('>'),
+        None => false,
+    }
+}
+
+/// Return true if `name` appears at two or more frame positions in any
+/// single stack under the filter. Walks `stack_indices` lazily and
+/// short-circuits on the first stack that satisfies the predicate, so
+/// the cost is bounded by "stacks visited until a recurrence is found"
+/// rather than the full profile.
+fn function_recurs_in_any_stack(profile: &Profile, filter: &Filter, name: &str) -> bool {
+    use crate::query::event::EventSource;
+    for handle in filter.threads(profile) {
+        for stack_opt in profile.stack_indices(handle, &EventSource::Samples, filter.time_range) {
+            let Some(stack_idx) = stack_opt else { continue };
+            let mut hits = 0u32;
+            for frame_idx in profile.walk_stack(handle, stack_idx) {
+                let Some(info) = profile.frame_info(handle, frame_idx) else {
+                    continue;
+                };
+                if info.function_name == name {
+                    hits += 1;
+                    if hits >= 2 {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn bracket(pct: f32) -> &'static str {
@@ -764,5 +877,109 @@ mod tests {
         // Filtered duration is the span of the surviving samples, not
         // the full recording.
         assert_eq!(s.duration_ms, 20);
+    }
+
+    #[test]
+    fn has_type_params_detects_brackets() {
+        assert!(has_type_params("Vec<T>"));
+        assert!(has_type_params(
+            "OrdValBatch<RowRowLayout<((Row, Row), Ts, i64)>>"
+        ));
+        assert!(!has_type_params("plain_name"));
+        assert!(!has_type_params("a>b"));
+        assert!(!has_type_params(""));
+    }
+
+    #[test]
+    fn no_hints_when_top_function_is_not_recursive() {
+        // two_functions: `hot` carries 90% of samples but each stack is
+        // a single frame, so the recursion probe must say no — and with
+        // no modules / no `<>` in names, hints should be empty.
+        let profile = fixture("two_functions");
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
+        assert!(s.hints.is_empty(), "expected no hints, got {:?}", s.hints);
+    }
+
+    #[test]
+    fn recursion_hint_fires_on_recursive_dominant_function() {
+        // Three-deep self-call on `rec`: every stack contains `rec` at
+        // three frame positions. `rec`'s total_pct is 100%, well above
+        // the 30% gate, and the recursion probe trips on the first
+        // stack it visits.
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [{
+                "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": ["rec"],
+                "frameTable": {"length": 1, "address": [-1], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]},
+                "stackTable": {"length": 3, "frame": [0, 0, 0], "category": [0, 0, 0], "subcategory": [0, 0, 0], "prefix": [null, 0, 1]},
+                "samples": {"length": 4, "stack": [2, 2, 2, 2], "time": [0.0, 1.0, 2.0, 3.0]},
+                "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
+        assert!(
+            s.hints.iter().any(|h| h.contains("collapse_recursion")),
+            "expected a collapse_recursion hint, got {:?}",
+            s.hints
+        );
+    }
+
+    #[test]
+    fn type_params_hint_fires_when_frame_names_carry_brackets() {
+        // Single frame named `foo<T>` so a type-param hint trips off
+        // the top-functions list without needing a recursion or module
+        // signal.
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "product": "test"},
+            "libs": [],
+            "threads": [{
+                "name": "Main", "tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": ["foo<T>"],
+                "frameTable": {"length": 1, "address": [-1], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]},
+                "stackTable": {"length": 1, "frame": [0], "category": [0], "subcategory": [0], "prefix": [null]},
+                "samples": {"length": 2, "stack": [0, 0], "time": [0.0, 1.0]},
+                "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "nativeSymbols": {"length": 0, "libIndex": [], "address": [], "name": [], "functionSize": []}
+            }]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let profile = Profile::from_raw(raw);
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
+        assert!(
+            s.hints.iter().any(|h| h.contains("strip_type_params")),
+            "expected a strip_type_params hint, got {:?}",
+            s.hints
+        );
     }
 }
