@@ -67,6 +67,10 @@ pub struct Output {
     /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_processes: Option<Vec<ProcessRef>>,
+    /// Set when the response was trimmed to fit
+    /// `POLLARD_MAX_OUTPUT_BYTES`. See [`crate::tools::budget`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<crate::tools::budget::Truncated>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -74,8 +78,10 @@ pub struct GroupEntry {
     pub rank: usize,
     pub key: String,
     pub self_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub self_pct: f32,
     pub total_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub total_pct: f32,
 }
 
@@ -148,6 +154,7 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
         },
         groups,
         matched_processes: args.filter_args.bare_name_multi_match(profile),
+        truncated: None,
     })
 }
 

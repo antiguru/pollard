@@ -22,6 +22,7 @@ pub struct Args {
 pub struct Output {
     pub function_filter: String,
     pub matched_frame_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub matched_pct: f32,
     pub unique_stacks_total: usize,
     pub stacks_returned: usize,
@@ -31,11 +32,16 @@ pub struct Output {
     /// caller can disambiguate via `pid:N` or `pid:N.M` syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub matched_processes: Option<Vec<ProcessRef>>,
+    /// Set when the response was trimmed to fit
+    /// `POLLARD_MAX_OUTPUT_BYTES`. See [`crate::tools::budget`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<crate::tools::budget::Truncated>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct StackOutput {
     pub samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub pct: f32,
     pub frames: Vec<FrameOutput>,
 }
@@ -132,6 +138,7 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
         stacks_returned: stacks.len(),
         stacks,
         matched_processes: args.filter_args.bare_name_multi_match(profile),
+        truncated: None,
     })
 }
 

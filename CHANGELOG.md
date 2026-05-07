@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- output budget: `top_functions`, `top_groups`, `compare_profiles`,
+  `stacks_containing`, `folded_stacks`, and `call_tree` now trim their
+  responses to fit `POLLARD_MAX_OUTPUT_BYTES` (default ~25 KB) so the
+  caller harness's MCP token cap stops dropping payloads. Trimmed
+  responses surface a `truncated: { dropped, dropped_pct, budget_bytes,
+  final_bytes, still_over_budget }` field; rows are popped tail-first
+  and `call_tree` rolls dropped leaves into the parent's `Omitted`
+  summary.
+
+### Changed
+
+- `*_pct` columns serialize at one decimal and `*_ms` at two
+  decimals — the LLM never needed full f32/f64 precision and the
+  shorter rendering frees up budget for more rows.
+
 ## [0.0.8](https://github.com/antiguru/pollard/compare/v0.0.6...v0.0.8) - 2026-05-06
 
 Fix release by synchronizing versions. The work below actually
