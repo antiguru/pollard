@@ -49,11 +49,13 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # Zip into $RUNNER_TEMP rather than the working tree — the next
+      # `release-plz - update release PR` step refuses to run if the
+      # working directory has uncommitted changes.
       - name: Package plugin bundle
         if: steps.release.outputs.releases_created == 'true'
         run: |
-          mkdir -p dist
-          zip -r dist/pollard.skill \
+          zip -r "$RUNNER_TEMP/pollard.skill" \
             .claude-plugin/ skills/ LICENSE-APACHE LICENSE-MIT README.md
 
       - name: Upload plugin bundle to release
@@ -61,7 +63,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ fromJSON(steps.release.outputs.releases)[0].tag }}
-          files: dist/*.skill
+          files: ${{ runner.temp }}/pollard.skill
 
       - name: release-plz - update release PR
         id: release-pr
