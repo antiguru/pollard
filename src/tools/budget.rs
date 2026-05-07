@@ -32,15 +32,33 @@ use serde::Serialize;
 /// some margin for the LLM's own framing.
 pub const DEFAULT_BUDGET_BYTES: usize = 25_000;
 
-/// Resolve the active output byte budget. Reads
+/// Resolve the operator-side output byte ceiling. Reads
 /// `POLLARD_MAX_OUTPUT_BYTES` if set and parsable; otherwise returns
 /// [`DEFAULT_BUDGET_BYTES`]. Set the env var to `0` to disable
 /// trimming entirely (useful for tests / debugging).
+///
+/// This is the server-wide ceiling — the operator launching the MCP
+/// server picks it based on the harness's actual cap. Per-call
+/// `max_output_bytes` args narrow this further but cannot raise it,
+/// since the harness will reject anything above the ceiling
+/// regardless of what the caller asked for.
 pub fn output_budget_bytes() -> usize {
     std::env::var("POLLARD_MAX_OUTPUT_BYTES")
         .ok()
         .and_then(|s| s.parse::<usize>().ok())
         .unwrap_or(DEFAULT_BUDGET_BYTES)
+}
+
+/// Combine an operator-side ceiling with an optional per-call request.
+/// `request=Some(n)` clamps the budget to `min(n, ceiling)`; `None`
+/// uses the ceiling as-is. `request=Some(0)` disables trimming for
+/// the call (consistent with the env-var "0 disables" knob).
+pub fn resolve_budget(ceiling: usize, request: Option<usize>) -> usize {
+    match request {
+        Some(0) => 0,
+        Some(n) => n.min(ceiling),
+        None => ceiling,
+    }
 }
 
 /// Trimming summary attached to any response we had to shrink. The

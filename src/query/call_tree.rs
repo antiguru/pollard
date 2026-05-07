@@ -621,18 +621,36 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> us
         if let Node::Omitted { omitted } = &mut children[i] {
             omitted.count += 1;
             omitted.combined_pct += pct;
-            // top_omitted lists biggest contributors first. The leaf
-            // we just dropped is, by construction, the smallest
-            // remaining at this level — so it only displaces an
-            // existing entry when the cap hasn't been hit yet.
+            // top_omitted lists biggest contributors first. Successive
+            // budget-driven drops at the same level pull progressively
+            // *larger* leaves (we always drop the smallest remaining
+            // first), so once the cap fills we have to displace the
+            // smallest existing preview rather than discard the new
+            // one — otherwise the list ends up showing the smallest
+            // dropped frames, not the biggest.
             if omitted.top_omitted.len() < TOP_OMITTED_CAP {
                 omitted.top_omitted.push(preview);
-                omitted.top_omitted.sort_by(|a, b| {
-                    b.pct
-                        .partial_cmp(&a.pct)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+            } else {
+                let (min_idx, min_pct) = omitted
+                    .top_omitted
+                    .iter()
+                    .enumerate()
+                    .min_by(|(_, a), (_, b)| {
+                        a.pct
+                            .partial_cmp(&b.pct)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|(idx, p)| (idx, p.pct))
+                    .unwrap_or((0, f32::INFINITY));
+                if pct > min_pct {
+                    omitted.top_omitted[min_idx] = preview;
+                }
             }
+            omitted.top_omitted.sort_by(|a, b| {
+                b.pct
+                    .partial_cmp(&a.pct)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
         }
         let after = crate::serde_util::serialized_byte_count(&children[i]);
         return after.saturating_sub(before);
@@ -1273,6 +1291,127 @@ mod tests {
         // child" candidate.
         let dropped = drop_smallest_leaf(&mut tree).expect("dropped one leaf");
         assert!((dropped.pct - 60.0).abs() < 1e-3);
+    }
+
+    /// When the root-level children are all *inner* frames (i.e. each
+    /// has at least one Frame grandchild), `drop_smallest_leaf_inner`
+    /// must descend rather than refuse — otherwise we'd never reach
+    /// the leaves of a tall tree. Build a tree where the only
+    /// droppable leaves live two levels down and verify the trimmer
+    /// finds the smallest one.
+    #[test]
+    fn drop_smallest_leaf_recurses_when_no_root_level_leaves() {
+        // root -> [a -> small_leaf (5%), b -> big_leaf (95%)].
+        // No root-level Frame is a leaf (both `a` and `b` have a
+        // Frame grandchild), so the trimmer must descend. Expected
+        // pick: small_leaf at 5%.
+        let inner = |fname: &str, total_pct: f32, leaf_name: &str, leaf_pct: f32| -> Node {
+            Node::Frame(FrameNode {
+                function: fname.into(),
+                module: None,
+                chain: None,
+                self_samples: 0,
+                self_pct: 0.0,
+                total_samples: total_pct as u64,
+                total_pct,
+                children: vec![Node::Frame(FrameNode {
+                    function: leaf_name.into(),
+                    module: None,
+                    chain: None,
+                    self_samples: leaf_pct as u64,
+                    self_pct: leaf_pct,
+                    total_samples: leaf_pct as u64,
+                    total_pct: leaf_pct,
+                    children: vec![],
+                })],
+            })
+        };
+        let mut tree = Some(Node::Frame(FrameNode {
+            function: "root".into(),
+            module: None,
+            chain: None,
+            self_samples: 0,
+            self_pct: 0.0,
+            total_samples: 100,
+            total_pct: 100.0,
+            children: vec![
+                inner("a", 5.0, "small_leaf", 5.0),
+                inner("b", 95.0, "big_leaf", 95.0),
+            ],
+        }));
+        let dropped = drop_smallest_leaf(&mut tree).expect("dropped a leaf");
+        assert!(
+            (dropped.pct - 5.0).abs() < 1e-3,
+            "expected small_leaf (5%) dropped, got {}",
+            dropped.pct
+        );
+    }
+
+    /// `top_omitted` is documented as "biggest first", but successive
+    /// budget-driven drops at the same level pull progressively
+    /// larger leaves. Once the cap fills, the new (larger) preview
+    /// must displace the smallest existing entry — otherwise the
+    /// list ends up holding the smallest dropped frames.
+    #[test]
+    fn top_omitted_displaces_smallest_when_cap_full() {
+        // Five tiny siblings at the root; cap is 3. Drop them all
+        // (smallest first) and confirm `top_omitted` ends up with the
+        // three *biggest* names, not the three smallest.
+        let leaf = |name: &str, pct: f32| -> Node {
+            Node::Frame(FrameNode {
+                function: name.into(),
+                module: None,
+                chain: None,
+                self_samples: pct as u64,
+                self_pct: pct,
+                total_samples: pct as u64,
+                total_pct: pct,
+                children: vec![],
+            })
+        };
+        let mut tree = Some(Node::Frame(FrameNode {
+            function: "root".into(),
+            module: None,
+            chain: None,
+            self_samples: 0,
+            self_pct: 0.0,
+            total_samples: 100,
+            total_pct: 100.0,
+            children: vec![
+                leaf("smallest_1", 1.0),
+                leaf("small_2", 2.0),
+                leaf("mid_3", 3.0),
+                leaf("big_4", 4.0),
+                leaf("biggest_5", 50.0), // sentinel: prevents solitary-root exhaustion
+            ],
+        }));
+        // Drop four leaves — the first four come out smallest-first.
+        for _ in 0..4 {
+            drop_smallest_leaf(&mut tree).expect("can drop");
+        }
+        let Some(Node::Frame(root)) = tree else {
+            panic!("expected root frame");
+        };
+        let omitted = root
+            .children
+            .iter()
+            .find_map(|c| match c {
+                Node::Omitted { omitted } => Some(omitted),
+                _ => None,
+            })
+            .expect("Omitted summary present");
+        assert_eq!(omitted.count, 4);
+        let names: Vec<&str> = omitted
+            .top_omitted
+            .iter()
+            .map(|p| p.function.as_str())
+            .collect();
+        assert_eq!(names.len(), TOP_OMITTED_CAP);
+        // Biggest three of the dropped four should be retained:
+        // {small_2, mid_3, big_4}. `smallest_1` should NOT appear.
+        assert!(!names.contains(&"smallest_1"), "names: {names:?}");
+        assert!(names.contains(&"big_4"), "names: {names:?}");
+        assert!(names.contains(&"mid_3"), "names: {names:?}");
     }
 
     /// Successive drops at the same level should report progressive

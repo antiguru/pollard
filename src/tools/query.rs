@@ -5,7 +5,9 @@ use crate::profile::raw::Pid;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
 use crate::query::{call_tree, compare, folded, stacks_containing, top_functions, top_groups};
 use crate::tools::PollardServer;
-use crate::tools::budget::{DropOutcome, estimated_bytes, fit_to_budget, output_budget_bytes};
+use crate::tools::budget::{
+    DropOutcome, estimated_bytes, fit_to_budget, output_budget_bytes, resolve_budget,
+};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
@@ -181,6 +183,14 @@ pub struct TopFunctionsArgs {
     pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
+    /// Per-call byte budget. The response is trimmed (lowest-priority
+    /// rows / smallest tree leaves dropped) until it fits — see the
+    /// `truncated` field on the response. Capped by the server-side
+    /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
+    /// save tokens for other tool calls in the same turn, but not
+    /// more. Pass `0` to disable trimming entirely.
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -230,6 +240,14 @@ pub struct CallTreeArgs {
     pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
+    /// Per-call byte budget. The response is trimmed (lowest-priority
+    /// rows / smallest tree leaves dropped) until it fits — see the
+    /// `truncated` field on the response. Capped by the server-side
+    /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
+    /// save tokens for other tool calls in the same turn, but not
+    /// more. Pass `0` to disable trimming entirely.
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +265,14 @@ pub struct FoldedStacksArgs {
     pub function_filter: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
+    /// Per-call byte budget. The response is trimmed (lowest-priority
+    /// rows / smallest tree leaves dropped) until it fits — see the
+    /// `truncated` field on the response. Capped by the server-side
+    /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
+    /// save tokens for other tool calls in the same turn, but not
+    /// more. Pass `0` to disable trimming entirely.
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 #[derive(serde::Serialize, JsonSchema)]
@@ -297,6 +323,14 @@ pub struct TopGroupsArgs {
     pub expand_inlines: Option<bool>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
+    /// Per-call byte budget. The response is trimmed (lowest-priority
+    /// rows / smallest tree leaves dropped) until it fits — see the
+    /// `truncated` field on the response. Capped by the server-side
+    /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
+    /// save tokens for other tool calls in the same turn, but not
+    /// more. Pass `0` to disable trimming entirely.
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -344,6 +378,14 @@ pub struct CompareProfilesArgs {
     pub event: Option<String>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
+    /// Per-call byte budget. The response is trimmed (lowest-priority
+    /// rows / smallest tree leaves dropped) until it fits — see the
+    /// `truncated` field on the response. Capped by the server-side
+    /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
+    /// save tokens for other tool calls in the same turn, but not
+    /// more. Pass `0` to disable trimming entirely.
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -362,6 +404,14 @@ pub struct StacksContainingArgs {
     pub limit: Option<usize>,
     #[serde(flatten)]
     pub common: CommonFilterArgs,
+    /// Per-call byte budget. The response is trimmed (lowest-priority
+    /// rows / smallest tree leaves dropped) until it fits — see the
+    /// `truncated` field on the response. Capped by the server-side
+    /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
+    /// save tokens for other tool calls in the same turn, but not
+    /// more. Pass `0` to disable trimming entirely.
+    #[serde(default)]
+    pub max_output_bytes: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -398,7 +448,8 @@ impl PollardServer {
             event,
         };
         let mut result = top_functions::top_functions(session.profile(), &q_args)?;
-        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
+        let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
+        result.truncated = fit_to_budget(&mut result, budget, |out| {
             // Rows are pre-sorted (descending by self/total/etc) so the
             // tail is always the lowest-priority — pop until budget fits.
             match out.functions.pop() {
@@ -453,17 +504,16 @@ impl PollardServer {
             directory_depth: args.directory_depth,
         };
         let mut result = top_groups::top_groups(session.profile(), &q_args)?;
-        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
-            match out.groups.pop() {
-                Some(row) => {
-                    let bytes = estimated_bytes(&row);
-                    DropOutcome::Dropped {
-                        pct: Some(row.self_pct),
-                        bytes,
-                    }
+        let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
+        result.truncated = fit_to_budget(&mut result, budget, |out| match out.groups.pop() {
+            Some(row) => {
+                let bytes = estimated_bytes(&row);
+                DropOutcome::Dropped {
+                    pct: Some(row.self_pct),
+                    bytes,
                 }
-                None => DropOutcome::Exhausted,
             }
+            None => DropOutcome::Exhausted,
         });
         Ok(Json(result))
     }
@@ -492,15 +542,19 @@ impl PollardServer {
             event,
         };
         let mut result = call_tree::call_tree(session.profile(), &q_args)?;
-        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
-            match call_tree::drop_smallest_leaf(&mut out.tree) {
-                Some(dropped) => DropOutcome::Dropped {
-                    pct: Some(dropped.pct),
-                    bytes: dropped.bytes_freed,
+        let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
+        result.truncated =
+            fit_to_budget(
+                &mut result,
+                budget,
+                |out| match call_tree::drop_smallest_leaf(&mut out.tree) {
+                    Some(dropped) => DropOutcome::Dropped {
+                        pct: Some(dropped.pct),
+                        bytes: dropped.bytes_freed,
+                    },
+                    None => DropOutcome::Exhausted,
                 },
-                None => DropOutcome::Exhausted,
-            }
-        });
+            );
         Ok(Json(result))
     }
 
@@ -518,7 +572,8 @@ impl PollardServer {
             function_filter: args.function_filter.clone(),
         };
         let folded = folded::folded_stacks_structured(session.profile(), &q_args)?;
-        let (rendered, truncated) = fit_folded_to_budget(folded, output_budget_bytes());
+        let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
+        let (rendered, truncated) = fit_folded_to_budget(folded, budget);
         Ok(Json(FoldedStacksOutput {
             folded: rendered,
             truncated,
@@ -578,9 +633,19 @@ impl PollardServer {
         };
         let mut result =
             compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
-        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
-            // Sorted by `|delta|` desc (or the chosen sort), so the
-            // tail of the vec is the least interesting row.
+        let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
+        result.truncated = fit_to_budget(&mut result, budget, |out| {
+            // Every supported sort_by puts the least-interesting row
+            // at the tail (delta / delta_ms / a / b are all
+            // descending), so popping from the end is safe. New sort
+            // modes that flip this invariant must change the drop
+            // strategy alongside.
+            //
+            // `dropped_pct` here sums `|delta_self_pct|` rather than a
+            // raw share-of-profile percentage like the other tools —
+            // it's the same scale the rows are sorted by, which keeps
+            // the field meaningful even when both profiles' totals
+            // shifted.
             match out.functions.pop() {
                 Some(row) => {
                     let bytes = estimated_bytes(&row);
@@ -610,18 +675,17 @@ impl PollardServer {
             limit: args.limit.unwrap_or(0),
         };
         let mut result = stacks_containing::stacks_containing(session.profile(), &q_args)?;
-        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
-            match out.stacks.pop() {
-                Some(stack) => {
-                    let bytes = estimated_bytes(&stack);
-                    out.stacks_returned = out.stacks.len();
-                    DropOutcome::Dropped {
-                        pct: Some(stack.pct),
-                        bytes,
-                    }
+        let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
+        result.truncated = fit_to_budget(&mut result, budget, |out| match out.stacks.pop() {
+            Some(stack) => {
+                let bytes = estimated_bytes(&stack);
+                out.stacks_returned = out.stacks.len();
+                DropOutcome::Dropped {
+                    pct: Some(stack.pct),
+                    bytes,
                 }
-                None => DropOutcome::Exhausted,
             }
+            None => DropOutcome::Exhausted,
         });
         Ok(Json(result))
     }
@@ -640,11 +704,6 @@ fn fit_folded_to_budget(
     if budget == 0 {
         return (folded.render(), None);
     }
-    // Approximate envelope cost of `{"folded":""}` plus any future
-    // sibling fields. Slight overestimate is fine — the per-line cost
-    // dominates.
-    const ENVELOPE_OVERHEAD: usize = 64;
-    let folded_budget = budget.saturating_sub(ENVELOPE_OVERHEAD);
 
     folded.entries.sort_by(|a, b| {
         b.samples
@@ -652,6 +711,27 @@ fn fit_folded_to_budget(
             .then_with(|| a.stack.cmp(&b.stack))
     });
     let total = folded.total_samples.max(1) as f32;
+
+    // Real envelope cost: serialize a stand-in `FoldedStacksOutput`
+    // shell with `truncated` populated (we don't yet know the field
+    // values but the byte-cost is the same for any reasonable
+    // dropped/dropped_pct) so the budget gate accounts for the
+    // ~150–200 bytes that `Truncated` adds when trimming actually
+    // fires. Empty `folded` string keeps the per-line accounting
+    // separate from the envelope.
+    let probe_truncated = crate::tools::budget::Truncated {
+        dropped: usize::MAX,
+        dropped_pct: Some(100.0),
+        budget_bytes: budget,
+        final_bytes: budget,
+        still_over_budget: false,
+    };
+    let envelope_with_truncated = FoldedStacksOutput {
+        folded: String::new(),
+        truncated: Some(probe_truncated),
+    };
+    let envelope_bytes = crate::serde_util::serialized_byte_count(&envelope_with_truncated);
+    let folded_budget = budget.saturating_sub(envelope_bytes);
 
     let mut keep = 0usize;
     let mut size = 0usize;
@@ -682,7 +762,20 @@ fn fit_folded_to_budget(
         .sum();
     folded.entries.truncate(keep);
     let rendered = folded.render();
-    let final_bytes = rendered.len() + ENVELOPE_OVERHEAD;
+    // Re-measure precisely against the populated response, not the
+    // probe — `dropped` digit count and JSON-escape costs in the
+    // rendered string can shift the byte total by a few bytes.
+    let final_response = FoldedStacksOutput {
+        folded: rendered.clone(),
+        truncated: Some(crate::tools::budget::Truncated {
+            dropped,
+            dropped_pct: Some(dropped_pct),
+            budget_bytes: budget,
+            final_bytes: 0, // overwritten below
+            still_over_budget: false,
+        }),
+    };
+    let final_bytes = crate::serde_util::serialized_byte_count(&final_response);
     (
         rendered,
         Some(crate::tools::budget::Truncated {
@@ -735,9 +828,9 @@ mod tests {
             ],
             total_samples: 151,
         };
-        // Envelope is ~64 bytes, line cost ~13 bytes each. Budget for
-        // two lines ≈ 64 + 2*13 = 90.
-        let (rendered, truncated) = fit_folded_to_budget(folded, 90);
+        // Envelope (incl. populated `Truncated`) is ~145 bytes; per
+        // line ~13 bytes. Budget for two lines ≈ 145 + 2*13 = 171.
+        let (rendered, truncated) = fit_folded_to_budget(folded, 175);
         let truncated = truncated.expect("expected to truncate");
         assert_eq!(truncated.dropped, 1);
         assert!(!rendered.contains("cccccccc"));
