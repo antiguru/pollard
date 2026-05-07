@@ -589,9 +589,7 @@ fn drop_smallest_leaf_inner(node: &mut Node) -> Option<DroppedLeaf> {
     // average drop-cost low (single tree-walk per drop iteration).
     if let Some((i, pct)) = smallest_leaf_child {
         let removed = frame.children.remove(i);
-        let removed_bytes = serde_json::to_vec(&removed)
-            .map(|v| v.len() + 1 /* trailing comma */)
-            .unwrap_or(0);
+        let removed_bytes = crate::serde_util::serialized_byte_count(&removed) + 1 /* trailing comma */;
         let omitted_delta = if let Node::Frame(c) = removed {
             roll_into_omitted(&mut frame.children, c.function, c.total_pct)
         } else {
@@ -619,9 +617,7 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> us
         .iter()
         .position(|c| matches!(c, Node::Omitted { .. }));
     if let Some(i) = existing_idx {
-        let before = serde_json::to_vec(&children[i])
-            .map(|v| v.len())
-            .unwrap_or(0);
+        let before = crate::serde_util::serialized_byte_count(&children[i]);
         if let Node::Omitted { omitted } = &mut children[i] {
             omitted.count += 1;
             omitted.combined_pct += pct;
@@ -638,9 +634,7 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> us
                 });
             }
         }
-        let after = serde_json::to_vec(&children[i])
-            .map(|v| v.len())
-            .unwrap_or(0);
+        let after = crate::serde_util::serialized_byte_count(&children[i]);
         return after.saturating_sub(before);
     }
     let new_node = Node::Omitted {
@@ -650,9 +644,7 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> us
             top_omitted: vec![preview],
         },
     };
-    let cost = serde_json::to_vec(&new_node)
-        .map(|v| v.len() + 1 /* comma */)
-        .unwrap_or(0);
+    let cost = crate::serde_util::serialized_byte_count(&new_node) + 1 /* comma */;
     children.push(new_node);
     cost
 }

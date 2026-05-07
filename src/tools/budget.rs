@@ -148,18 +148,20 @@ where
 }
 
 fn serialized_size<T: Serialize>(output: &T) -> usize {
-    // Errors here would mean the response is unserializable, which the
-    // outer rmcp layer would also reject — fall through with 0 so the
-    // trim loop terminates rather than spinning.
-    serde_json::to_vec(output).map(|v| v.len()).unwrap_or(0)
+    // Errors are silently treated as 0 — an unserializable output
+    // would also fail at the rmcp layer, and 0 makes the trim loop
+    // terminate rather than spin.
+    crate::serde_util::serialized_byte_count(output)
 }
 
 /// Approximate the serialized size of `value` for use as the `bytes`
 /// field on [`DropOutcome::Dropped`]. Adds a `+ 1` to cover the
 /// trailing comma between array elements (slight overestimate when
-/// dropping the last item; harmless).
+/// dropping the last item; harmless). Counts bytes through a
+/// non-allocating `io::Write` sink rather than materializing a
+/// `Vec<u8>` per call — see [`crate::serde_util::serialized_byte_count`].
 pub fn estimated_bytes<T: Serialize>(value: &T) -> usize {
-    serde_json::to_vec(value).map(|v| v.len() + 1).unwrap_or(0)
+    crate::serde_util::serialized_byte_count(value) + 1
 }
 
 #[cfg(test)]
