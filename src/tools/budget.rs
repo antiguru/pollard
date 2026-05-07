@@ -8,16 +8,17 @@
 //! Rather than re-running the whole query with progressively tightened
 //! pruning knobs (the original proposal), we build the result once and
 //! then trim it down to fit. Each tool plugs in its own
-//! "drop the lowest-priority element" strategy via [`fit_to_budget`];
-//! the helper repeatedly serializes the (mutated) output and asks for
-//! another drop until the JSON length is within the budget.
+//! "drop the lowest-priority element" strategy via [`fit_to_budget`].
 //!
-//! That trades a quadratic-ish trim loop for the one-pass guarantee
-//! that the response is shaped by the original args, not by retried
-//! pruning knobs the caller never asked for. In practice the trim
-//! loop converges in a few hundred steps even on large profiles
-//! because the per-row size (~80–300 bytes) is small compared to the
-//! ~25 KB budget.
+//! We serialize the unmodified output once to seed a running byte
+//! counter, then ask the per-tool strategy to drop one element at a
+//! time and report the bytes it freed. Subtracting from the running
+//! counter avoids re-serializing the whole response on every drop —
+//! the loop is `O(n)` in items dropped rather than `O(n²)`. The
+//! reported `final_bytes` comes from one last serialization once the
+//! running counter says we should fit, so the wire-truth number the
+//! caller sees is accurate even if individual drop estimates were
+//! slightly off.
 //!
 //! Configurable via `POLLARD_MAX_OUTPUT_BYTES`; the default
 //! ([`DEFAULT_BUDGET_BYTES`]) is well under typical MCP caps.
@@ -69,23 +70,35 @@ pub struct Truncated {
 
 /// Result of a single drop call from a per-tool strategy.
 pub enum DropOutcome {
-    /// One item was removed. The optional `f32` is its priority weight
-    /// (e.g. `self_pct`) for the rolled-up `dropped_pct` summary.
-    Dropped(Option<f32>),
+    /// One item was removed.
+    ///
+    /// `pct` is its priority weight (e.g. `self_pct`) for the
+    /// rolled-up `dropped_pct` summary, or `None` when the strategy
+    /// can't attribute one.
+    ///
+    /// `bytes` is a best-effort estimate of the JSON bytes freed by
+    /// the drop. Slight over-estimates cost an extra trim iteration
+    /// (we'll loop one more time when we already fit) but never an
+    /// unsafe one — the final size is re-measured before we report
+    /// `final_bytes`. Strings serialize 1:1 (modulo escapes); structs
+    /// add a near-constant per-field overhead, so for most rows
+    /// `serde_json::to_vec(&row).len() + 1` is the cheap exact answer.
+    Dropped { pct: Option<f32>, bytes: usize },
     /// Nothing left to drop without producing an empty/meaningless
     /// response. The trim loop stops and `still_over_budget` is set.
     Exhausted,
 }
 
-/// Serialize `output`, and while it exceeds `budget`, ask `drop_one`
-/// to remove the lowest-priority element. Returns `None` if the first
-/// serialization already fit, otherwise a [`Truncated`] summary.
+/// Serialize `output` once to seed a running byte counter, then while
+/// the running estimate exceeds `budget`, ask `drop_one` to remove the
+/// lowest-priority element and report how many bytes it freed.
+/// Returns `None` if the first serialization already fit, otherwise a
+/// [`Truncated`] summary.
 ///
-/// `drop_one` mutates `output` in place. It must be cheap relative to
-/// the per-iteration re-serialization (which dominates the loop) and
-/// should avoid recomputing aggregates — the whole point of the
-/// budget-down approach is to shape the response without re-running
-/// the underlying query.
+/// `drop_one` mutates `output` in place and must report `bytes`
+/// freed so we don't have to re-serialize the whole response on every
+/// drop — that re-serialization is the difference between an `O(n)`
+/// and an `O(n²)` trim loop on a tool with hundreds of rows.
 pub fn fit_to_budget<T, F>(output: &mut T, budget: usize, mut drop_one: F) -> Option<Truncated>
 where
     T: Serialize,
@@ -94,39 +107,43 @@ where
     if budget == 0 {
         return None;
     }
-    let mut size = serialized_size(output);
-    if size <= budget {
+    let initial = serialized_size(output);
+    if initial <= budget {
         return None;
     }
+    let mut running = initial;
     let mut dropped: usize = 0;
     let mut dropped_pct: f32 = 0.0;
     let mut had_pct = false;
     let mut exhausted = false;
-    while size > budget {
+    while running > budget {
         match drop_one(output) {
-            DropOutcome::Dropped(pct) => {
+            DropOutcome::Dropped { pct, bytes } => {
                 dropped += 1;
                 if let Some(p) = pct {
                     dropped_pct += p;
                     had_pct = true;
                 }
+                running = running.saturating_sub(bytes);
             }
             DropOutcome::Exhausted => {
                 exhausted = true;
                 break;
             }
         }
-        size = serialized_size(output);
     }
     if dropped == 0 && !exhausted {
         return None;
     }
+    // One precise measurement so the reported size is wire-truth even
+    // when individual drop estimates were rough.
+    let final_bytes = serialized_size(output);
     Some(Truncated {
         dropped,
         dropped_pct: had_pct.then_some(dropped_pct),
         budget_bytes: budget,
-        final_bytes: size,
-        still_over_budget: exhausted,
+        final_bytes,
+        still_over_budget: exhausted || final_bytes > budget,
     })
 }
 
@@ -135,6 +152,14 @@ fn serialized_size<T: Serialize>(output: &T) -> usize {
     // outer rmcp layer would also reject — fall through with 0 so the
     // trim loop terminates rather than spinning.
     serde_json::to_vec(output).map(|v| v.len()).unwrap_or(0)
+}
+
+/// Approximate the serialized size of `value` for use as the `bytes`
+/// field on [`DropOutcome::Dropped`]. Adds a `+ 1` to cover the
+/// trailing comma between array elements (slight overestimate when
+/// dropping the last item; harmless).
+pub fn estimated_bytes<T: Serialize>(value: &T) -> usize {
+    serde_json::to_vec(value).map(|v| v.len() + 1).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -157,7 +182,10 @@ mod tests {
         };
         let out = fit_to_budget(&mut bag, 10_000, |b| {
             b.items.pop();
-            DropOutcome::Dropped(None)
+            DropOutcome::Dropped {
+                pct: None,
+                bytes: 0,
+            }
         });
         assert!(out.is_none());
         assert_eq!(bag.items.len(), 3);
@@ -170,13 +198,12 @@ mod tests {
             items,
             truncated: None,
         };
-        let out = fit_to_budget(&mut bag, 200, |b| {
-            if b.items.is_empty() {
-                DropOutcome::Exhausted
-            } else {
-                b.items.pop();
-                DropOutcome::Dropped(Some(1.0))
-            }
+        let out = fit_to_budget(&mut bag, 200, |b| match b.items.pop() {
+            Some(v) => DropOutcome::Dropped {
+                pct: Some(1.0),
+                bytes: estimated_bytes(&v),
+            },
+            None => DropOutcome::Exhausted,
         })
         .expect("expected truncation");
         assert!(out.dropped > 0);
@@ -211,5 +238,49 @@ mod tests {
             panic!("drop_one must not be called when budget==0")
         });
         assert!(out.is_none());
+    }
+
+    /// The whole point of the `bytes` field on `DropOutcome::Dropped`
+    /// is to keep the trim loop linear. Verify that the helper only
+    /// re-serializes once at the end (not on every drop) by counting
+    /// how many times the strategy is called against an oracle.
+    #[test]
+    fn drop_count_matches_byte_freed_arithmetic() {
+        // Each item is "0..N" — average serialized cost roughly 4
+        // bytes (digits + comma). 500 items + envelope ≈ 2500 bytes.
+        // Dropping ~ (initial - budget) / per_item items should fit.
+        let items: Vec<u32> = (0..500).collect();
+        let initial_size = serialized_size(&Bag {
+            items: items.clone(),
+            truncated: None,
+        });
+        let budget = 200;
+        let mut bag = Bag {
+            items,
+            truncated: None,
+        };
+
+        let mut call_count = 0usize;
+        let out = fit_to_budget(&mut bag, budget, |b| {
+            call_count += 1;
+            match b.items.pop() {
+                Some(v) => DropOutcome::Dropped {
+                    pct: None,
+                    bytes: estimated_bytes(&v),
+                },
+                None => DropOutcome::Exhausted,
+            }
+        })
+        .expect("trimmed");
+
+        // Sanity: we trimmed enough to fit, in the same number of
+        // drops as the running counter would predict.
+        let approx_per_item = initial_size as f32 / 500.0;
+        let needed_drops = ((initial_size - budget) as f32 / approx_per_item).ceil() as usize;
+        assert!(
+            call_count <= needed_drops + 2,
+            "drops {call_count} far exceeds prediction {needed_drops}"
+        );
+        assert!(out.final_bytes <= budget);
     }
 }

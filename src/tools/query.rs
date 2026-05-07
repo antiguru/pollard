@@ -5,7 +5,7 @@ use crate::profile::raw::Pid;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
 use crate::query::{call_tree, compare, folded, stacks_containing, top_functions, top_groups};
 use crate::tools::PollardServer;
-use crate::tools::budget::{DropOutcome, fit_to_budget, output_budget_bytes};
+use crate::tools::budget::{DropOutcome, estimated_bytes, fit_to_budget, output_budget_bytes};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
@@ -402,7 +402,13 @@ impl PollardServer {
             // Rows are pre-sorted (descending by self/total/etc) so the
             // tail is always the lowest-priority — pop until budget fits.
             match out.functions.pop() {
-                Some(row) => DropOutcome::Dropped(Some(row.self_pct)),
+                Some(row) => {
+                    let bytes = estimated_bytes(&row);
+                    DropOutcome::Dropped {
+                        pct: Some(row.self_pct),
+                        bytes,
+                    }
+                }
                 None => DropOutcome::Exhausted,
             }
         });
@@ -449,7 +455,13 @@ impl PollardServer {
         let mut result = top_groups::top_groups(session.profile(), &q_args)?;
         result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
             match out.groups.pop() {
-                Some(row) => DropOutcome::Dropped(Some(row.self_pct)),
+                Some(row) => {
+                    let bytes = estimated_bytes(&row);
+                    DropOutcome::Dropped {
+                        pct: Some(row.self_pct),
+                        bytes,
+                    }
+                }
                 None => DropOutcome::Exhausted,
             }
         });
@@ -482,7 +494,10 @@ impl PollardServer {
         let mut result = call_tree::call_tree(session.profile(), &q_args)?;
         result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
             match call_tree::drop_smallest_leaf(&mut out.tree) {
-                Some(pct) => DropOutcome::Dropped(Some(pct)),
+                Some(dropped) => DropOutcome::Dropped {
+                    pct: Some(dropped.pct),
+                    bytes: dropped.bytes_freed,
+                },
                 None => DropOutcome::Exhausted,
             }
         });
@@ -567,7 +582,13 @@ impl PollardServer {
             // Sorted by `|delta|` desc (or the chosen sort), so the
             // tail of the vec is the least interesting row.
             match out.functions.pop() {
-                Some(row) => DropOutcome::Dropped(Some(row.delta_self_pct.abs())),
+                Some(row) => {
+                    let bytes = estimated_bytes(&row);
+                    DropOutcome::Dropped {
+                        pct: Some(row.delta_self_pct.abs()),
+                        bytes,
+                    }
+                }
                 None => DropOutcome::Exhausted,
             }
         });
@@ -592,8 +613,12 @@ impl PollardServer {
         result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
             match out.stacks.pop() {
                 Some(stack) => {
+                    let bytes = estimated_bytes(&stack);
                     out.stacks_returned = out.stacks.len();
-                    DropOutcome::Dropped(Some(stack.pct))
+                    DropOutcome::Dropped {
+                        pct: Some(stack.pct),
+                        bytes,
+                    }
                 }
                 None => DropOutcome::Exhausted,
             }

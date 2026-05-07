@@ -528,15 +528,28 @@ fn build_node(
     }))
 }
 
+/// Outcome of a single [`drop_smallest_leaf`] call.
+///
+/// `bytes_freed` is the net JSON-bytes saved by removing the leaf and
+/// updating the sibling [`OmittedSummary`]. Reported back to the
+/// budget trimmer so it can update its running estimate without
+/// re-serializing the whole tree (which would push the trim loop into
+/// `O(n²)` territory — see #101).
+#[derive(Debug, Clone, Copy)]
+pub struct DroppedLeaf {
+    pub pct: f32,
+    pub bytes_freed: usize,
+}
+
 /// Drop the lowest-`total_pct` Frame leaf from `tree`, rolling its
 /// contribution into its parent's [`OmittedSummary`] so the response
 /// stays internally consistent.
 ///
-/// Returns the dropped node's `total_pct` on success, or `None` when
-/// the tree has no Frame children left to drop without losing the
-/// only visible root. Used by [`crate::tools::budget::fit_to_budget`]
-/// to shrink a serialized response one element at a time — see #101.
-pub(crate) fn drop_smallest_leaf(tree: &mut Option<Node>) -> Option<f32> {
+/// Returns a [`DroppedLeaf`] on success, or `None` when the tree has
+/// no Frame children left to drop without losing the only visible
+/// root. Used by [`crate::tools::budget::fit_to_budget`] to shrink a
+/// serialized response one element at a time.
+pub(crate) fn drop_smallest_leaf(tree: &mut Option<Node>) -> Option<DroppedLeaf> {
     let root = tree.as_mut()?;
     // If the root itself is the only Frame in the tree (no Frame
     // children), there's nothing to drop without losing the response
@@ -550,7 +563,7 @@ pub(crate) fn drop_smallest_leaf(tree: &mut Option<Node>) -> Option<f32> {
     drop_smallest_leaf_inner(root)
 }
 
-fn drop_smallest_leaf_inner(node: &mut Node) -> Option<f32> {
+fn drop_smallest_leaf_inner(node: &mut Node) -> Option<DroppedLeaf> {
     let frame = match node {
         Node::Frame(f) => f,
         _ => return None,
@@ -576,10 +589,16 @@ fn drop_smallest_leaf_inner(node: &mut Node) -> Option<f32> {
     // average drop-cost low (single tree-walk per drop iteration).
     if let Some((i, pct)) = smallest_leaf_child {
         let removed = frame.children.remove(i);
-        if let Node::Frame(c) = removed {
-            roll_into_omitted(&mut frame.children, c.function, c.total_pct);
-        }
-        return Some(pct);
+        let removed_bytes = serde_json::to_vec(&removed)
+            .map(|v| v.len() + 1 /* trailing comma */)
+            .unwrap_or(0);
+        let omitted_delta = if let Node::Frame(c) = removed {
+            roll_into_omitted(&mut frame.children, c.function, c.total_pct)
+        } else {
+            0
+        };
+        let bytes_freed = removed_bytes.saturating_sub(omitted_delta);
+        return Some(DroppedLeaf { pct, bytes_freed });
     }
 
     if let Some((i, _)) = smallest_inner_child {
@@ -589,13 +608,21 @@ fn drop_smallest_leaf_inner(node: &mut Node) -> Option<f32> {
     None
 }
 
-/// Append the dropped leaf's contribution to a sibling [`OmittedSummary`]
-/// (creating one if absent) so the rendered tree's pct totals stay
-/// truthful even after trimming.
-fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) {
+/// Append the dropped leaf's contribution to a sibling
+/// [`OmittedSummary`] (creating one if absent) so the rendered tree's
+/// pct totals stay truthful even after trimming. Returns the JSON
+/// byte cost added by the update so the trimmer can subtract it from
+/// the bytes the leaf removal freed.
+fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> usize {
     let preview = OmittedPreview { function, pct };
-    for child in children.iter_mut() {
-        if let Node::Omitted { omitted } = child {
+    let existing_idx = children
+        .iter()
+        .position(|c| matches!(c, Node::Omitted { .. }));
+    if let Some(i) = existing_idx {
+        let before = serde_json::to_vec(&children[i])
+            .map(|v| v.len())
+            .unwrap_or(0);
+        if let Node::Omitted { omitted } = &mut children[i] {
             omitted.count += 1;
             omitted.combined_pct += pct;
             // top_omitted lists biggest contributors first. The leaf
@@ -610,16 +637,24 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
-            return;
         }
+        let after = serde_json::to_vec(&children[i])
+            .map(|v| v.len())
+            .unwrap_or(0);
+        return after.saturating_sub(before);
     }
-    children.push(Node::Omitted {
+    let new_node = Node::Omitted {
         omitted: OmittedSummary {
             count: 1,
             combined_pct: pct,
             top_omitted: vec![preview],
         },
-    });
+    };
+    let cost = serde_json::to_vec(&new_node)
+        .map(|v| v.len() + 1 /* comma */)
+        .unwrap_or(0);
+    children.push(new_node);
+    cost
 }
 
 fn compress_chains(node: &mut Node) {
@@ -1157,7 +1192,7 @@ mod tests {
     fn drop_smallest_leaf_picks_lowest_pct() {
         let mut tree = synthetic_two_leaf_tree();
         let dropped = drop_smallest_leaf(&mut tree).expect("dropped one leaf");
-        assert!((dropped - 20.0).abs() < 1e-3);
+        assert!((dropped.pct - 20.0).abs() < 1e-3);
         let Some(Node::Frame(f)) = tree else {
             panic!("expected frame root after drop");
         };
@@ -1245,6 +1280,56 @@ mod tests {
         // (60, leaf) are siblings, and only `b` qualifies as a "leaf
         // child" candidate.
         let dropped = drop_smallest_leaf(&mut tree).expect("dropped one leaf");
-        assert!((dropped - 60.0).abs() < 1e-3);
+        assert!((dropped.pct - 60.0).abs() < 1e-3);
+    }
+
+    /// Successive drops at the same level should report progressive
+    /// `bytes_freed`. The first drop creates an `Omitted` summary
+    /// roughly the size of the removed leaf and may report ~0 net
+    /// savings; the second drop merely bumps `count` and recovers the
+    /// full leaf size. The trim loop relies on this making forward
+    /// progress eventually.
+    #[test]
+    fn successive_drops_make_byte_progress() {
+        // Five tiny siblings — first drop pays the Omitted overhead,
+        // the rest amortize cleanly.
+        let make_leaf = |name: &str, pct: f32, samples: u64| -> Node {
+            Node::Frame(FrameNode {
+                function: name.into(),
+                module: None,
+                chain: None,
+                self_samples: samples,
+                self_pct: pct,
+                total_samples: samples,
+                total_pct: pct,
+                children: vec![],
+            })
+        };
+        let mut tree = Some(Node::Frame(FrameNode {
+            function: "root".into(),
+            module: None,
+            chain: None,
+            self_samples: 0,
+            self_pct: 0.0,
+            total_samples: 100,
+            total_pct: 100.0,
+            children: vec![
+                make_leaf("aaa", 5.0, 5),
+                make_leaf("bbb", 6.0, 6),
+                make_leaf("ccc", 7.0, 7),
+                make_leaf("ddd", 8.0, 8),
+                make_leaf("eee", 74.0, 74),
+            ],
+        }));
+
+        let mut total_freed = 0usize;
+        for _ in 0..3 {
+            let dropped = drop_smallest_leaf(&mut tree).expect("can keep dropping");
+            total_freed += dropped.bytes_freed;
+        }
+        assert!(
+            total_freed > 0,
+            "three successive drops must net positive bytes; got {total_freed}"
+        );
     }
 }
