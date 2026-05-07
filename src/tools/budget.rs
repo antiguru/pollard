@@ -303,4 +303,27 @@ mod tests {
         );
         assert!(out.final_bytes <= budget);
     }
+
+    #[test]
+    fn resolve_budget_none_uses_ceiling() {
+        assert_eq!(resolve_budget(25_000, None), 25_000);
+    }
+
+    #[test]
+    fn resolve_budget_request_below_ceiling_passes_through() {
+        assert_eq!(resolve_budget(25_000, Some(8_000)), 8_000);
+    }
+
+    #[test]
+    fn resolve_budget_request_above_ceiling_clamps_to_ceiling() {
+        // The harness's hard cap is what the operator-side ceiling
+        // represents — callers can't escape it by asking for more.
+        assert_eq!(resolve_budget(25_000, Some(1_000_000)), 25_000);
+    }
+
+    #[test]
+    fn resolve_budget_zero_disables_trimming_regardless_of_ceiling() {
+        // Mirrors the env-var "0 disables" semantic.
+        assert_eq!(resolve_budget(25_000, Some(0)), 0);
+    }
 }

@@ -628,9 +628,15 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> us
             // smallest existing preview rather than discard the new
             // one — otherwise the list ends up showing the smallest
             // dropped frames, not the biggest.
+            let changed;
             if omitted.top_omitted.len() < TOP_OMITTED_CAP {
                 omitted.top_omitted.push(preview);
+                changed = true;
             } else {
+                // top_omitted is non-empty here (TOP_OMITTED_CAP > 0
+                // and the cap-full branch implies at least one
+                // entry), so min_by always returns Some — `expect`
+                // documents that the fallback can't fire.
                 let (min_idx, min_pct) = omitted
                     .top_omitted
                     .iter()
@@ -641,16 +647,21 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) -> us
                             .unwrap_or(std::cmp::Ordering::Equal)
                     })
                     .map(|(idx, p)| (idx, p.pct))
-                    .unwrap_or((0, f32::INFINITY));
+                    .expect("top_omitted is non-empty in cap-full branch");
                 if pct > min_pct {
                     omitted.top_omitted[min_idx] = preview;
+                    changed = true;
+                } else {
+                    changed = false;
                 }
             }
-            omitted.top_omitted.sort_by(|a, b| {
-                b.pct
-                    .partial_cmp(&a.pct)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            if changed {
+                omitted.top_omitted.sort_by(|a, b| {
+                    b.pct
+                        .partial_cmp(&a.pct)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
         }
         let after = crate::serde_util::serialized_byte_count(&children[i]);
         return after.saturating_sub(before);
@@ -1238,7 +1249,7 @@ mod tests {
     }
 
     #[test]
-    fn drop_smallest_leaf_descends_into_inner_branches() {
+    fn drop_smallest_leaf_prefers_leaf_sibling_at_current_level() {
         // root -> [a (Frame inner) -> tiny_leaf, b (large leaf)].
         // Trimmer should descend into `a` and drop tiny_leaf, not the
         // larger sibling b.

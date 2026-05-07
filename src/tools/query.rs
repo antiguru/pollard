@@ -184,8 +184,8 @@ pub struct TopFunctionsArgs {
     #[serde(flatten)]
     pub common: CommonFilterArgs,
     /// Per-call byte budget. The response is trimmed (lowest-priority
-    /// rows / smallest tree leaves dropped) until it fits — see the
-    /// `truncated` field on the response. Capped by the server-side
+    /// elements dropped) until it fits — see the `truncated` field on
+    /// the response. Capped by the server-side
     /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
     /// save tokens for other tool calls in the same turn, but not
     /// more. Pass `0` to disable trimming entirely.
@@ -241,8 +241,8 @@ pub struct CallTreeArgs {
     #[serde(flatten)]
     pub common: CommonFilterArgs,
     /// Per-call byte budget. The response is trimmed (lowest-priority
-    /// rows / smallest tree leaves dropped) until it fits — see the
-    /// `truncated` field on the response. Capped by the server-side
+    /// elements dropped) until it fits — see the `truncated` field on
+    /// the response. Capped by the server-side
     /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
     /// save tokens for other tool calls in the same turn, but not
     /// more. Pass `0` to disable trimming entirely.
@@ -266,8 +266,8 @@ pub struct FoldedStacksArgs {
     #[serde(flatten)]
     pub common: CommonFilterArgs,
     /// Per-call byte budget. The response is trimmed (lowest-priority
-    /// rows / smallest tree leaves dropped) until it fits — see the
-    /// `truncated` field on the response. Capped by the server-side
+    /// elements dropped) until it fits — see the `truncated` field on
+    /// the response. Capped by the server-side
     /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
     /// save tokens for other tool calls in the same turn, but not
     /// more. Pass `0` to disable trimming entirely.
@@ -324,8 +324,8 @@ pub struct TopGroupsArgs {
     #[serde(flatten)]
     pub common: CommonFilterArgs,
     /// Per-call byte budget. The response is trimmed (lowest-priority
-    /// rows / smallest tree leaves dropped) until it fits — see the
-    /// `truncated` field on the response. Capped by the server-side
+    /// elements dropped) until it fits — see the `truncated` field on
+    /// the response. Capped by the server-side
     /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
     /// save tokens for other tool calls in the same turn, but not
     /// more. Pass `0` to disable trimming entirely.
@@ -379,8 +379,8 @@ pub struct CompareProfilesArgs {
     #[serde(flatten)]
     pub common: CommonFilterArgs,
     /// Per-call byte budget. The response is trimmed (lowest-priority
-    /// rows / smallest tree leaves dropped) until it fits — see the
-    /// `truncated` field on the response. Capped by the server-side
+    /// elements dropped) until it fits — see the `truncated` field on
+    /// the response. Capped by the server-side
     /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
     /// save tokens for other tool calls in the same turn, but not
     /// more. Pass `0` to disable trimming entirely.
@@ -405,8 +405,8 @@ pub struct StacksContainingArgs {
     #[serde(flatten)]
     pub common: CommonFilterArgs,
     /// Per-call byte budget. The response is trimmed (lowest-priority
-    /// rows / smallest tree leaves dropped) until it fits — see the
-    /// `truncated` field on the response. Capped by the server-side
+    /// elements dropped) until it fits — see the `truncated` field on
+    /// the response. Capped by the server-side
     /// `POLLARD_MAX_OUTPUT_BYTES` ceiling; you can ask for less to
     /// save tokens for other tool calls in the same turn, but not
     /// more. Pass `0` to disable trimming entirely.
@@ -716,9 +716,14 @@ fn fit_folded_to_budget(
     // shell with `truncated` populated (we don't yet know the field
     // values but the byte-cost is the same for any reasonable
     // dropped/dropped_pct) so the budget gate accounts for the
-    // ~150–200 bytes that `Truncated` adds when trimming actually
-    // fires. Empty `folded` string keeps the per-line accounting
-    // separate from the envelope.
+    // ~145 bytes that `Truncated` adds when trimming actually fires.
+    // Empty `folded` string keeps the per-line accounting separate
+    // from the envelope.
+    //
+    // The probe deliberately uses worst-case digit widths
+    // (`usize::MAX` for `dropped`, 100.0 for `dropped_pct`) so the
+    // envelope estimate is conservative — real responses serialize
+    // shorter, leaving us slightly under-budget rather than over.
     let probe_truncated = crate::tools::budget::Truncated {
         dropped: usize::MAX,
         dropped_pct: Some(100.0),
