@@ -94,6 +94,12 @@ pub struct Output {
     /// contributor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processes_in_tree: Option<Vec<ProcessInTree>>,
+    /// Set when the response was trimmed to fit
+    /// `POLLARD_MAX_OUTPUT_BYTES`. The trimmer drops the lowest-pct
+    /// leaf frame first and rolls it into its parent's `Omitted`
+    /// summary. See [`crate::tools::budget`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<crate::tools::budget::Truncated>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -103,11 +109,13 @@ pub struct ProcessInTree {
     pub pid: String,
     pub name: String,
     pub samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub pct: f32,
 }
 
 #[derive(Debug, Serialize, JsonSchema, Clone)]
 pub struct PruningKnobs {
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub min_pct: f32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub min_samples: Option<u64>,
@@ -131,8 +139,10 @@ pub struct FrameNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chain: Option<Vec<String>>,
     pub self_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub self_pct: f32,
     pub total_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub total_pct: f32,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub children: Vec<Node>,
@@ -141,6 +151,7 @@ pub struct FrameNode {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct OmittedSummary {
     pub count: u32,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub combined_pct: f32,
     /// Names of up to [`TOP_OMITTED_CAP`] omitted children, biggest first,
     /// so the caller can decide whether widening `min_pct` / `max_breadth`
@@ -152,6 +163,7 @@ pub struct OmittedSummary {
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct OmittedPreview {
     pub function: String,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub pct: f32,
 }
 
@@ -160,6 +172,7 @@ pub struct TruncatedSummary {
     /// Function name at the depth cutoff — the subtree below this frame was
     /// dropped because it would exceed `max_depth`.
     pub function: String,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub deepest_descendant_pct: f32,
 }
 
@@ -337,6 +350,7 @@ fn call_tree_inner(
         matched_processes: args.filter_args.bare_name_multi_match(profile),
         cross_process,
         processes_in_tree,
+        truncated: None,
     })
 }
 
@@ -512,6 +526,99 @@ fn build_node(
         total_pct,
         children,
     }))
+}
+
+/// Drop the lowest-`total_pct` Frame leaf from `tree`, rolling its
+/// contribution into its parent's [`OmittedSummary`] so the response
+/// stays internally consistent.
+///
+/// Returns the dropped node's `total_pct` on success, or `None` when
+/// the tree has no Frame children left to drop without losing the
+/// only visible root. Used by [`crate::tools::budget::fit_to_budget`]
+/// to shrink a serialized response one element at a time — see #101.
+pub(crate) fn drop_smallest_leaf(tree: &mut Option<Node>) -> Option<f32> {
+    let root = tree.as_mut()?;
+    // If the root itself is the only Frame in the tree (no Frame
+    // children), there's nothing to drop without losing the response
+    // entirely. The trim loop reports this as "exhausted" so the
+    // caller can re-query with a smaller scope.
+    if let Node::Frame(f) = root
+        && !f.children.iter().any(|c| matches!(c, Node::Frame(_)))
+    {
+        return None;
+    }
+    drop_smallest_leaf_inner(root)
+}
+
+fn drop_smallest_leaf_inner(node: &mut Node) -> Option<f32> {
+    let frame = match node {
+        Node::Frame(f) => f,
+        _ => return None,
+    };
+
+    let mut smallest_leaf_child: Option<(usize, f32)> = None;
+    let mut smallest_inner_child: Option<(usize, f32)> = None;
+    for (i, child) in frame.children.iter().enumerate() {
+        if let Node::Frame(c) = child {
+            let has_frame_grandchildren =
+                c.children.iter().any(|gc| matches!(gc, Node::Frame(_)));
+            let pct = c.total_pct;
+            if has_frame_grandchildren {
+                if smallest_inner_child.is_none_or(|(_, p)| pct < p) {
+                    smallest_inner_child = Some((i, pct));
+                }
+            } else if smallest_leaf_child.is_none_or(|(_, p)| pct < p) {
+                smallest_leaf_child = Some((i, pct));
+            }
+        }
+    }
+
+    // Prefer dropping a leaf at this level over recursing — keeps the
+    // average drop-cost low (single tree-walk per drop iteration).
+    if let Some((i, pct)) = smallest_leaf_child {
+        let removed = frame.children.remove(i);
+        if let Node::Frame(c) = removed {
+            roll_into_omitted(&mut frame.children, c.function, c.total_pct);
+        }
+        return Some(pct);
+    }
+
+    if let Some((i, _)) = smallest_inner_child {
+        return drop_smallest_leaf_inner(&mut frame.children[i]);
+    }
+
+    None
+}
+
+/// Append the dropped leaf's contribution to a sibling [`OmittedSummary`]
+/// (creating one if absent) so the rendered tree's pct totals stay
+/// truthful even after trimming.
+fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) {
+    let preview = OmittedPreview { function, pct };
+    for child in children.iter_mut() {
+        if let Node::Omitted { omitted } = child {
+            omitted.count += 1;
+            omitted.combined_pct += pct;
+            // top_omitted lists biggest contributors first. The leaf
+            // we just dropped is, by construction, the smallest
+            // remaining at this level — so it only displaces an
+            // existing entry when the cap hasn't been hit yet.
+            if omitted.top_omitted.len() < TOP_OMITTED_CAP {
+                omitted.top_omitted.push(preview);
+                omitted
+                    .top_omitted
+                    .sort_by(|a, b| b.pct.partial_cmp(&a.pct).unwrap_or(std::cmp::Ordering::Equal));
+            }
+            return;
+        }
+    }
+    children.push(Node::Omitted {
+        omitted: OmittedSummary {
+            count: 1,
+            combined_pct: pct,
+            top_omitted: vec![preview],
+        },
+    });
 }
 
 fn compress_chains(node: &mut Node) {
@@ -1005,5 +1112,138 @@ mod tests {
 
         assert_eq!(tree.cross_process, None);
         assert!(tree.processes_in_tree.is_none());
+    }
+
+    /// Build a small tree with a known shape so we can drive the
+    /// budget-trimmer and assert it picks the lowest-pct leaf and rolls
+    /// the contribution into a sibling Omitted summary.
+    fn synthetic_two_leaf_tree() -> Option<Node> {
+        // root (10/100) -> [hot (8/80), cold (2/20)]
+        Some(Node::Frame(FrameNode {
+            function: "root".into(),
+            module: None,
+            chain: None,
+            self_samples: 0,
+            self_pct: 0.0,
+            total_samples: 10,
+            total_pct: 100.0,
+            children: vec![
+                Node::Frame(FrameNode {
+                    function: "hot".into(),
+                    module: None,
+                    chain: None,
+                    self_samples: 8,
+                    self_pct: 80.0,
+                    total_samples: 8,
+                    total_pct: 80.0,
+                    children: vec![],
+                }),
+                Node::Frame(FrameNode {
+                    function: "cold".into(),
+                    module: None,
+                    chain: None,
+                    self_samples: 2,
+                    self_pct: 20.0,
+                    total_samples: 2,
+                    total_pct: 20.0,
+                    children: vec![],
+                }),
+            ],
+        }))
+    }
+
+    #[test]
+    fn drop_smallest_leaf_picks_lowest_pct() {
+        let mut tree = synthetic_two_leaf_tree();
+        let dropped = drop_smallest_leaf(&mut tree).expect("dropped one leaf");
+        assert!((dropped - 20.0).abs() < 1e-3);
+        let Some(Node::Frame(f)) = tree else {
+            panic!("expected frame root after drop");
+        };
+        // Two children remain: hot (Frame), Omitted summarizing cold.
+        assert_eq!(f.children.len(), 2);
+        let omitted = f
+            .children
+            .iter()
+            .find_map(|c| match c {
+                Node::Omitted { omitted } => Some(omitted),
+                _ => None,
+            })
+            .expect("rolled cold into Omitted");
+        assert_eq!(omitted.count, 1);
+        assert!((omitted.combined_pct - 20.0).abs() < 1e-3);
+        assert_eq!(omitted.top_omitted[0].function, "cold");
+    }
+
+    #[test]
+    fn drop_smallest_leaf_returns_none_at_solitary_root() {
+        // A single Frame with no Frame children — nothing droppable.
+        let mut tree = Some(Node::Frame(FrameNode {
+            function: "lone".into(),
+            module: None,
+            chain: None,
+            self_samples: 1,
+            self_pct: 100.0,
+            total_samples: 1,
+            total_pct: 100.0,
+            children: vec![],
+        }));
+        assert!(drop_smallest_leaf(&mut tree).is_none());
+    }
+
+    #[test]
+    fn drop_smallest_leaf_descends_into_inner_branches() {
+        // root -> [a (Frame inner) -> tiny_leaf, b (large leaf)].
+        // Trimmer should descend into `a` and drop tiny_leaf, not the
+        // larger sibling b.
+        let mut tree = Some(Node::Frame(FrameNode {
+            function: "root".into(),
+            module: None,
+            chain: None,
+            self_samples: 0,
+            self_pct: 0.0,
+            total_samples: 10,
+            total_pct: 100.0,
+            children: vec![
+                Node::Frame(FrameNode {
+                    function: "a".into(),
+                    module: None,
+                    chain: None,
+                    self_samples: 0,
+                    self_pct: 0.0,
+                    total_samples: 4,
+                    total_pct: 40.0,
+                    children: vec![Node::Frame(FrameNode {
+                        function: "tiny_leaf".into(),
+                        module: None,
+                        chain: None,
+                        self_samples: 4,
+                        self_pct: 40.0,
+                        total_samples: 4,
+                        total_pct: 40.0,
+                        children: vec![],
+                    })],
+                }),
+                Node::Frame(FrameNode {
+                    function: "b".into(),
+                    module: None,
+                    chain: None,
+                    self_samples: 6,
+                    self_pct: 60.0,
+                    total_samples: 6,
+                    total_pct: 60.0,
+                    children: vec![],
+                }),
+            ],
+        }));
+        // Expected pick: `b` is the smaller leaf at the root level
+        // (60%) vs `a`'s only child `tiny_leaf` is reachable but a's
+        // total is 40%. The trimmer prefers leaf children at the
+        // current level when one is available — so `b` (60%) goes
+        // first because both `a` (40, has frame grandchild) and `b`
+        // (60, leaf) are siblings, and only `b` qualifies as a "leaf
+        // child" candidate.
+        let dropped = drop_smallest_leaf(&mut tree).expect("dropped one leaf");
+        assert!((dropped - 60.0).abs() < 1e-3);
     }
 }

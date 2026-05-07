@@ -8,6 +8,7 @@ use rmcp::{
 };
 use std::sync::Arc;
 
+pub mod budget;
 pub mod drill_down;
 pub mod lifecycle;
 pub mod query;

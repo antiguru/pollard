@@ -5,6 +5,7 @@ use crate::profile::raw::Pid;
 use crate::query::filters::{Filter, ProcessFilter, ThreadFilter};
 use crate::query::{call_tree, compare, folded, stacks_containing, top_functions, top_groups};
 use crate::tools::PollardServer;
+use crate::tools::budget::{DropOutcome, fit_to_budget, output_budget_bytes};
 use rmcp::ErrorData;
 use rmcp::handler::server::wrapper::{Json, Parameters};
 use rmcp::{tool, tool_router};
@@ -253,6 +254,12 @@ pub struct FoldedStacksOutput {
     /// Folded text: one line per unique stack, formatted as
     /// `root;child;...;leaf <samples>`.
     pub folded: String,
+    /// Set when the response was trimmed to fit
+    /// `POLLARD_MAX_OUTPUT_BYTES`. The lowest-sample lines are dropped
+    /// first; the remaining `folded` text is still sorted by stack
+    /// string. See [`crate::tools::budget`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<crate::tools::budget::Truncated>,
 }
 
 // ---------------------------------------------------------------------------
@@ -390,7 +397,15 @@ impl PollardServer {
             expand_inlines: args.expand_inlines.unwrap_or(false),
             event,
         };
-        let result = top_functions::top_functions(session.profile(), &q_args)?;
+        let mut result = top_functions::top_functions(session.profile(), &q_args)?;
+        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
+            // Rows are pre-sorted (descending by self/total/etc) so the
+            // tail is always the lowest-priority — pop until budget fits.
+            match out.functions.pop() {
+                Some(row) => DropOutcome::Dropped(Some(row.self_pct)),
+                None => DropOutcome::Exhausted,
+            }
+        });
         Ok(Json(result))
     }
 
@@ -431,7 +446,13 @@ impl PollardServer {
             expand_inlines: args.expand_inlines.unwrap_or(false),
             directory_depth: args.directory_depth,
         };
-        let result = top_groups::top_groups(session.profile(), &q_args)?;
+        let mut result = top_groups::top_groups(session.profile(), &q_args)?;
+        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
+            match out.groups.pop() {
+                Some(row) => DropOutcome::Dropped(Some(row.self_pct)),
+                None => DropOutcome::Exhausted,
+            }
+        });
         Ok(Json(result))
     }
 
@@ -458,7 +479,13 @@ impl PollardServer {
             expand_inlines: args.expand_inlines.unwrap_or(defaults.expand_inlines),
             event,
         };
-        let result = call_tree::call_tree(session.profile(), &q_args)?;
+        let mut result = call_tree::call_tree(session.profile(), &q_args)?;
+        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
+            match call_tree::drop_smallest_leaf(&mut out.tree) {
+                Some(pct) => DropOutcome::Dropped(Some(pct)),
+                None => DropOutcome::Exhausted,
+            }
+        });
         Ok(Json(result))
     }
 
@@ -475,8 +502,12 @@ impl PollardServer {
             filter_args: parse_filter(&args.common)?.compose_under_scope(session.view_scope())?,
             function_filter: args.function_filter.clone(),
         };
-        let folded = folded::folded_stacks(session.profile(), &q_args)?;
-        Ok(Json(FoldedStacksOutput { folded }))
+        let folded = folded::folded_stacks_structured(session.profile(), &q_args)?;
+        let (rendered, truncated) = fit_folded_to_budget(folded, output_budget_bytes());
+        Ok(Json(FoldedStacksOutput {
+            folded: rendered,
+            truncated,
+        }))
     }
 
     #[tool(
@@ -530,7 +561,16 @@ impl PollardServer {
             )?,
             event,
         };
-        let result = compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
+        let mut result =
+            compare::compare_profiles(session_a.profile(), session_b.profile(), &q_args)?;
+        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
+            // Sorted by `|delta|` desc (or the chosen sort), so the
+            // tail of the vec is the least interesting row.
+            match out.functions.pop() {
+                Some(row) => DropOutcome::Dropped(Some(row.delta_self_pct.abs())),
+                None => DropOutcome::Exhausted,
+            }
+        });
         Ok(Json(result))
     }
 
@@ -548,7 +588,173 @@ impl PollardServer {
             function: args.function.clone(),
             limit: args.limit.unwrap_or(0),
         };
-        let result = stacks_containing::stacks_containing(session.profile(), &q_args)?;
+        let mut result = stacks_containing::stacks_containing(session.profile(), &q_args)?;
+        result.truncated = fit_to_budget(&mut result, output_budget_bytes(), |out| {
+            match out.stacks.pop() {
+                Some(stack) => {
+                    out.stacks_returned = out.stacks.len();
+                    DropOutcome::Dropped(Some(stack.pct))
+                }
+                None => DropOutcome::Exhausted,
+            }
+        });
         Ok(Json(result))
+    }
+}
+
+/// Trim a [`folded::Folded`] result to fit `budget` bytes by dropping
+/// the lowest-sample lines first. Specialized rather than going
+/// through [`fit_to_budget`] because the rendered output is a single
+/// string — re-rendering on every drop would be O(n²) on big
+/// profiles. Computes per-line byte cost up front and walks the
+/// pre-sorted entry list once.
+fn fit_folded_to_budget(
+    mut folded: folded::Folded,
+    budget: usize,
+) -> (String, Option<crate::tools::budget::Truncated>) {
+    if budget == 0 {
+        return (folded.render(), None);
+    }
+    // Approximate envelope cost of `{"folded":""}` plus any future
+    // sibling fields. Slight overestimate is fine — the per-line cost
+    // dominates.
+    const ENVELOPE_OVERHEAD: usize = 64;
+    let folded_budget = budget.saturating_sub(ENVELOPE_OVERHEAD);
+
+    folded.entries.sort_by(|a, b| {
+        b.samples
+            .cmp(&a.samples)
+            .then_with(|| a.stack.cmp(&b.stack))
+    });
+    let total = folded.total_samples.max(1) as f32;
+
+    let mut keep = 0usize;
+    let mut size = 0usize;
+    for e in &folded.entries {
+        let line = line_bytes(&e.stack, e.samples);
+        // The string produced by `Folded::render` contains every kept
+        // line — we don't escape, so the on-wire JSON-encoded `folded`
+        // string is `line.len() + escapes`. Lines are demangled
+        // function names which rarely contain `"` or `\`, so the
+        // unescaped count is a tight estimate.
+        if size + line > folded_budget && keep > 0 {
+            break;
+        }
+        size += line;
+        keep += 1;
+    }
+
+    if keep == folded.entries.len() {
+        return (folded.render(), None);
+    }
+
+    let dropped = folded.entries.len() - keep;
+    let dropped_pct: f32 = folded
+        .entries
+        .iter()
+        .skip(keep)
+        .map(|e| 100.0 * e.samples as f32 / total)
+        .sum();
+    folded.entries.truncate(keep);
+    let rendered = folded.render();
+    let final_bytes = rendered.len() + ENVELOPE_OVERHEAD;
+    (
+        rendered,
+        Some(crate::tools::budget::Truncated {
+            dropped,
+            dropped_pct: Some(dropped_pct),
+            budget_bytes: budget,
+            final_bytes,
+            still_over_budget: final_bytes > budget,
+        }),
+    )
+}
+
+fn line_bytes(stack: &str, samples: u64) -> usize {
+    let digits = if samples == 0 {
+        1
+    } else {
+        let mut d = 0usize;
+        let mut n = samples;
+        while n > 0 {
+            d += 1;
+            n /= 10;
+        }
+        d
+    };
+    stack.len() + 1 /* space */ + digits + 1 /* newline */
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fit_folded_drops_lowest_sample_lines_first() {
+        // Three lines, total ~ 36 bytes of payload. Budget tight enough
+        // to force at least one drop; the smallest-sample line goes.
+        let folded = folded::Folded {
+            entries: vec![
+                folded::FoldedEntry {
+                    stack: "aaaaaaaa".into(),
+                    samples: 100,
+                },
+                folded::FoldedEntry {
+                    stack: "bbbbbbbb".into(),
+                    samples: 50,
+                },
+                folded::FoldedEntry {
+                    stack: "cccccccc".into(),
+                    samples: 1,
+                },
+            ],
+            total_samples: 151,
+        };
+        // Envelope is ~64 bytes, line cost ~13 bytes each. Budget for
+        // two lines ≈ 64 + 2*13 = 90.
+        let (rendered, truncated) = fit_folded_to_budget(folded, 90);
+        let truncated = truncated.expect("expected to truncate");
+        assert_eq!(truncated.dropped, 1);
+        assert!(!rendered.contains("cccccccc"));
+        assert!(rendered.contains("aaaaaaaa"));
+        assert!(rendered.contains("bbbbbbbb"));
+    }
+
+    #[test]
+    fn fit_folded_returns_unchanged_under_budget() {
+        let folded = folded::Folded {
+            entries: vec![folded::FoldedEntry {
+                stack: "x".into(),
+                samples: 1,
+            }],
+            total_samples: 1,
+        };
+        let (rendered, truncated) = fit_folded_to_budget(folded, 10_000);
+        assert_eq!(rendered, "x 1\n");
+        assert!(truncated.is_none());
+    }
+
+    #[test]
+    fn fit_folded_keeps_at_least_one_line_when_budget_tiny() {
+        let folded = folded::Folded {
+            entries: vec![
+                folded::FoldedEntry {
+                    stack: "looooong_stack_name".into(),
+                    samples: 5,
+                },
+                folded::FoldedEntry {
+                    stack: "another_one".into(),
+                    samples: 3,
+                },
+            ],
+            total_samples: 8,
+        };
+        // Budget so small no line fits — the trimmer keeps the largest
+        // line anyway so the response isn't an empty payload.
+        let (rendered, truncated) = fit_folded_to_budget(folded, 10);
+        let truncated = truncated.expect("expected truncation");
+        assert!(truncated.still_over_budget);
+        assert!(rendered.contains("looooong_stack_name"));
+        assert!(!rendered.contains("another_one"));
     }
 }

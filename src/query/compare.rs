@@ -134,6 +134,10 @@ pub struct Output {
     /// can resolve to different pid sets in each recording.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub b_matched_processes: Option<Vec<ProcessRef>>,
+    /// Set when the response was trimmed to fit
+    /// `POLLARD_MAX_OUTPUT_BYTES`. See [`crate::tools::budget`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncated: Option<crate::tools::budget::Truncated>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -143,16 +147,22 @@ pub struct DiffEntry {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     pub a_self_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub a_self_pct: f32,
     pub a_total_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub a_total_pct: f32,
     pub b_self_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub b_self_pct: f32,
     pub b_total_samples: u64,
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub b_total_pct: f32,
     /// `b_self_pct - a_self_pct`. Positive = function got hotter in B.
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub delta_self_pct: f32,
     /// `b_total_pct - a_total_pct`.
+    #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub delta_total_pct: f32,
     /// Raw sample-count deltas. Less normalized than the pct deltas — useful
     /// when both profiles have similar duration and the caller wants to know
@@ -168,19 +178,37 @@ pub struct DiffEntry {
     /// Caveat for the time-shaped case: across N sampled threads,
     /// samples sum across threads, so the value is closer to summed-
     /// CPU-time than wall time when multiple threads are profiled.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serde_util::round2_ms_opt"
+    )]
     pub a_self_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serde_util::round2_ms_opt"
+    )]
     pub b_self_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serde_util::round2_ms_opt"
+    )]
     pub a_total_ms: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serde_util::round2_ms_opt"
+    )]
     pub b_total_ms: Option<f64>,
     /// `b_self_ms - a_self_ms`. Positive = function spent more time in B.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serde_util::round2_ms_opt"
+    )]
     pub delta_self_ms: Option<f64>,
     /// `b_total_ms - a_total_ms`.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "crate::serde_util::round2_ms_opt"
+    )]
     pub delta_total_ms: Option<f64>,
 }
 
@@ -324,6 +352,7 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
         functions: rows,
         a_matched_processes: args.filter_args.bare_name_multi_match(a),
         b_matched_processes: args.filter_args.bare_name_multi_match(b),
+        truncated: None,
     })
 }
 

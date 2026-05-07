@@ -24,7 +24,47 @@ pub struct Args {
     pub function_filter: Option<String>,
 }
 
+/// Folded entries with their sample counts. Kept as a structured list
+/// (rather than the joined string) so the budget trimmer can drop
+/// individual lines by sample count and recompute the rendered text.
+#[derive(Debug, Clone, Default)]
+pub struct Folded {
+    pub entries: Vec<FoldedEntry>,
+    /// Sum of samples represented across all entries — denominator for
+    /// any "% dropped" rollup the trimmer reports.
+    pub total_samples: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FoldedEntry {
+    pub stack: String,
+    pub samples: u64,
+}
+
+impl Folded {
+    /// Render the folded text in the canonical `root;...;leaf <samples>`
+    /// shape, sorted by stack string for diffability with `comm`.
+    pub fn render(&self) -> String {
+        let mut out = String::new();
+        let mut sorted: Vec<&FoldedEntry> = self.entries.iter().collect();
+        sorted.sort_by(|a, b| a.stack.cmp(&b.stack));
+        for e in sorted {
+            out.push_str(&e.stack);
+            out.push(' ');
+            out.push_str(&e.samples.to_string());
+            out.push('\n');
+        }
+        out
+    }
+}
+
+/// Backwards-compatible string rendering. Prefer
+/// [`folded_stacks_structured`] when budget trimming is needed.
 pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError> {
+    Ok(folded_stacks_structured(profile, args)?.render())
+}
+
+pub fn folded_stacks_structured(profile: &Profile, args: &Args) -> Result<Folded, ToolError> {
     args.filter_args.validate_process(profile)?;
     args.filter_args.validate_thread(profile)?;
     args.filter_args.validate_time_range(profile)?;
@@ -32,6 +72,7 @@ pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError
     let matcher = optional_matcher("function_filter", args.function_filter.as_deref())?;
 
     let mut counts: HashMap<String, u64> = HashMap::new();
+    let mut total_samples: u64 = 0;
 
     for handle in args.filter_args.threads(profile) {
         for stack_opt in
@@ -62,21 +103,21 @@ pub fn folded_stacks(profile: &Profile, args: &Args) -> Result<String, ToolError
                 continue;
             }
             *counts.entry(frames.join(";")).or_default() += 1;
+            total_samples += 1;
         }
     }
 
-    // Sort by stack string for determinism (also makes diffing trivial).
-    let mut entries: Vec<(String, u64)> = counts.into_iter().collect();
-    entries.sort_by(|a, b| a.0.cmp(&b.0));
-
-    let mut out = String::new();
-    for (stack, n) in entries {
-        out.push_str(&stack);
-        out.push(' ');
-        out.push_str(&n.to_string());
-        out.push('\n');
-    }
-    Ok(out)
+    let mut entries: Vec<FoldedEntry> = counts
+        .into_iter()
+        .map(|(stack, samples)| FoldedEntry { stack, samples })
+        .collect();
+    // Sort by stack string for deterministic rendering. The budget
+    // trimmer below sorts by sample count when it needs to drop.
+    entries.sort_by(|a, b| a.stack.cmp(&b.stack));
+    Ok(Folded {
+        entries,
+        total_samples,
+    })
 }
 
 #[cfg(test)]
