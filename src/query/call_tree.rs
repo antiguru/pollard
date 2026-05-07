@@ -560,8 +560,7 @@ fn drop_smallest_leaf_inner(node: &mut Node) -> Option<f32> {
     let mut smallest_inner_child: Option<(usize, f32)> = None;
     for (i, child) in frame.children.iter().enumerate() {
         if let Node::Frame(c) = child {
-            let has_frame_grandchildren =
-                c.children.iter().any(|gc| matches!(gc, Node::Frame(_)));
+            let has_frame_grandchildren = c.children.iter().any(|gc| matches!(gc, Node::Frame(_)));
             let pct = c.total_pct;
             if has_frame_grandchildren {
                 if smallest_inner_child.is_none_or(|(_, p)| pct < p) {
@@ -605,9 +604,11 @@ fn roll_into_omitted(children: &mut Vec<Node>, function: String, pct: f32) {
             // existing entry when the cap hasn't been hit yet.
             if omitted.top_omitted.len() < TOP_OMITTED_CAP {
                 omitted.top_omitted.push(preview);
-                omitted
-                    .top_omitted
-                    .sort_by(|a, b| b.pct.partial_cmp(&a.pct).unwrap_or(std::cmp::Ordering::Equal));
+                omitted.top_omitted.sort_by(|a, b| {
+                    b.pct
+                        .partial_cmp(&a.pct)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
             }
             return;
         }
