@@ -1,6 +1,6 @@
 {
   "name": "pollard",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "description": "Read Firefox-format performance profiles (samply, perf-imported) from Claude Code via an MCP server. Bundles skills for the canonical recording workflow and view-preset cookbook.",
   "author": {
     "name": "antiguru",
