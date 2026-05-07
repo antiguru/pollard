@@ -22,17 +22,49 @@ jobs:
         uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          persist-credentials: true
       - name: Install Rust toolchain
         uses: actions-rust-lang/setup-rust-toolchain@v1
+
+      # Precondition: refuse to publish if the plugin manifests have drifted
+      # from Cargo.toml. The sync step below keeps them in lockstep on each
+      # release PR; this guard catches the case where someone bypassed it.
+      - name: Verify plugin manifests match Cargo.toml
+        run: |
+          set -euo pipefail
+          cargo_version=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "pollard") | .version')
+          plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
+          marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
+          if [ "$cargo_version" != "$plugin_version" ] || [ "$cargo_version" != "$marketplace_version" ]; then
+            echo "::error::Cargo.toml v${cargo_version} disagrees with plugin.json (${plugin_version}) / marketplace.json (${marketplace_version}). The release-plz PR's sync step should keep these in lockstep."
+            exit 1
+          fi
+
       - name: release-plz - publish on merged release
+        id: release
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Package plugin bundle
+        if: steps.release.outputs.releases_created == 'true'
+        run: |
+          mkdir -p dist
+          zip -r dist/pollard.skill \
+            .claude-plugin/ skills/ LICENSE-APACHE LICENSE-MIT README.md
+
+      - name: Upload plugin bundle to release
+        if: steps.release.outputs.releases_created == 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ fromJSON(steps.release.outputs.releases)[0].tag }}
+          files: dist/*.skill
+
       - name: release-plz - update release PR
-        id: release-plz
+        id: release-pr
         uses: MarcoIeni/release-plz-action@v0.5
         with:
           command: release-pr
@@ -41,29 +73,16 @@ jobs:
 
       # release-plz force-pushes the release branch on every run, so this
       # follow-up commit is reapplied after each release-pr update rather
-      # than persisting across runs. The plugin-release workflow's
-      # verify-tag check is the safety net if this step ever fails.
-      #
-      # This step checks out the release PR branch to amend it. It MUST
-      # stay last in the job — the publish step above tags+publishes
-      # whatever HEAD points at, so any later step that left HEAD on
-      # the bumped PR branch would cause an unmerged release to be
-      # tagged and shipped to crates.io. (That is how v0.0.7 was
-      # published without #104 ever being merged.)
+      # than persisting across runs. The verify step at the top of the job
+      # is the safety net if this ever fails to run.
       - name: Sync plugin manifest versions to Cargo.toml
-        if: steps.release-plz.outputs.prs != '[]'
+        if: steps.release-pr.outputs.prs_created == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PRS_JSON: ${{ steps.release-plz.outputs.prs }}
+          PR_NUMBER: ${{ fromJSON(steps.release-pr.outputs.pr).number }}
         run: |
           set -euo pipefail
-          pr_branch=$(echo "$PRS_JSON" | jq -r '.[0].head_branch // empty')
-          if [ -z "$pr_branch" ] || [ "$pr_branch" = "null" ]; then
-            echo "No release-plz PR branch in outputs; nothing to sync."
-            exit 0
-          fi
-          git fetch origin "$pr_branch"
-          git checkout "$pr_branch"
+          gh pr checkout "$PR_NUMBER"
           cargo_version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pollard") | .version')
           plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
@@ -82,4 +101,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add .claude-plugin/plugin.json .claude-plugin/marketplace.json
           git commit -m "chore: sync plugin manifests to v${cargo_version}"
-          git push origin "$pr_branch"
+          git push
