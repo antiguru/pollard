@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.9](https://github.com/antiguru/pollard/compare/v0.0.8...v0.0.9) - 2026-05-07
+
+### Other
+
+- Merge pull request #109 from antiguru/claude/issue-101-budget-approach-LF16A
+- refresh stale header comment on renamed call_tree test
+- address second-pass review nits
+- address review feedback ([#109](https://github.com/antiguru/pollard/pull/109))
+- count serialized bytes via io::Write sink, no allocation
+- linear-time trim loop via per-drop bytes_freed
+- apply rustfmt to call_tree.rs
+- trim oversize tool responses to fit POLLARD_MAX_OUTPUT_BYTES ([#101](https://github.com/antiguru/pollard/pull/101))
+
 ### Added
 
 - output budget: `top_functions`, `top_groups`, `compare_profiles`,
