@@ -1250,9 +1250,10 @@ mod tests {
 
     #[test]
     fn drop_smallest_leaf_prefers_leaf_sibling_at_current_level() {
-        // root -> [a (Frame inner) -> tiny_leaf, b (large leaf)].
-        // Trimmer should descend into `a` and drop tiny_leaf, not the
-        // larger sibling b.
+        // root -> [a (inner: has a Frame grandchild), b (direct leaf)].
+        // Both are siblings at the root level; the strategy prefers
+        // dropping the leaf sibling (`b`) over descending into `a` —
+        // see the longer rationale below the tree literal.
         let mut tree = Some(Node::Frame(FrameNode {
             function: "root".into(),
             module: None,
