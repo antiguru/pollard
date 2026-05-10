@@ -35,9 +35,8 @@ jobs:
           cargo_version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pollard") | .version')
           plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
-          marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
-          if [ "$cargo_version" != "$plugin_version" ] || [ "$cargo_version" != "$marketplace_version" ]; then
-            echo "::error::Cargo.toml v${cargo_version} disagrees with plugin.json (${plugin_version}) / marketplace.json (${marketplace_version}). The release-plz PR's sync step should keep these in lockstep."
+          if [ "$cargo_version" != "$plugin_version" ]; then
+            echo "::error::Cargo.toml v${cargo_version} disagrees with plugin.json (${plugin_version}). The release-plz PR's sync step should keep these in lockstep."
             exit 1
           fi
 
@@ -88,19 +87,15 @@ jobs:
           cargo_version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pollard") | .version')
           plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
-          marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
-          if [ "$cargo_version" = "$plugin_version" ] && [ "$cargo_version" = "$marketplace_version" ]; then
-            echo "Plugin manifests already at v${cargo_version}."
+          if [ "$cargo_version" = "$plugin_version" ]; then
+            echo "Plugin manifest already at v${cargo_version}."
             exit 0
           fi
           jq --arg v "$cargo_version" '.version = $v' \
             .claude-plugin/plugin.json > .claude-plugin/plugin.json.tmp
           mv .claude-plugin/plugin.json.tmp .claude-plugin/plugin.json
-          jq --arg v "$cargo_version" '.plugins[0].version = $v' \
-            .claude-plugin/marketplace.json > .claude-plugin/marketplace.json.tmp
-          mv .claude-plugin/marketplace.json.tmp .claude-plugin/marketplace.json
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add .claude-plugin/plugin.json .claude-plugin/marketplace.json
-          git commit -m "chore: sync plugin manifests to v${cargo_version}"
+          git add .claude-plugin/plugin.json
+          git commit -m "chore: sync plugin manifest to v${cargo_version}"
           git push
