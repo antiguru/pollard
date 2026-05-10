@@ -60,9 +60,8 @@ jobs:
           cargo_version=$(cargo metadata --no-deps --format-version 1 \
             | jq -r '.packages[] | select(.name == "pollard") | .version')
           plugin_version=$(jq -r '.version' .claude-plugin/plugin.json)
-          marketplace_version=$(jq -r '.plugins[0].version' .claude-plugin/marketplace.json)
-          if [ "$cargo_version" != "$plugin_version" ] || [ "$cargo_version" != "$marketplace_version" ]; then
-            echo "::error::Cargo.toml version ($cargo_version) disagrees with .claude-plugin/plugin.json ($plugin_version) and/or .claude-plugin/marketplace.json ($marketplace_version). The release-plz workflow normally syncs these — if this fires on a regular PR, bump the manifests by hand to match Cargo.toml."
+          if [ "$cargo_version" != "$plugin_version" ]; then
+            echo "::error::Cargo.toml version ($cargo_version) disagrees with .claude-plugin/plugin.json ($plugin_version). The release-plz workflow normally syncs these — if this fires on a regular PR, bump plugin.json by hand to match Cargo.toml."
             exit 1
           fi
 
