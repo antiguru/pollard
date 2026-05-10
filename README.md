@@ -8,9 +8,7 @@ The name comes from *pollarding* — the forestry technique of pruning a tree's
 upper branches to encourage dense, manageable regrowth — which is exactly what
 this tool does to call trees so an LLM can hold them.
 
-## Status
-
-Early development. Published to [crates.io](https://crates.io/crates/pollard).
+Published to [crates.io](https://crates.io/crates/pollard).
 
 ## Tools
 
@@ -61,9 +59,12 @@ Installs the MCP server *and* the bundled skills (`profile-recording`,
 `view-presets`, `pollard-doctor`) in one step:
 
 ```text
-/plugin marketplace add antiguru/pollard
-/plugin install pollard@antiguru
+/plugin marketplace add antiguru/antiguru-tools
+/plugin install pollard@antiguru-tools
 ```
+
+The `antiguru-tools` marketplace also lists sibling plugins
+(`binutils-mcp`, `timely-skill`, `differential-skill`, `columnar-skill`).
 
 Skills surface as `/pollard:<skill>` alongside everything else the
 user has installed. If a tool call fails after install, run
