@@ -111,3 +111,7 @@ top_functions profile="slow" event="cache-misses" limit=5
 ## Suggested demo script
 
 A 10-minute presentation outline lives in [`SLIDES.md`](./SLIDES.md).
+
+## Recorded sessions
+
+[`transcripts/`](./transcripts/) holds six side-by-side investigations — same user prompt ("I have program X and noticed it's slow"), once without pollard and once with. The `with-pollard` transcripts quote real tool output and reproduce from the binaries in this crate.

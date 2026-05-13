@@ -5,3 +5,6 @@ Cargo.lock
 .idea/
 *.swp
 .DS_Store
+
+# Demo profile recordings (regenerated locally; see example/README.md)
+/profiles/
