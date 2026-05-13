@@ -1,3 +1,6 @@
+[workspace]
+members = ["example"]
+
 [package]
 name = "pollard"
 version = "0.0.9"
@@ -111,3 +114,11 @@ rpath = false
 lto = true
 debug-assertions = false
 codegen-units = 4
+
+# Used by the `example/` demo binaries: optimized but without LTO so the
+# function boundaries that matter to a profile (format!, sort_unstable, the
+# matmul inner loop, etc.) are not inlined into a single blob.
+[profile.demo]
+inherits = "release"
+lto = false
+codegen-units = 16

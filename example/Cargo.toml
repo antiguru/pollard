@@ -1,0 +1,18 @@
+[package]
+name = "pollard-demo"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Demo binaries for the pollard MCP profile-analysis presentation."
+
+[[bin]]
+name = "log_p99"
+path = "src/bin/log_p99.rs"
+
+[[bin]]
+name = "matmul"
+path = "src/bin/matmul.rs"
+
+[[bin]]
+name = "nested_join"
+path = "src/bin/nested_join.rs"
