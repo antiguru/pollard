@@ -23,3 +23,11 @@ path = "src/bin/nested_join.rs"
 [[bin]]
 name = "page_fault"
 path = "src/bin/page_fault.rs"
+
+[[bin]]
+name = "pipeline"
+path = "src/bin/pipeline.rs"
+
+[[bin]]
+name = "pipeline_inlined"
+path = "src/bin/pipeline_inlined.rs"
