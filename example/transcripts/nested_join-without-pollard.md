@@ -15,12 +15,36 @@ mode=slow  events=500000  meta=50000  elapsed=3.024s  acc=0x0003cfafbab6d880
 
 3 s for 500K events × 50K meta entries. The cardinality alone suggests an O(n × m) join.
 
-I have a Firefox-format profile. To investigate I'd need to:
+I have a Firefox-format profile. I can't query it directly, but a small python script over the stack/frame/func tables produces a top-N:
 
-* Open it in the Firefox Profiler UI (`samply load /tmp/nested_join-slow.json.gz`), and ask you to read me the call tree, or
-* Look at the source — `nested_join.rs` — and reason about what would be slow.
+```bash
+$ python3 transcripts/top_funcs.py /tmp/nested_join-slow.json.gz 5
+   915  31.6%  0xc1f0
+   837  28.9%  0xc1f9
+   550  19.0%  0xc20c
+   461  15.9%  0xc1f4
+   106   3.7%  0xc1fe
+```
 
-Reading the source for `join_slow`:
+`samply --save-only` doesn't symbolicate; resolve with `addr2line`:
+
+```bash
+$ addr2line -e ./target/demo/nested_join -f -C 0xc1f0 0xc1f9 0xc20c 0xc1f4 0xc1fe
+nested_join::join_slow::{{closure}}
+nested_join.rs:56
+<core::slice::iter::Iter<T> as core::iter::Iterator>::find
+.../core/src/slice/iter/macros.rs:349
+nested_join::join_slow::{{closure}}
+nested_join.rs:56
+<core::slice::iter::Iter<T> as core::iter::Iterator>::find
+…
+<core::slice::iter::Iter<T> as core::iter::Iterator>::next
+…
+```
+
+Three distinct symbols, 99 % of samples between them, all inside the inner `meta.iter().find(...)` machinery: the predicate closure on line 56, `Iter::find`, `Iter::next`. The linear scan is the hot spot.
+
+Cross-check by reading the source — `nested_join.rs`:
 
 ```rust
 fn join_slow(events: &[Event], meta: &[Meta]) -> u64 {
@@ -34,23 +58,14 @@ fn join_slow(events: &[Event], meta: &[Meta]) -> u64 {
 }
 ```
 
-The `meta.iter().find(...)` is a linear scan, called once per event. 500K × 25K average probes = ~12.5G comparisons. That's the bug, and it's visible from reading.
+The `meta.iter().find(...)` is a linear scan, called once per event. 500K × 25K average probes = ~12.5G comparisons. Source reading and the python+addr2line histogram point at the same line, which is reassuring — the profile is no longer a yes/no oracle but a primary source of evidence.
 
-But "I think it's the linear scan" without a profile is a hypothesis. I can't confirm what fraction of time is in the `find` vs. the `wrapping_add` vs. the iterator setup vs. generator code, without you opening the UI and reading off the call tree.
-
-Could you open the profile UI and:
-
-* Confirm the **Call Tree** top entry is `join_slow` or something inside it (closure for the `find` predicate, `Iterator::find`, etc).
-* Tell me the self percentage — is it >90 %?
-
-If yes, the fix is a `HashMap<u32, u32>` index built once outside the loop. If no, I need to keep digging — but for that, I need eyes on the profile.
+The fix is a `HashMap<u32, u32>` index built once outside the loop.
 
 ## What this workflow misses
 
-The case where the defect *is* obvious from reading the code — like this one — looks like a win for the no-tools workflow. It isn't:
-
-* I never measured what `find` actually costs vs. what I assumed it costs. If the cardinality were lower and the linear scan were already fine, this advice would be a premature optimization.
-* The profile collected richer signal (call stacks, allocations, scheduling) that's now thrown away.
-* The handoff is still serial: you open the UI, you click through, you tell me.
+* The python script tops out at leaf-frame aggregation. For this defect that's enough; for a bug where the hot leaf is `core::ptr::copy` called from three different sites, leaf attribution would tell me *what kind of work is hot* (copying) without telling me *which caller is driving it*. I'd need to extend the script to walk ancestor frames — another 30 lines, a second pass over the data.
+* `addr2line` resolves one binary at a time. For profiles that cross into shared libraries (libc allocator, tokio runtime), I'd be running it against several files and stitching the results — or installing debuginfo for each. samply/pollard handle this for me.
+* The profile has richer signal that the histogram throws away: call stacks, allocations, scheduling, hardware-counter markers when recorded. Each axis needs its own scripting pass.
 
 For non-trivial defects (`log_p99`, `matmul`) this gap is much wider — but even on the trivial one, the lack of measurement turns "found the bug" into "guessed and got lucky".

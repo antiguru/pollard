@@ -35,7 +35,7 @@ The inner `k` loop strides through `b` one column at a time and misses cache on 
 Fast mode swaps the inner two loops to `ikj`, same arithmetic, row-stride access on `b`.
 Speedup: ~16×.
 
-This is the binary to use if you want to showcase pollard's hardware-counter support — record with `--rate cache-misses` and pass `event: "cache-misses"` to `top_functions` / `call_tree`.
+This is the binary to use if you want to showcase pollard's hardware-counter support — record with `perf record -e cache-misses`, convert with `samply import`, and pass `event: "cache-misses"` to `top_functions` / `call_tree`.
 
 ### `nested_join` — quadratic loop
 
@@ -94,10 +94,11 @@ For Rust-specific noise (tracing-subscriber walls, tokio internals, stdlib glue)
 
 ## Hardware counters (matmul)
 
-samply records hardware perf counters on Linux:
+`samply record` only samples cycles. For hardware events, record with `perf` and import:
 
 ```sh
-samply record --rate cache-misses -o slow.json.gz --save-only ./target/demo/matmul slow
+perf record -e cache-misses --call-graph dwarf -o slow.perf.data ./target/demo/matmul slow
+samply import slow.perf.data -o slow.json.gz --save-only
 ```
 
 Then:
@@ -107,6 +108,8 @@ top_functions profile="slow" event="cache-misses" limit=5
 ```
 
 `matmul_slow` dominates the cache-misses event much more strongly than it dominates cycles. That is the loop-order bug in a single tool call.
+
+The same workflow extends to other perf events — `page-faults` (see `page_fault` bin), `branch-misses`, `dTLB-load-misses`, etc.
 
 ## Suggested demo script
 

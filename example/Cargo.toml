@@ -5,6 +5,9 @@ edition = "2024"
 publish = false
 description = "Demo binaries for the pollard MCP profile-analysis presentation."
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [[bin]]
 name = "log_p99"
 path = "src/bin/log_p99.rs"
@@ -16,3 +19,7 @@ path = "src/bin/matmul.rs"
 [[bin]]
 name = "nested_join"
 path = "src/bin/nested_join.rs"
+
+[[bin]]
+name = "page_fault"
+path = "src/bin/page_fault.rs"

@@ -72,7 +72,7 @@ The deltas show `alloc::fmt::format` gone, sort sample count down 95%, no regres
 
 Two extras if time:
 
-* **Hardware counters.** Record `matmul slow` with `--rate cache-misses`. `top_functions event="cache-misses"` puts `matmul_slow` at the top with a much stronger signal than the cycles profile. The loop-order bug, in one tool call.
+* **Hardware counters.** Record `matmul slow` with `perf record -e cache-misses` and import via `samply import`. `top_functions event="cache-misses"` puts `matmul_slow` at the top with a much stronger signal than the cycles profile. The loop-order bug, in one tool call.
 * **View presets.** Real Rust profiles are buried under tracing-subscriber `Layered` walls and tokio runtime frames. The `pollard:view-presets` skill ships regex sets that hide the noise. Same `top_functions` call, but now the user code surfaces.
 
 ## 7. Wrap (30s)
@@ -92,8 +92,9 @@ cargo build --profile demo -p pollard-demo
 samply record -o slow.json.gz --save-only ./target/demo/log_p99 slow
 samply record -o fast.json.gz --save-only ./target/demo/log_p99 fast
 
-# hardware-counter variant
-samply record --rate cache-misses -o cm.json.gz --save-only ./target/demo/matmul slow
+# hardware-counter variant (samply record only does cycles; use perf + import)
+perf record -e cache-misses --call-graph dwarf -o cm.perf.data ./target/demo/matmul slow
+samply import cm.perf.data -o cm.json.gz --save-only
 ```
 
 ```text

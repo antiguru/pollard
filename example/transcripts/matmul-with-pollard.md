@@ -101,4 +101,4 @@ Same number of arithmetic operations. Different memory traffic.
 
 ### Bonus: hardware-counter axis
 
-If samply's perf recorder is exposing `cache-misses` markers (it does on Linux; on macOS samply only collects cycles), `top_functions event="cache-misses"` would put `matmul_slow` even more decisively at the top — the cycles signal already nails it here because the loop is so memory-bound there's nothing else to spend time on. The hardware-counter axis pays off more when cycles and cache-misses disagree (e.g. a function that's hot but for branch-mispredict reasons, not memory).
+If you'd recorded with `perf record -e cache-misses` and converted via `samply import` (samply's own recorder only samples cycles), `top_functions event="cache-misses"` would put `matmul_slow` even more decisively at the top — the cycles signal already nails it here because the loop is so memory-bound there's nothing else to spend time on. The hardware-counter axis pays off more when cycles and cache-misses disagree (e.g. a function that's hot but for branch-mispredict reasons, not memory).
