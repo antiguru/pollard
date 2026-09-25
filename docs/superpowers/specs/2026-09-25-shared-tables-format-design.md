@@ -96,10 +96,11 @@ Any other version returns the existing `ToolError::UnsupportedProfileFormat` wit
 
 ### Memory
 
-Plain JSON deserializes straight into typed per-version structs through serde, as `load.rs` does today, without building a `serde_json::Value` tree.
+Plain JSON deserializes straight into typed wire structs through serde, without building a `serde_json::Value` tree.
+The loader reads the file into memory and decompresses it into a byte buffer before parsing, because magic-byte detection needs the leading bytes and `serde_json::from_slice` is faster than parsing from a reader.
 A `Value` tree for a large profile costs several times the file size, so only the JSLB path uses it.
 There the root JSON skeleton is small because the columns live in binary slabs, and the substituted `Value` goes through `serde_json::from_value` into the same typed structs.
-The version peek on plain JSON uses a small serde struct that ignores every field except `meta.preprocessedProfileVersion`, which costs a second parse of the file.
+The version check runs inside deserialization, and only a failed parse triggers a second, minimal parse that reads `meta.preprocessedProfileVersion` to tell an unsupported version apart from a malformed file.
 
 ### JSLB reader
 
@@ -192,8 +193,8 @@ The skill also notes that `.jslb.gz` files load directly.
 * Per-thread decoder tests cover two threads with overlapping indices receiving disjoint offsets, and sub-process library remapping for both `resourceTable.lib` and `nativeSymbols.libIndex` as the regression test for the module bug.
 * Version gating tests cover a missing version, 49, 55, 75, and rejection of 56, 74, and 76.
 * Equivalence tests import one `perf.data` recording with samply main as `.json.gz` and `.jslb.gz`, and require identical `top_functions`, `call_tree`, and `top_functions` with `event="cache-misses"` results after symbolication.
-* A cross-version test imports the same recording with samply 0.13.1 (version 49) and compares it to the version 75 import on per-event totals and the set of symbolicated function names.
-  Strict equality does not hold across versions, because samply main also emits a `[kernel.kallsyms]` library and different category names.
+* A cross-version test imports the same recording with samply 0.13.1 (version 49) and compares it to the version 75 import on per-event totals.
+  Function names and query results do not match across versions, because samply main also emits a `[kernel.kallsyms]` library and different category names.
 * The existing suite passes unchanged apart from the table-mutation helpers.
 * Fixtures come from a trivial shell workload, and only samply output is checked in, not `perf.data`.
   `meta.product` and `meta.oscpu` contain the recording host's name and kernel, so the fixture generator scrubs them before committing.
@@ -201,5 +202,6 @@ The skill also notes that `.jslb.gz` files load directly.
 ## Rollout
 
 The work lands as one pollard pull request from the `shared-tables-format` branch.
-The model switch, the per-thread decoder, and the symbolication port form a single commit, because every table consumer changes with the model and no smaller step builds.
+The shared tables and the per-thread decoder land first as unused code with their own tests.
+The model switch and the symbolication port then form a single commit, because every table consumer changes with the model.
 The shared decoder, the JSLB reader, event discovery, and documentation follow as separate commits.
