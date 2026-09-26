@@ -281,7 +281,7 @@ fn call_tree_inner(
         let added = total_samples - before;
         if added > 0 {
             let entry = per_pid.entry(pid).or_insert_with(|| (0, name));
-            entry.0 += added;
+            entry.0 = entry.0.saturating_add(added);
         }
     }
 
@@ -427,15 +427,15 @@ fn accumulate_with_root(
                 None => continue, // skip this stack entirely
             };
         }
-        *total_samples += weight;
+        *total_samples = total_samples.saturating_add(weight);
         let mut node: &mut AggNode = root;
         let len = frames.len();
         for (i, (function, module)) in frames.iter().enumerate() {
             let key = (function.clone(), module.clone());
             node = node.children.entry(key).or_default();
-            node.total_samples += weight;
+            node.total_samples = node.total_samples.saturating_add(weight);
             if i + 1 == len {
-                node.self_samples += weight;
+                node.self_samples = node.self_samples.saturating_add(weight);
             }
         }
     }
@@ -504,7 +504,7 @@ fn build_node(
         }
         if !emitted {
             omitted_count += 1;
-            omitted_samples += child_agg.total_samples;
+            omitted_samples = omitted_samples.saturating_add(child_agg.total_samples);
             // child_entries is sorted by total_samples desc, so the first
             // omissions we observe are the heaviest — take the prefix.
             if top_omitted.len() < TOP_OMITTED_CAP {

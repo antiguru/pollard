@@ -107,8 +107,9 @@ pub fn folded_stacks_structured(profile: &Profile, args: &Args) -> Result<Folded
             if frames.is_empty() {
                 continue;
             }
-            *counts.entry(frames.join(";")).or_default() += weight;
-            total_samples += weight;
+            let entry = counts.entry(frames.join(";")).or_default();
+            *entry = entry.saturating_add(weight);
+            total_samples = total_samples.saturating_add(weight);
         }
     }
 

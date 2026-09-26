@@ -532,7 +532,7 @@ fn compute_top_modules(profile: &Profile, filter: &Filter, limit: usize) -> Vec<
             profile.weighted_stack_indices(handle, &EventSource::Samples, filter.time_range)
         {
             let Some(stack_idx) = stack_opt else { continue };
-            total_samples += weight;
+            total_samples = total_samples.saturating_add(weight);
             // Each sample adds its weight to every module appearing at
             // least once on its stack, the same semantics as
             // `total_samples` in `top_functions`.
@@ -545,7 +545,8 @@ fn compute_top_modules(profile: &Profile, filter: &Filter, limit: usize) -> Vec<
                     continue;
                 };
                 if seen.insert(module.to_owned()) {
-                    *counts.entry(module.to_owned()).or_default() += weight;
+                    let entry = counts.entry(module.to_owned()).or_default();
+                    *entry = entry.saturating_add(weight);
                 }
             }
         }

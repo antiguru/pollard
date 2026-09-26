@@ -78,7 +78,7 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
             args.filter_args.time_range,
         ) {
             let Some(stack_idx) = stack_opt else { continue };
-            total_samples += weight;
+            total_samples = total_samples.saturating_add(weight);
             // resolved_chain is root-to-leaf with view transforms applied,
             // matching the orientation this listing wants to emit.
             let mut any_match = false;
@@ -92,8 +92,9 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
                 })
                 .collect();
             if any_match {
-                matched_frame_samples += weight;
-                *counts.entry(frames).or_default() += weight;
+                matched_frame_samples = matched_frame_samples.saturating_add(weight);
+                let entry = counts.entry(frames).or_default();
+                *entry = entry.saturating_add(weight);
             }
         }
     }
