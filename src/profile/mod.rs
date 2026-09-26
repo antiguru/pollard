@@ -13,6 +13,7 @@ pub mod load;
 pub mod parsed;
 pub mod raw;
 pub mod symbolicate;
+pub mod tables;
 pub mod transforms;
 
 pub use event_source::EventSource;
