@@ -38,6 +38,8 @@ pub enum ToolError {
     UnsupportedProfileFormat {
         path: PathBuf,
         version: String,
+        /// Versions pollard can read, e.g. `"49-55, 75"`.
+        supported: String,
     },
     FunctionNotFound {
         function: String,

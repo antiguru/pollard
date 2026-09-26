@@ -774,14 +774,15 @@ mod tests {
         use crate::profile::raw::InlineFrame;
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        // frame_table.func = [0,1,2,3]; index 3 is `d` (the leaf).
-        t.inline_chains[3] = vec![InlineFrame {
-            function: "leaf_inline".into(),
-            file: None,
-            line: None,
-        }];
+        // frames.func = [0,1,2,3]; index 3 is `d` (the leaf).
+        raw.shared.set_inline_chain(
+            3,
+            vec![InlineFrame {
+                function: "leaf_inline".into(),
+                file: None,
+                line: None,
+            }],
+        );
         let profile = Profile::from_raw(raw);
 
         // Without expansion: deepest function in the tree is `d`.
@@ -888,7 +889,9 @@ mod tests {
         // `did_you_mean`.
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
-        raw.threads[0].string_array[3] = "<alloc::vec::Vec<T,A>>::push".to_owned();
+        raw.shared
+            .strings
+            .replace(3, "<alloc::vec::Vec<T,A>>::push");
         let profile = Profile::from_raw(raw);
 
         let result = call_tree(
@@ -914,7 +917,9 @@ mod tests {
         // need to confirm both arg fields are eligible for promotion.
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
-        raw.threads[0].string_array[0] = "<alloc::vec::Vec<T,A>>::push".to_owned();
+        raw.shared
+            .strings
+            .replace(0, "<alloc::vec::Vec<T,A>>::push");
         let profile = Profile::from_raw(raw);
 
         let result = call_tree(

@@ -8,10 +8,12 @@
 
 use serde::{Deserialize, Deserializer};
 
+use crate::profile::tables::SharedTables;
+
 /// Deserialize a pid/tid that may be encoded as a JSON integer, float, or
 /// quoted string (e.g. `"50258"` or `"50258.1"` in real samply output).
 /// We extract the integer part and discard fractional suffixes like `.1`.
-fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
+pub(crate) fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
     use serde::de::Error;
     use serde_json::Value;
     let v = Value::deserialize(de)?;
@@ -89,16 +91,23 @@ impl<'de> Deserialize<'de> for Pid {
     }
 }
 
+/// A decoded profile. Both on-disk layouts deserialize into this
+/// through [`crate::profile::wire::WireProfile`], which also applies
+/// the version gate.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(try_from = "crate::profile::wire::WireProfile")]
 pub struct RawProfile {
     pub meta: RawMeta,
-    #[serde(default)]
-    pub libs: Vec<RawLib>,
-    #[serde(default)]
+    pub shared: SharedTables,
     pub threads: Vec<RawThread>,
-    #[serde(default)]
-    pub processes: Vec<RawProfile>,
+    pub processes: Vec<RawProcess>,
+}
+
+/// Threads of a nested process in the per-thread layout. Its
+/// libraries are merged into [`SharedTables::libs`].
+#[derive(Debug)]
+pub struct RawProcess {
+    pub threads: Vec<RawThread>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -108,6 +117,10 @@ pub struct RawMeta {
     pub start_time: f64,
     #[serde(default)]
     pub product: String,
+    /// Processed-profile format version. Absent in hand-written test
+    /// fixtures, which use the per-thread layout.
+    #[serde(default)]
+    pub preprocessed_profile_version: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -131,9 +144,10 @@ pub struct RawLib {
 
 /// A single DWARF inline-frame record attached to a native frame address.
 /// Pollard captures these from `wholesym::AddressInfo.frames[..len-1]`
-/// during symbolication, indexed parallel to [`RawFrameTable`] so the
-/// query layer can fan out a single profile-level frame into the chain
-/// of inlined call sites it represents.
+/// during symbolication, indexed parallel to
+/// [`crate::profile::tables::FrameTable`] so the query layer can fan
+/// out a single profile-level frame into the chain of inlined call
+/// sites it represents.
 #[derive(Debug, Clone, Default)]
 pub struct InlineFrame {
     pub function: String,
@@ -141,84 +155,23 @@ pub struct InlineFrame {
     pub line: Option<u32>,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug)]
 pub struct RawThread {
-    #[serde(deserialize_with = "deserialize_id_as_u64")]
     pub tid: u64,
     pub pid: Pid,
-    #[serde(default)]
     pub name: Option<String>,
     /// Per-thread process name (e.g. "rustfmt", "Compositor"). Firefox's
     /// processed-profile schema attaches this at the thread level — not on a
     /// separate process record — so describe_profile recovers it by reading
     /// any thread that belongs to the pid.
-    #[serde(default)]
     pub process_name: Option<String>,
     pub register_time: f64,
-    pub string_array: Vec<String>,
-    pub frame_table: RawFrameTable,
-    pub func_table: RawFuncTable,
-    pub stack_table: RawStackTable,
     pub samples: RawSampleTable,
-    pub resource_table: RawResourceTable,
-    #[serde(default)]
-    pub native_symbols: Option<RawNativeSymbols>,
     /// Per-thread marker stream. samply uses this to land non-cycles
     /// hardware counter samples (cache-misses, branch-misses,
     /// instructions, …); each such marker carries a `data.cause.stack`
     /// pointing into the same stack table the samples track uses.
-    /// `default` so older fixtures without a markers field still parse.
-    #[serde(default)]
     pub markers: RawMarkerTable,
-    /// Per-frame inline-call chain (innermost-first), populated by
-    /// [`crate::profile::symbolicate`]. Index parallel to [`RawFrameTable`];
-    /// empty Vec when no inline records exist or symbolication wasn't run.
-    /// Not part of the Firefox processed-profile schema — pollard-internal,
-    /// hence skipped during deserialization.
-    #[serde(skip)]
-    pub inline_chains: Vec<Vec<InlineFrame>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RawFrameTable {
-    pub length: usize,
-    pub address: Vec<i64>, // -1 for non-native
-    pub func: Vec<usize>,
-    pub line: Vec<Option<u32>>,
-    pub column: Vec<Option<u32>>,
-    pub category: Vec<Option<usize>>,
-    pub subcategory: Vec<Option<usize>>,
-    #[serde(default)]
-    pub native_symbol: Vec<Option<usize>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RawFuncTable {
-    pub length: usize,
-    pub name: Vec<usize>, // string-array index
-    #[serde(rename = "isJS")]
-    pub is_js: Vec<bool>,
-    #[serde(rename = "relevantForJS")]
-    pub relevant_for_js: Vec<bool>,
-    pub resource: Vec<i32>,            // -1 if no resource
-    pub file_name: Vec<Option<usize>>, // string-array index
-    pub line_number: Vec<Option<u32>>,
-    pub column_number: Vec<Option<u32>>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RawStackTable {
-    pub length: usize,
-    pub frame: Vec<usize>,
-    #[serde(default)]
-    pub category: Vec<usize>,
-    #[serde(default)]
-    pub subcategory: Vec<usize>,
-    pub prefix: Vec<Option<usize>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -265,33 +218,38 @@ impl RawSampleTable {
 /// asked to produce more than one event per sample.
 ///
 /// Pollard models only what its query layer needs:
-///   * `name[i]` → string-array index, resolves to the marker's event
+///   * `name[i]` → string index, resolves to the marker's event
 ///     name (e.g. `"cache-misses"`).
 ///   * `data[i]` → optional payload; the resolver pulls `cause.stack`
 ///     out so the same stack-walking code as the samples track can
 ///     attribute the event to a function.
-#[derive(Debug, Deserialize, Default)]
-#[serde(rename_all = "camelCase")]
+///
+/// Times are `None` where the marker phase makes them meaningless.
+#[derive(Debug, Default)]
 pub struct RawMarkerTable {
     pub length: usize,
     /// Parallel to `length`. Entries may be `null` for markers without
     /// structured data (e.g. text-only annotations); we keep them as
     /// `None` so the index alignment with `name`/`startTime` survives.
     pub data: Vec<Option<RawMarkerData>>,
-    /// String-array indices. Resolve via `thread.string_array[name[i]]`.
+    /// String indices into [`SharedTables::strings`].
     pub name: Vec<usize>,
-    pub start_time: Vec<f64>,
-    pub end_time: Vec<f64>,
+    pub start_time: Vec<Option<f64>>,
+    pub end_time: Vec<Option<f64>>,
     pub phase: Vec<u8>,
     pub category: Vec<usize>,
 }
 
-/// Marker payload subset. Only `cause.stack` is consumed; other fields
-/// (`type`, text, timestamps embedded in the payload) are ignored.
+/// Marker payload subset. Only `type` and `cause.stack` are consumed;
+/// other fields (text, timestamps embedded in the payload) are ignored.
 /// Defaulting `cause` to `None` keeps us forward-compatible with text or
 /// log-style markers that the Firefox schema also permits.
 #[derive(Debug, Deserialize, Default)]
 pub struct RawMarkerData {
+    /// Marker schema name, e.g. `"Other event"` for samply's secondary
+    /// perf events.
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
     #[serde(default)]
     pub cause: Option<MarkerCause>,
 }
@@ -300,27 +258,6 @@ pub struct RawMarkerData {
 pub struct MarkerCause {
     /// Stack-table index. Same shape as `samples.stack[i]`.
     pub stack: usize,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RawResourceTable {
-    pub length: usize,
-    pub lib: Vec<Option<usize>>,
-    pub name: Vec<usize>, // string-array index
-    pub host: Vec<Option<usize>>,
-    #[serde(rename = "type")]
-    pub type_: Vec<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RawNativeSymbols {
-    pub length: usize,
-    pub lib_index: Vec<usize>,
-    pub address: Vec<i64>,
-    pub name: Vec<usize>, // string-array index
-    pub function_size: Vec<Option<u64>>,
 }
 
 #[cfg(test)]
@@ -357,18 +294,33 @@ mod tests {
 
     #[test]
     fn deserializes_marker_table() {
-        let with_markers = MINIMAL.replace(
-            r#""markers": {"length": 0, "data": [], "name": [], "startTime": [], "endTime": [], "phase": [], "category": []}"#,
-            r#""markers": {
-                "length": 2,
-                "data": [{"type": "Other event", "cause": {"stack": 7}}, null],
-                "name": [1, 1],
-                "startTime": [0.0, 1.0],
-                "endTime": [0.0, 1.0],
-                "phase": [0, 0],
-                "category": [0, 0]
-            }"#,
-        );
+        // The marker's `cause.stack` must name a real stack, so give the
+        // fixture eight one-frame stacks for it to point at.
+        let with_markers = MINIMAL
+            .replace(
+                r#""frameTable": {"length": 0, "address": [], "func": [], "category": [], "subcategory": [], "innerWindowID": [], "implementation": [], "line": [], "column": [], "nativeSymbol": []}"#,
+                r#""frameTable": {"length": 1, "address": [-1], "func": [0], "category": [0], "subcategory": [0], "line": [null], "column": [null], "nativeSymbol": [null]}"#,
+            )
+            .replace(
+                r#""stackTable": {"length": 0, "frame": [], "category": [], "subcategory": [], "prefix": []}"#,
+                r#""stackTable": {"length": 8, "frame": [0, 0, 0, 0, 0, 0, 0, 0], "prefix": [null, null, null, null, null, null, null, null]}"#,
+            )
+            .replace(
+                r#""funcTable": {"length": 0, "name": [], "isJS": [], "relevantForJS": [], "resource": [], "fileName": [], "lineNumber": [], "columnNumber": []}"#,
+                r#""funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]}"#,
+            )
+            .replace(
+                r#""markers": {"length": 0, "data": [], "name": [], "startTime": [], "endTime": [], "phase": [], "category": []}"#,
+                r#""markers": {
+                    "length": 2,
+                    "data": [{"type": "Other event", "cause": {"stack": 7}}, null],
+                    "name": [1, 1],
+                    "startTime": [0.0, 1.0],
+                    "endTime": [0.0, 1.0],
+                    "phase": [0, 0],
+                    "category": [0, 0]
+                }"#,
+            );
         let p: RawProfile = serde_json::from_str(&with_markers).unwrap();
         let m = &p.threads[0].markers;
         assert_eq!(m.length, 2);
@@ -381,6 +333,10 @@ mod tests {
             Some(7)
         );
         assert!(m.data[1].is_none());
+        // Instant markers (phase 0) keep their start time and drop the
+        // end time.
+        assert_eq!(m.start_time, vec![Some(0.0), Some(1.0)]);
+        assert_eq!(m.end_time, vec![None, None]);
     }
 
     #[test]

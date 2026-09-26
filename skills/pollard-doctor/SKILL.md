@@ -71,6 +71,10 @@ call load_profile with path="/tmp/pollard-doctor.json.gz"
 - `load_profile` errors with a parse failure: the file isn't
   Firefox-format. Confirm with `file /tmp/pollard-doctor.json.gz` —
   should report gzip; if it's plain JSON, that's also fine.
+- `load_profile` errors with `unsupported_profile_format`: the profile's
+  `preprocessedProfileVersion` is one pollard cannot read. The error
+  lists the supported versions. Upgrade pollard, or re-import the
+  recording with a samply version that emits a supported format.
 
 ### 4. Symbols resolve
 

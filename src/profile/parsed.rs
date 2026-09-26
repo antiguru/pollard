@@ -184,18 +184,20 @@ impl Profile {
         }
     }
 
-    /// Look up the lib for a `RawResourceTable.lib` index.
+    /// The profile-global tables every thread indexes into.
+    pub(crate) fn shared(&self) -> &crate::profile::tables::SharedTables {
+        &self.raw.shared
+    }
+
+    /// Look up a library by its index in the merged global list.
     pub(crate) fn lib(&self, idx: usize) -> Option<&RawLib> {
-        self.raw.libs.get(idx)
+        self.raw.shared.libs.get(idx)
     }
 
     /// All libraries across the root profile and any sub-processes.
-    /// Order is root libs first, then per-process libs in declaration order.
+    /// Sub-process libraries are merged into the same list at load.
     pub fn all_libs(&self) -> impl Iterator<Item = &RawLib> + '_ {
-        self.raw
-            .libs
-            .iter()
-            .chain(self.raw.processes.iter().flat_map(|p| p.libs.iter()))
+        self.raw.shared.libs.iter()
     }
 
     /// Distinct, sorted, non-empty `lib.name` values across every
@@ -217,49 +219,44 @@ impl Profile {
     /// Empty when the frame has no DWARF inline records or symbolication
     /// hasn't run yet.
     pub fn inline_chain(&self, handle: ThreadHandle, frame_idx: usize) -> &[InlineFrame] {
-        self.raw_thread(handle)
-            .inline_chains
-            .get(frame_idx)
-            .map(Vec::as_slice)
-            .unwrap_or(&[])
+        let _ = handle;
+        self.raw.shared.inline_chain(frame_idx)
     }
 
     /// Look up frame info for a given thread + frame index.
     pub fn frame_info(&self, handle: ThreadHandle, frame_idx: usize) -> Option<FrameInfo<'_>> {
-        let thread = self.raw_thread(handle);
-        let func_idx = *thread.frame_table.func.get(frame_idx)?;
-        let func_name_idx = *thread.func_table.name.get(func_idx)?;
-        let function_name = thread.string_array.get(func_name_idx)?.as_str();
+        let t = &self.raw.shared;
+        let func_idx = *t.frames.func.get(frame_idx)?;
+        let func_name_idx = *t.funcs.name.get(func_idx)?;
+        let function_name = t.strings.get(func_name_idx)?;
+        let _ = handle;
 
-        let resource_idx = thread
-            .func_table
-            .resource
-            .get(func_idx)
+        let lib = t
+            .frames
+            .lib
+            .get(frame_idx)
             .copied()
-            .unwrap_or(-1);
-        let lib = if resource_idx >= 0 {
-            thread
-                .resource_table
-                .lib
-                .get(resource_idx as usize)
-                .copied()
-                .flatten()
-                .and_then(|li| self.lib(li))
-        } else {
-            None
-        };
+            .flatten()
+            .and_then(|li| self.lib(li));
         let module_name = lib.and_then(|l| l.name.as_deref());
 
-        let file = thread
-            .func_table
+        let file = t
+            .funcs
             .file_name
             .get(func_idx)
-            .and_then(|opt| opt.and_then(|si| thread.string_array.get(si).map(String::as_str)));
+            .copied()
+            .flatten()
+            .and_then(|si| t.strings.get(si));
 
-        let line = thread.frame_table.line.get(frame_idx).copied().flatten();
-        let column = thread.frame_table.column.get(frame_idx).copied().flatten();
-        let address = thread.frame_table.address.get(frame_idx).copied();
-        let address = address.filter(|&a| a >= 0);
+        let line = t.frames.line.get(frame_idx).copied().flatten();
+        let column = t.frames.column.get(frame_idx).copied().flatten();
+        let address = t
+            .frames
+            .address
+            .get(frame_idx)
+            .copied()
+            .flatten()
+            .map(i64::from);
 
         Some(FrameInfo {
             function_name,
@@ -278,12 +275,13 @@ impl Profile {
         handle: ThreadHandle,
         stack_idx: usize,
     ) -> impl Iterator<Item = usize> + '_ {
-        let thread = self.raw_thread(handle);
+        let _ = handle;
+        let stacks = &self.raw.shared.stacks;
         let mut current = Some(stack_idx);
         std::iter::from_fn(move || {
             let s = current?;
-            let frame = *thread.stack_table.frame.get(s)?;
-            current = thread.stack_table.prefix.get(s).copied().flatten();
+            let frame = *stacks.frame.get(s)?;
+            current = stacks.prefix.get(s).copied().flatten();
             Some(frame)
         })
     }
@@ -497,8 +495,9 @@ impl Profile {
     ///
     /// `time_range`, when set, gates each yielded item by its per-sample
     /// timestamp ([`crate::profile::raw::RawSampleTable::absolute_times`]
-    /// for [`EventSource::Samples`], `markers.start_time` for
-    /// [`EventSource::Marker`]). The range is interpreted relative to
+    /// for [`EventSource::Samples`], `markers.start_time`, or `end_time`
+    /// for interval-end markers, for [`EventSource::Marker`]). The range
+    /// is interpreted relative to
     /// [`Self::start_time_ms`] — i.e. profile-zero — to match the
     /// public filter contract; raw sample timestamps are offset before
     /// the comparison so callers never have to know whether the
@@ -552,12 +551,12 @@ impl Profile {
                 )
             }
             EventSource::Marker(name) => {
-                // Resolve the marker name to its string-array index
-                // *once* per thread; markers without a `cause.stack`
+                // Resolve the marker name to its string index
+                // *once* per call; markers without a `cause.stack`
                 // payload are yielded as `None` so the caller's
                 // "skip None" branch handles them uniformly with samples
                 // that have no stack.
-                let str_idx = raw.string_array.iter().position(|s| s == name);
+                let str_idx = self.raw.shared.strings.position(name);
                 match str_idx {
                     None => Box::new(std::iter::empty()),
                     Some(target) => Box::new(raw.markers.name.iter().enumerate().filter_map(
@@ -574,10 +573,20 @@ impl Profile {
                             // Gate by the marker's start_time when a
                             // range is set; missing entries are
                             // conservatively dropped (same rationale as
-                            // the unstamped-sample branch).
-                            let t = raw.markers.start_time.get(i).copied()?;
-                            if !in_range(t) {
-                                return None;
+                            // the unstamped-sample branch). Interval-end
+                            // markers carry only an end time; gate them
+                            // by that. With no range, a marker with
+                            // neither time still matches. The unfiltered
+                            // path never drops a marker for lacking a
+                            // timestamp.
+                            if time_range.is_some() {
+                                let t =
+                                    raw.markers.start_time.get(i).copied().flatten().or_else(
+                                        || raw.markers.end_time.get(i).copied().flatten(),
+                                    )?;
+                                if !in_range(t) {
+                                    return None;
+                                }
                             }
                             Some(
                                 raw.markers
@@ -1060,5 +1069,53 @@ mod tests {
             .map(|f| f.function)
             .collect();
         assert_eq!(names, vec!["Batch".to_owned()]);
+    }
+
+    #[test]
+    fn interval_end_marker_uses_end_time() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0},
+            "threads": [{"tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": ["f", "ev"],
+                "frameTable": {"length": 1, "address": [-1], "func": [0], "line": [null], "column": [null], "category": [0], "subcategory": [0]},
+                "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                "stackTable": {"length": 1, "frame": [0], "prefix": [null]},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "samples": {"length": 1, "stack": [0], "time": [0.0]},
+                "markers": {"length": 1, "data": [{"type": "Other event", "cause": {"stack": 0}}],
+                            "name": [1], "startTime": [null], "endTime": [5.0], "phase": [3], "category": [0]}}]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        let ev = EventSource::Marker("ev".into());
+        let inside: Vec<_> = p.stack_indices(handle, &ev, Some([4.0, 6.0])).collect();
+        assert_eq!(inside, vec![Some(0)]);
+        let outside: Vec<_> = p.stack_indices(handle, &ev, Some([0.0, 1.0])).collect();
+        assert!(outside.is_empty());
+    }
+
+    #[test]
+    fn unfiltered_marker_with_no_times_is_yielded() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0},
+            "threads": [{"tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": ["f", "ev"],
+                "frameTable": {"length": 1, "address": [-1], "func": [0], "line": [null], "column": [null], "category": [0], "subcategory": [0]},
+                "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                "stackTable": {"length": 1, "frame": [0], "prefix": [null]},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "samples": {"length": 1, "stack": [0], "time": [0.0]},
+                "markers": {"length": 1, "data": [{"type": "Other event", "cause": {"stack": 0}}],
+                            "name": [1], "startTime": [null], "endTime": [null], "phase": [1], "category": [0]}}]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        let ev = EventSource::Marker("ev".into());
+        let unfiltered: Vec<_> = p.stack_indices(handle, &ev, None).collect();
+        assert_eq!(unfiltered, vec![Some(0)]);
+        let ranged: Vec<_> = p.stack_indices(handle, &ev, Some([0.0, 1.0])).collect();
+        assert!(ranged.is_empty());
     }
 }

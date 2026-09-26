@@ -55,6 +55,8 @@ pub struct Output {
     /// Coarse bucket for `unsymbolicated_pct` so the caller can decide
     /// "should I re-record?" without parsing the raw float.
     pub unsymbolicated_bracket: &'static str,
+    /// See [`crate::query::describe::ProfileDescription::events`].
+    pub events: Vec<crate::query::event::EventInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dominant_thread: Option<DominantThread>,
     /// Top processes by sample count, descending. Capped at
@@ -213,6 +215,7 @@ pub fn summary(
         profile_start_ms,
         unsymbolicated_pct: desc.unsymbolicated_pct,
         unsymbolicated_bracket: bracket(desc.unsymbolicated_pct),
+        events: crate::query::event::list_events(profile),
         dominant_thread,
         top_processes,
         top_threads,

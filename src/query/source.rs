@@ -493,13 +493,14 @@ mod tests {
         use crate::profile::raw::InlineFrame;
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        t.inline_chains[3] = vec![InlineFrame {
-            function: "leaf_inline".into(),
-            file: Some("/tmp/leaf_inline.rs".into()),
-            line: Some(2),
-        }];
+        raw.shared.set_inline_chain(
+            3,
+            vec![InlineFrame {
+                function: "leaf_inline".into(),
+                file: Some("/tmp/leaf_inline.rs".into()),
+                line: Some(2),
+            }],
+        );
         let profile = Profile::from_raw(raw);
 
         let source = "fn outer() {}\nfn leaf_inline() { compute() }\n";
@@ -542,13 +543,14 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
                 .unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        t.inline_chains[0] = vec![InlineFrame {
-            function: "process_request::{{closure}}".into(),
-            file: Some("src/server.rs".into()),
-            line: Some(2),
-        }];
+        raw.shared.set_inline_chain(
+            0,
+            vec![InlineFrame {
+                function: "process_request::{{closure}}".into(),
+                file: Some("src/server.rs".into()),
+                line: Some(2),
+            }],
+        );
         let profile = Profile::from_raw(raw);
 
         let source = "// line 1\n\
@@ -609,13 +611,14 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
                 .unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        t.inline_chains[0] = vec![InlineFrame {
-            function: "stdlib_helper".into(),
-            file: Some("/rustlib/src/rust/library/core/src/iter/sum.rs".into()),
-            line: Some(99),
-        }];
+        raw.shared.set_inline_chain(
+            0,
+            vec![InlineFrame {
+                function: "stdlib_helper".into(),
+                file: Some("/rustlib/src/rust/library/core/src/iter/sum.rs".into()),
+                line: Some(99),
+            }],
+        );
         let profile = Profile::from_raw(raw);
 
         let source =
@@ -666,22 +669,23 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
                 .unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        t.inline_chains[0] = vec![
-            // innermost first — the deepest closure body, in same file as outer
-            InlineFrame {
-                function: "closure_inner".into(),
-                file: Some("src/server.rs".into()),
-                line: Some(5),
-            },
-            // outer-of-inline closure layer, also in same file
-            InlineFrame {
-                function: "closure_outer".into(),
-                file: Some("src/server.rs".into()),
-                line: Some(2),
-            },
-        ];
+        raw.shared.set_inline_chain(
+            0,
+            vec![
+                // innermost first — the deepest closure body, in same file as outer
+                InlineFrame {
+                    function: "closure_inner".into(),
+                    file: Some("src/server.rs".into()),
+                    line: Some(5),
+                },
+                // outer-of-inline closure layer, also in same file
+                InlineFrame {
+                    function: "closure_outer".into(),
+                    file: Some("src/server.rs".into()),
+                    line: Some(2),
+                },
+            ],
+        );
         let profile = Profile::from_raw(raw);
 
         let source = "// 1\n// 2\n// 3\n// 4\n// 5 — innermost hot line\n// 6\n";
@@ -737,13 +741,14 @@ mod tests {
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/source_attribution.json"))
                 .unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        t.inline_chains[0] = vec![InlineFrame {
-            function: "stdlib_helper".into(),
-            file: Some("src/server.rs".into()),
-            line: Some(2),
-        }];
+        raw.shared.set_inline_chain(
+            0,
+            vec![InlineFrame {
+                function: "stdlib_helper".into(),
+                file: Some("src/server.rs".into()),
+                line: Some(2),
+            }],
+        );
         let profile = Profile::from_raw(raw);
 
         let source = "// 1\n// 2 — hot line\n// 3\n// 4\n// 5\n";

@@ -2,8 +2,9 @@
 //!
 //! For profiles recorded by samply on macOS, frame addresses are stored as
 //! raw relative addresses (e.g. "0x4cb") without resolved function names.
-//! This module walks every thread, detects unsymbolicated frames, and
-//! resolves them via `wholesym` before `Profile::from_raw` wraps the data.
+//! This module walks the profile's frame table, detects unsymbolicated
+//! frames, and resolves them via `wholesym` before `Profile::from_raw`
+//! wraps the data.
 //!
 //! If a library cannot be found or wholesym fails to load it, the lib is
 //! recorded with a [`LibSymbolicationStatus::LoadError`] in the per-lib
@@ -19,7 +20,8 @@ use schemars::JsonSchema;
 use serde::Serialize;
 use wholesym::{LookupAddress, SymbolManager, SymbolManagerConfig, SymbolMap};
 
-use crate::profile::raw::{InlineFrame, RawLib, RawProfile, RawThread};
+use crate::profile::raw::{InlineFrame, RawLib, RawProfile};
+use crate::profile::tables::SharedTables;
 
 /// Returns true if the function name looks unsymbolicated. Treat any
 /// `0x…` hex name as unsymbolicated, not just the literal `"0x0"` —
@@ -146,17 +148,7 @@ fn outcome_key(lib: &RawLib) -> String {
     format!("{name}|{path}")
 }
 
-/// Add or find a string in the string array, returning its index.
-fn intern_string(string_array: &mut Vec<String>, s: &str) -> usize {
-    if let Some(pos) = string_array.iter().position(|x| x == s) {
-        return pos;
-    }
-    let idx = string_array.len();
-    string_array.push(s.to_owned());
-    idx
-}
-
-/// Symbolicate all threads in a `RawProfile` in-place.
+/// Symbolicate a `RawProfile` in-place.
 ///
 /// Best-effort: any lib that wholesym cannot load is recorded with a
 /// `LoadError` outcome and its frames are left as hex.
@@ -172,20 +164,7 @@ pub async fn symbolicate(
     let symbol_manager = SymbolManager::with_config(config);
 
     let mut outcomes: HashMap<String, OutcomeAccum> = HashMap::new();
-
-    // Process top-level threads (they share raw.libs for lib lookup)
-    symbolicate_threads(&symbol_manager, &mut raw.threads, &raw.libs, &mut outcomes).await;
-
-    // Process sub-process threads (each process has its own libs table)
-    for process in &mut raw.processes {
-        symbolicate_threads(
-            &symbol_manager,
-            &mut process.threads,
-            &process.libs,
-            &mut outcomes,
-        )
-        .await;
-    }
+    symbolicate_tables(&symbol_manager, &mut raw.shared, &mut outcomes).await;
 
     let mut flat: Vec<LibSymbolicationOutcome> = outcomes
         .into_values()
@@ -202,66 +181,31 @@ pub async fn symbolicate(
     Ok(flat)
 }
 
-async fn symbolicate_threads(
+async fn symbolicate_tables(
     symbol_manager: &SymbolManager,
-    threads: &mut [RawThread],
-    libs: &[RawLib],
-    outcomes: &mut HashMap<String, OutcomeAccum>,
-) {
-    // Cache: lib_index → SymbolMap (or None if we failed to load it)
-    let mut symbol_map_cache: HashMap<usize, Option<SymbolMap>> = HashMap::new();
-
-    for thread in threads.iter_mut() {
-        symbolicate_thread(
-            symbol_manager,
-            thread,
-            libs,
-            &mut symbol_map_cache,
-            outcomes,
-        )
-        .await;
-    }
-}
-
-async fn symbolicate_thread(
-    symbol_manager: &SymbolManager,
-    thread: &mut RawThread,
-    libs: &[RawLib],
-    symbol_map_cache: &mut HashMap<usize, Option<SymbolMap>>,
+    t: &mut SharedTables,
     outcomes: &mut HashMap<String, OutcomeAccum>,
 ) {
     // Collect work: (frame_idx, func_idx, lib_idx, address)
     // We do this in a preliminary pass to avoid borrow conflicts.
     let mut work: Vec<(usize, usize, usize, u32)> = Vec::new();
 
-    for frame_idx in 0..thread.frame_table.length {
-        let addr = thread.frame_table.address[frame_idx];
-        if addr < 0 {
+    for frame_idx in 0..t.frames.len() {
+        let Some(addr) = t.frames.address[frame_idx] else {
             continue; // non-native frame
-        }
-        let func_idx = thread.frame_table.func[frame_idx];
-        let name_str_idx = thread.func_table.name[func_idx];
-        let name = thread
-            .string_array
-            .get(name_str_idx)
-            .map(String::as_str)
-            .unwrap_or("");
+        };
+        let func_idx = t.frames.func[frame_idx];
+        let name = t.strings.get(t.funcs.name[func_idx]).unwrap_or("");
         if !is_unsymbolicated(name) {
             continue; // already symbolicated
         }
 
-        // Resolve lib through resource table
-        let resource_idx = thread.func_table.resource[func_idx];
-        if resource_idx < 0 {
+        // Resolve lib through the frame's library column
+        let Some(lib_idx) = t.frames.lib[frame_idx] else {
             continue;
-        }
-        let resource_idx = resource_idx as usize;
-        let lib_idx = match thread.resource_table.lib.get(resource_idx).and_then(|o| *o) {
-            Some(li) => li,
-            None => continue,
         };
 
-        work.push((frame_idx, func_idx, lib_idx, addr as u32));
+        work.push((frame_idx, func_idx, lib_idx, addr));
     }
 
     if work.is_empty() {
@@ -270,13 +214,15 @@ async fn symbolicate_thread(
 
     // Pre-size the parallel inline-chain table so per-frame writes below
     // can index directly. Empty Vec for frames without inline records.
-    if thread.inline_chains.len() < thread.frame_table.length {
-        thread
-            .inline_chains
-            .resize_with(thread.frame_table.length, Vec::new);
+    if t.inline_chains.len() < t.frames.len() {
+        t.inline_chains.resize_with(t.frames.len(), Vec::new);
     }
 
-    // Load symbol maps for all libs needed by this thread.
+    // Cache: lib_index → SymbolMap (or None if we failed to load it).
+    // Library indices are profile-global, so each library loads once.
+    let mut symbol_map_cache: HashMap<usize, Option<SymbolMap>> = HashMap::new();
+
+    // Load symbol maps for all libs needed by the profile.
     let lib_indices_needed: Vec<usize> = {
         let mut seen = std::collections::HashSet::new();
         work.iter()
@@ -292,11 +238,11 @@ async fn symbolicate_thread(
         if symbol_map_cache.contains_key(&lib_idx) {
             continue;
         }
-        let raw_lib = libs.get(lib_idx);
+        let raw_lib = t.libs.get(lib_idx);
         let (map, load_status) = load_symbol_map_for_lib(symbol_manager, raw_lib).await;
-        // Record the load status in the per-lib outcome the first time
-        // we see this lib. Subsequent attempts (e.g. reused across
-        // threads) just inherit the cached status.
+        // Record the load status in the per-lib outcome. Library
+        // indices are profile-global, so this runs once per library
+        // regardless of how many threads or frames reference it.
         if let Some(lib) = raw_lib {
             outcomes
                 .entry(outcome_key(lib))
@@ -307,7 +253,7 @@ async fn symbolicate_thread(
 
     // Apply symbolication results.
     for (frame_idx, func_idx, lib_idx, addr) in work {
-        let raw_lib = libs.get(lib_idx);
+        let raw_lib = t.libs.get(lib_idx);
         // We only count attempts and resolutions for libs we have a
         // record for — frames whose lib is missing from the table can't
         // be attributed and would distort the per-lib counters.
@@ -362,8 +308,8 @@ async fn symbolicate_thread(
         let resolved_name = outer
             .and_then(|f| f.function.as_deref())
             .unwrap_or(&addr_info.symbol.name);
-        let new_name_idx = intern_string(&mut thread.string_array, resolved_name);
-        thread.func_table.name[func_idx] = new_name_idx;
+        let new_name_idx = t.strings.intern(resolved_name);
+        t.funcs.name[func_idx] = new_name_idx;
 
         if let Some(frame) = outer {
             if let Some(file) = frame
@@ -371,11 +317,11 @@ async fn symbolicate_thread(
                 .as_ref()
                 .map(|p| p.display_path().to_owned())
             {
-                let file_idx = intern_string(&mut thread.string_array, &file);
-                thread.func_table.file_name[func_idx] = Some(file_idx);
+                let file_idx = t.strings.intern(&file);
+                t.funcs.file_name[func_idx] = Some(file_idx);
             }
             if let Some(line) = frame.line_number {
-                thread.frame_table.line[frame_idx] = Some(line);
+                t.frames.line[frame_idx] = Some(line);
             }
         }
 
@@ -388,7 +334,7 @@ async fn symbolicate_thread(
             && frames.len() > 1
         {
             let inner = &frames[..frames.len() - 1];
-            thread.inline_chains[frame_idx] = inner
+            t.inline_chains[frame_idx] = inner
                 .iter()
                 .map(|f| InlineFrame {
                     function: f.function.clone().unwrap_or_default(),

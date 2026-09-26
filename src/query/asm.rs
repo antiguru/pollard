@@ -142,43 +142,33 @@ fn resolve_function(
                 let Some(rel_addr_i64) = info.address else {
                     continue;
                 };
-                if rel_addr_i64 < 0 {
-                    continue;
-                }
                 let rel_addr = rel_addr_i64 as u32;
 
-                // Resolve lib_idx via frame → func → resource → lib.
-                let func_idx = raw.frame_table.func[frame_idx];
-                let resource_idx = raw.func_table.resource[func_idx];
-                if resource_idx < 0 {
+                let shared = profile.shared();
+                // The frame carries its library directly.
+                let Some(lib_idx) = shared.frames.lib.get(frame_idx).copied().flatten() else {
                     continue;
-                }
-                let lib_idx = match raw
-                    .resource_table
-                    .lib
-                    .get(resource_idx as usize)
-                    .and_then(|o| *o)
-                {
-                    Some(li) => li,
-                    None => continue,
                 };
 
                 // Try to get start/size from nativeSymbols.
                 if native_loc.is_none()
-                    && let Some(ns) = &raw.native_symbols
-                {
-                    let native_sym_idx = raw
-                        .frame_table
+                    && let Some(ns_idx) = shared
+                        .frames
                         .native_symbol
                         .get(frame_idx)
-                        .and_then(|o| *o);
-                    if let Some(ns_idx) = native_sym_idx {
-                        let ns_addr = ns.address.get(ns_idx).copied().unwrap_or(-1);
-                        let ns_size = ns.function_size.get(ns_idx).copied().flatten().unwrap_or(0);
-                        if ns_addr >= 0 {
-                            native_loc = Some((ns_addr as u32, ns_size as u32, lib_idx));
-                        }
-                    }
+                        .copied()
+                        .flatten()
+                    && let Some(ns_addr) =
+                        shared.native_symbols.address.get(ns_idx).copied().flatten()
+                {
+                    let ns_size = shared
+                        .native_symbols
+                        .function_size
+                        .get(ns_idx)
+                        .copied()
+                        .flatten()
+                        .unwrap_or(0);
+                    native_loc = Some((ns_addr, ns_size as u32, lib_idx));
                 }
 
                 // Track min/max address for size estimation fallback.

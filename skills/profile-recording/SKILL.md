@@ -87,8 +87,8 @@ samply converts it to Firefox-format:
 
 ### Path D — already a Firefox-format profile
 
-Files ending in `.json`, `.json.gz`, or `.zip` produced by samply or
-the Firefox Profiler can be loaded directly:
+Files ending in `.json`, `.json.gz`, `.jslb`, or `.jslb.gz` produced by
+samply or the Firefox Profiler can be loaded directly:
 
 ```text
 call load_profile with path="<path>"
@@ -124,3 +124,21 @@ surface available — `top_functions`, `call_tree`, `summary`,
   function counts. Re-record with `-g` (frame pointers) or
   `--call-graph dwarf` (DWARF unwinding, larger files but works
   without frame pointers).
+
+## Recording other perf events
+
+`samply record` samples cycles only. For other events, record with `perf` and import:
+
+```sh
+perf record -e cycles,cache-misses,instructions -g -- <cmd>
+samply import perf.data --save-only -o /tmp/profile.json.gz
+```
+
+The first `-e` event becomes the samples track, which pollard queries by default.
+Every other event becomes markers named after it; pass that name as `event`, e.g. `event="cache-misses"`.
+`describe_profile` lists the events a profile contains.
+
+Use a fixed period (`-c N`) instead of a frequency (`-F`) when comparing counts across events.
+In frequency mode perf varies the period per sample, and pollard counts samples without weighting them by period.
+
+samply saves `.jslb.gz` by default; pollard loads those too.
