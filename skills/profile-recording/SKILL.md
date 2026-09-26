@@ -87,8 +87,8 @@ samply converts it to Firefox-format:
 
 ### Path D — already a Firefox-format profile
 
-Files ending in `.json`, `.json.gz`, or `.zip` produced by samply or
-the Firefox Profiler can be loaded directly:
+Files ending in `.json`, `.json.gz`, `.jslb`, or `.jslb.gz` produced by
+samply or the Firefox Profiler can be loaded directly:
 
 ```text
 call load_profile with path="<path>"
