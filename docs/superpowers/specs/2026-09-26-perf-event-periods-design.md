@@ -61,6 +61,7 @@ weight value = "period" | "1"
 ```
 
 `Sample weight` reads `period` when `--weight-by-period` was passed and `1` otherwise.
+An attribute that does not sample, such as a member of a leader-sampled group, gets the value `no sampling`, which is outside the grammar, so pollard ignores it.
 The first event entry is the main event, which becomes the samples track, because `EventInterpretation::main_event_attr_index` is always 0.
 pollard reads this section to name the samples track, to find fixed periods, and to tell weighted samples apart. The Firefox Profiler shows it in the profile info panel, where duplicate labels only cause a React key warning.
 
@@ -138,7 +139,7 @@ When several entries share a label, the first one wins, because markers of equal
 
 ## Errors
 
-* A marker `period` that is not a finite non-negative number is ignored, and the item weighs 1.
+* A marker `period` that is 0, negative, or not finite is ignored, and the lookup falls back to the event's fixed period, then 1. samply writes 0 when neither the record nor the attribute has a period, because the field cannot be omitted.
 * A `Perf events` value that does not match the grammar is ignored.
 * A `samples.weight` entry that is negative or not finite weighs 0.
 
