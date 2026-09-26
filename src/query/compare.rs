@@ -622,6 +622,7 @@ mod tests {
             serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
         raw_b.threads[0].markers.data[0] = Some(RawMarkerData {
             cause: Some(MarkerCause { stack: 1 }),
+            ..Default::default()
         });
 
         let a = Profile::from_raw(raw_a);

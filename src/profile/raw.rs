@@ -11,7 +11,7 @@ use serde::{Deserialize, Deserializer};
 /// Deserialize a pid/tid that may be encoded as a JSON integer, float, or
 /// quoted string (e.g. `"50258"` or `"50258.1"` in real samply output).
 /// We extract the integer part and discard fractional suffixes like `.1`.
-fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
+pub(crate) fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<u64, D::Error> {
     use serde::de::Error;
     use serde_json::Value;
     let v = Value::deserialize(de)?;
@@ -108,6 +108,10 @@ pub struct RawMeta {
     pub start_time: f64,
     #[serde(default)]
     pub product: String,
+    /// Processed-profile format version. Absent in hand-written test
+    /// fixtures, which use the per-thread layout.
+    #[serde(default)]
+    pub preprocessed_profile_version: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -286,12 +290,16 @@ pub struct RawMarkerTable {
     pub category: Vec<usize>,
 }
 
-/// Marker payload subset. Only `cause.stack` is consumed; other fields
-/// (`type`, text, timestamps embedded in the payload) are ignored.
+/// Marker payload subset. Only `type` and `cause.stack` are consumed;
+/// other fields (text, timestamps embedded in the payload) are ignored.
 /// Defaulting `cause` to `None` keeps us forward-compatible with text or
 /// log-style markers that the Firefox schema also permits.
 #[derive(Debug, Deserialize, Default)]
 pub struct RawMarkerData {
+    /// Marker schema name, e.g. `"Other event"` for samply's secondary
+    /// perf events.
+    #[serde(default, rename = "type")]
+    pub type_: Option<String>,
     #[serde(default)]
     pub cause: Option<MarkerCause>,
 }

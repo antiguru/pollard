@@ -15,6 +15,7 @@ pub mod raw;
 pub mod symbolicate;
 pub mod tables;
 pub mod transforms;
+pub(crate) mod wire;
 
 pub use event_source::EventSource;
 pub use load::load_from_path;
