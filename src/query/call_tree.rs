@@ -24,7 +24,9 @@ pub struct Args {
     pub min_pct: f32,
     /// Optional absolute-sample floor applied alongside [`Self::min_pct`].
     /// A node is pruned if *either* threshold rejects it. `None` means the
-    /// percentage threshold alone decides.
+    /// percentage threshold alone decides. When the event is weighted (see
+    /// [`Output::weighted`]), this floor is compared against summed perf
+    /// event periods rather than a sample count.
     pub min_samples: Option<u64>,
     pub max_depth: u32,
     pub max_breadth: u32,
@@ -64,6 +66,10 @@ pub struct Output {
     /// Echo of the resolved event source — `"samples"` or the marker
     /// name. Pct columns on the tree are percentages of this event.
     pub event: String,
+    /// True when counts and percentages sum perf event periods rather than
+    /// counting samples. See `top_functions`. `min_samples` pruning and
+    /// `processes_in_tree` sample counts are affected the same way.
+    pub weighted: bool,
     pub pruning: PruningKnobs,
     pub tree: Option<Node>,
     /// Set when `root_function` or `paths_to` didn't match exactly but the
@@ -91,7 +97,9 @@ pub struct Output {
     /// Set together with [`Self::cross_process`]. Each entry's `pct` is
     /// share of `total_samples` (same denominator the tree uses), so
     /// a caller can re-run with `process=pid:<N>` to peel off a single
-    /// contributor.
+    /// contributor. When the event is weighted (see [`Self::weighted`]),
+    /// `samples` here sums perf event periods rather than counting
+    /// samples.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processes_in_tree: Option<Vec<ProcessInTree>>,
     /// Set when the response was trimmed to fit
@@ -273,7 +281,7 @@ fn call_tree_inner(
         let added = total_samples - before;
         if added > 0 {
             let entry = per_pid.entry(pid).or_insert_with(|| (0, name));
-            entry.0 += added;
+            entry.0 = entry.0.saturating_add(added);
         }
     }
 
@@ -339,6 +347,11 @@ fn call_tree_inner(
         thread: None,
         total_samples,
         event: args.event.label().to_owned(),
+        weighted: profile.is_weighted(
+            args.filter_args.threads(profile),
+            &args.event,
+            args.filter_args.time_range,
+        ),
         pruning: PruningKnobs {
             min_pct: args.min_pct,
             min_samples: args.min_samples,
@@ -378,7 +391,7 @@ fn accumulate_with_root(
     root_match_seen: &mut bool,
     paths_to_match_seen: &mut bool,
 ) {
-    for stack_opt in profile.stack_indices(handle, event, time_range) {
+    for (stack_opt, weight) in profile.weighted_stack_indices(handle, event, time_range) {
         let Some(stack_idx) = stack_opt else { continue };
         // resolved_chain returns frames root-to-leaf with view transforms
         // (hide / rename / collapse) already applied — same orientation
@@ -414,15 +427,15 @@ fn accumulate_with_root(
                 None => continue, // skip this stack entirely
             };
         }
-        *total_samples += 1;
+        *total_samples = total_samples.saturating_add(weight);
         let mut node: &mut AggNode = root;
         let len = frames.len();
         for (i, (function, module)) in frames.iter().enumerate() {
             let key = (function.clone(), module.clone());
             node = node.children.entry(key).or_default();
-            node.total_samples += 1;
+            node.total_samples = node.total_samples.saturating_add(weight);
             if i + 1 == len {
-                node.self_samples += 1;
+                node.self_samples = node.self_samples.saturating_add(weight);
             }
         }
     }
@@ -491,7 +504,7 @@ fn build_node(
         }
         if !emitted {
             omitted_count += 1;
-            omitted_samples += child_agg.total_samples;
+            omitted_samples = omitted_samples.saturating_add(child_agg.total_samples);
             // child_entries is sorted by total_samples desc, so the first
             // omissions we observe are the heaviest — take the prefix.
             if top_omitted.len() < TOP_OMITTED_CAP {
@@ -707,6 +720,36 @@ mod tests {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         Profile::from_raw(raw)
+    }
+
+    fn find_frame<'a>(node: &'a Node, name: &str) -> Option<&'a FrameNode> {
+        match node {
+            Node::Frame(f) if f.function == name => Some(f),
+            Node::Frame(f) => f.children.iter().find_map(|c| find_frame(c, name)),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn weighted_tree_follows_periods() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let p = Profile::from_raw(raw);
+        let out = call_tree(
+            &p,
+            &Args {
+                min_pct: 0.0,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.weighted);
+        assert_eq!(out.total_samples, 800);
+        let tree = out.tree.as_ref().unwrap();
+        let cold = find_frame(tree, "cold").unwrap();
+        assert_eq!(cold.total_samples, 600);
+        assert!((cold.total_pct - 75.0).abs() < 1e-4);
     }
 
     #[test]

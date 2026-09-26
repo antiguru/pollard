@@ -33,6 +33,9 @@ pub struct Folded {
     /// Sum of samples represented across all entries — denominator for
     /// any "% dropped" rollup the trimmer reports.
     pub total_samples: u64,
+    /// True when the per-line counts sum perf event periods rather than
+    /// counting samples.
+    pub weighted: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -75,9 +78,11 @@ pub fn folded_stacks_structured(profile: &Profile, args: &Args) -> Result<Folded
     let mut total_samples: u64 = 0;
 
     for handle in args.filter_args.threads(profile) {
-        for stack_opt in
-            profile.stack_indices(handle, &EventSource::Samples, args.filter_args.time_range)
-        {
+        for (stack_opt, weight) in profile.weighted_stack_indices(
+            handle,
+            &EventSource::Samples,
+            args.filter_args.time_range,
+        ) {
             let Some(stack_idx) = stack_opt else { continue };
             // resolved_chain is root-to-leaf with view transforms applied —
             // exactly the orientation flamegraph-folded format expects.
@@ -102,8 +107,9 @@ pub fn folded_stacks_structured(profile: &Profile, args: &Args) -> Result<Folded
             if frames.is_empty() {
                 continue;
             }
-            *counts.entry(frames.join(";")).or_default() += 1;
-            total_samples += 1;
+            let entry = counts.entry(frames.join(";")).or_default();
+            *entry = entry.saturating_add(weight);
+            total_samples = total_samples.saturating_add(weight);
         }
     }
 
@@ -117,6 +123,11 @@ pub fn folded_stacks_structured(profile: &Profile, args: &Args) -> Result<Folded
     Ok(Folded {
         entries,
         total_samples,
+        weighted: profile.is_weighted(
+            args.filter_args.threads(profile),
+            &EventSource::Samples,
+            args.filter_args.time_range,
+        ),
     })
 }
 
@@ -133,6 +144,10 @@ mod tests {
             }
             "linear_chain" => {
                 serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json"))
+                    .unwrap()
+            }
+            "weighted_events" => {
+                serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
                     .unwrap()
             }
             _ => panic!("unknown fixture"),
@@ -169,5 +184,24 @@ mod tests {
         )
         .unwrap();
         assert_eq!(text, "hot 90\n");
+    }
+
+    #[test]
+    fn weighted_lines_sum_periods() {
+        let p = fixture("weighted_events");
+        let folded = folded_stacks_structured(&p, &Args::default()).unwrap();
+        assert!(folded.weighted);
+        assert_eq!(folded.total_samples, 800);
+        assert_eq!(folded.render(), "cold 600\nhot 200\n");
+    }
+
+    #[test]
+    fn unweighted_folded_reports_weighted_false() {
+        let p = fixture("two_functions");
+        assert!(
+            !folded_stacks_structured(&p, &Args::default())
+                .unwrap()
+                .weighted
+        );
     }
 }

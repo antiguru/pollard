@@ -9,6 +9,7 @@ expression: result
   "filter": null,
   "sort_by": "self",
   "event": "samples",
+  "weighted": false,
   "functions": [
     {
       "rank": 1,

@@ -57,6 +57,11 @@ pub struct Output {
     pub unsymbolicated_bracket: &'static str,
     /// See [`crate::query::describe::ProfileDescription::events`].
     pub events: Vec<crate::query::event::EventInfo>,
+    /// True when `top_modules`, `top_self_functions`, and
+    /// `top_total_functions` sum perf event periods rather than counting
+    /// samples. `total_samples` and the per-thread and per-process counts
+    /// always count samples.
+    pub weighted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dominant_thread: Option<DominantThread>,
     /// Top processes by sample count, descending. Capped at
@@ -216,6 +221,7 @@ pub fn summary(
         unsymbolicated_pct: desc.unsymbolicated_pct,
         unsymbolicated_bracket: bracket(desc.unsymbolicated_pct),
         events: crate::query::event::list_events(profile),
+        weighted: by_self.weighted,
         dominant_thread,
         top_processes,
         top_threads,
@@ -522,12 +528,14 @@ fn compute_top_modules(profile: &Profile, filter: &Filter, limit: usize) -> Vec<
     let mut total_samples: u64 = 0;
 
     for handle in filter.threads(profile) {
-        for stack_opt in profile.stack_indices(handle, &EventSource::Samples, filter.time_range) {
+        for (stack_opt, weight) in
+            profile.weighted_stack_indices(handle, &EventSource::Samples, filter.time_range)
+        {
             let Some(stack_idx) = stack_opt else { continue };
-            total_samples += 1;
-            // Each sample contributes 1 to every module appearing at least
-            // once on its stack — same semantics as `total_samples` in
-            // `top_functions`.
+            total_samples = total_samples.saturating_add(weight);
+            // Each sample adds its weight to every module appearing at
+            // least once on its stack, the same semantics as
+            // `total_samples` in `top_functions`.
             let mut seen: HashSet<String> = HashSet::new();
             for frame_idx in profile.walk_stack(handle, stack_idx) {
                 let Some(info) = profile.frame_info(handle, frame_idx) else {
@@ -537,7 +545,8 @@ fn compute_top_modules(profile: &Profile, filter: &Filter, limit: usize) -> Vec<
                     continue;
                 };
                 if seen.insert(module.to_owned()) {
-                    *counts.entry(module.to_owned()).or_default() += 1;
+                    let entry = counts.entry(module.to_owned()).or_default();
+                    *entry = entry.saturating_add(weight);
                 }
             }
         }
@@ -612,6 +621,30 @@ mod tests {
         );
         assert!(!s.top_total_functions.is_empty());
         assert_eq!(s.unsymbolicated_bracket, "0%");
+    }
+
+    #[test]
+    fn weighted_rankings_follow_periods_and_counts_stay_raw() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let profile = Profile::from_raw(raw);
+        let s = summary(
+            &profile,
+            "id",
+            "name",
+            "/tmp/p.json",
+            0.0,
+            Filter::default(),
+        )
+        .unwrap();
+        assert!(s.weighted);
+        assert_eq!(s.total_samples, 4);
+        assert_eq!(s.top_threads[0].samples, 4);
+        assert_eq!(s.top_self_functions[0].function, "cold");
+        assert_eq!(s.top_self_functions[0].self_samples, 600);
+        assert_eq!(s.top_modules[0].module, "app");
+        assert_eq!(s.top_modules[0].total_samples, 800);
     }
 
     #[test]

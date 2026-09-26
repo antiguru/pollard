@@ -24,6 +24,9 @@ pub struct Output {
     pub matched_frame_samples: u64,
     #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub matched_pct: f32,
+    /// True when `matched_frame_samples` and the per-stack `samples` sum
+    /// perf event periods rather than counting samples. See `top_functions`.
+    pub weighted: bool,
     pub unique_stacks_total: usize,
     pub stacks_returned: usize,
     pub stacks: Vec<StackOutput>,
@@ -69,11 +72,13 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
     let mut matched_frame_samples: u64 = 0;
 
     for handle in args.filter_args.threads(profile) {
-        for stack_opt in
-            profile.stack_indices(handle, &EventSource::Samples, args.filter_args.time_range)
-        {
+        for (stack_opt, weight) in profile.weighted_stack_indices(
+            handle,
+            &EventSource::Samples,
+            args.filter_args.time_range,
+        ) {
             let Some(stack_idx) = stack_opt else { continue };
-            total_samples += 1;
+            total_samples = total_samples.saturating_add(weight);
             // resolved_chain is root-to-leaf with view transforms applied,
             // matching the orientation this listing wants to emit.
             let mut any_match = false;
@@ -87,8 +92,9 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
                 })
                 .collect();
             if any_match {
-                matched_frame_samples += 1;
-                *counts.entry(frames).or_default() += 1;
+                matched_frame_samples = matched_frame_samples.saturating_add(weight);
+                let entry = counts.entry(frames).or_default();
+                *entry = entry.saturating_add(weight);
             }
         }
     }
@@ -134,6 +140,11 @@ pub fn stacks_containing(profile: &Profile, args: &Args) -> Result<Output, ToolE
         function_filter: args.function.clone(),
         matched_frame_samples,
         matched_pct: 100.0 * matched_frame_samples as f32 / total,
+        weighted: profile.is_weighted(
+            args.filter_args.threads(profile),
+            &EventSource::Samples,
+            args.filter_args.time_range,
+        ),
         unique_stacks_total,
         stacks_returned: stacks.len(),
         stacks,
@@ -169,5 +180,25 @@ mod tests {
                 .iter()
                 .all(|s| s.frames.iter().any(|f| f.matched))
         );
+    }
+
+    #[test]
+    fn weighted_stacks_follow_periods() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let profile = Profile::from_raw(raw);
+        let out = stacks_containing(
+            &profile,
+            &Args {
+                function: "cold".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.weighted);
+        assert_eq!(out.matched_frame_samples, 600);
+        assert_eq!(out.stacks[0].samples, 600);
+        assert!((out.matched_pct - 75.0).abs() < 1e-4);
     }
 }

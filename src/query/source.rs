@@ -67,6 +67,9 @@ pub struct SourceListing {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub language: Option<String>,
     pub total_function_samples: u64,
+    /// True when `total_function_samples` and each line's `samples` sum
+    /// perf event periods rather than counting samples.
+    pub weighted: bool,
     pub line_range: [u32; 2],
     pub lines: Vec<SourceLine>,
     /// Set when the requested function name didn't match exactly but the
@@ -165,6 +168,7 @@ fn record_match(
     ctx_offset: &mut Option<u32>,
     samples_per_line: &mut HashMap<u32, u64>,
     total: &mut u64,
+    weight: u64,
 ) {
     let key = (function_name.to_owned(), module.unwrap_or("").to_owned());
     *matched_pairs.entry(key).or_default() += 1;
@@ -182,8 +186,8 @@ fn record_match(
         *ctx_offset = Some(off);
     }
     if let Some(line) = frame_line {
-        *samples_per_line.entry(line).or_default() += 1;
-        *total += 1;
+        *samples_per_line.entry(line).or_default() += weight;
+        *total += weight;
     }
 }
 
@@ -206,8 +210,9 @@ fn attribute(
     for thread in profile.threads() {
         let handle = thread.handle();
         let raw = profile.raw_thread(handle);
-        for &stack_opt in &raw.samples.stack {
+        for (sample_idx, &stack_opt) in raw.samples.stack.iter().enumerate() {
             let Some(stack_idx) = stack_opt else { continue };
+            let weight = profile.sample_weight(handle, sample_idx);
             for frame_idx in profile.walk_stack(handle, stack_idx) {
                 let Some(info) = profile.frame_info(handle, frame_idx) else {
                     continue;
@@ -261,6 +266,7 @@ fn attribute(
                         &mut ctx_offset,
                         &mut samples_per_line,
                         &mut total,
+                        weight,
                     );
                 }
 
@@ -286,6 +292,7 @@ fn attribute(
                             &mut ctx_offset,
                             &mut samples_per_line,
                             &mut total,
+                            weight,
                         );
                     }
                 }
@@ -472,6 +479,7 @@ pub fn build_listing(
         file: resolved.file,
         language: resolved.language,
         total_function_samples: total,
+        weighted: profile.samples_weighted_by_period(),
         line_range,
         lines,
         did_you_mean: None,
@@ -483,6 +491,71 @@ mod tests {
     use super::*;
     use crate::profile::Profile;
     use crate::profile::raw::RawProfile;
+
+    #[test]
+    fn weighted_samples_attribute_periods_to_lines() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let profile = Profile::from_raw(raw);
+        let content: String = (1..=25).map(|i| format!("line {i}\n")).collect();
+        let listing = build_listing(
+            &profile,
+            "cold",
+            None,
+            ResolvedSource {
+                file: "/src/lib.rs".to_owned(),
+                language: None,
+                content,
+            },
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+        assert!(listing.weighted);
+        assert_eq!(listing.total_function_samples, 600);
+        let line = listing.lines.iter().find(|l| l.line == 20).unwrap();
+        assert_eq!(line.samples, 600);
+    }
+
+    #[test]
+    fn weighted_samples_read_weight_by_original_sample_index() {
+        // Insert a null-stack sample before the existing ones, with its own
+        // weight entry. `attribute` enumerates `raw.samples.stack` and reads
+        // `profile.sample_weight(handle, sample_idx)` at that same index.
+        // If it instead read weights off a compacted index that skips
+        // null-stack rows before looking up the weight, every real sample's
+        // weight would shift by one and this test would fail.
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let samples = &mut raw.threads[0].samples;
+        samples.stack.insert(0, None);
+        samples.time.insert(0, -1.0);
+        if let Some(weight) = samples.weight.as_mut() {
+            weight.insert(0, 9999.0);
+        }
+        let profile = Profile::from_raw(raw);
+        let content: String = (1..=25).map(|i| format!("line {i}\n")).collect();
+        let listing = build_listing(
+            &profile,
+            "cold",
+            None,
+            ResolvedSource {
+                file: "/src/lib.rs".to_owned(),
+                language: None,
+                content,
+            },
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(listing.total_function_samples, 600);
+        let line = listing.lines.iter().find(|l| l.line == 20).unwrap();
+        assert_eq!(line.samples, 600);
+    }
 
     #[test]
     fn expand_inlines_matches_inline_function_with_its_own_line() {

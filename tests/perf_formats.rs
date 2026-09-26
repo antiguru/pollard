@@ -4,6 +4,9 @@
 //! samply build, so every query result must match exactly.
 //! `multi_v49.json.gz` comes from samply 0.13.1, which emits different
 //! libraries and categories, so only per-event totals are compared.
+//!
+//! `multi_period.json.gz` is a `--weight-by-period` import of the same
+//! recording, so its item counts match the others and its weights exceed them.
 
 use std::path::Path;
 
@@ -73,6 +76,31 @@ async fn json_and_jslb_from_one_build_match() {
 }
 
 #[tokio::test]
+async fn period_json_and_jslb_from_one_build_match() {
+    let json = load("multi_period.json.gz").await;
+    let jslb = load("multi_period.jslb.gz").await;
+    for ev in event_sources() {
+        assert_eq!(
+            top(&json, ev.clone()),
+            top(&jslb, ev.clone()),
+            "top_functions {ev:?}"
+        );
+        let weighted = |p: &Profile| {
+            top_functions(
+                p,
+                &top_functions::Args {
+                    event: ev.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .weighted
+        };
+        assert_eq!(weighted(&json), weighted(&jslb), "weighted {ev:?}");
+    }
+}
+
+#[tokio::test]
 async fn versions_49_and_75_agree_on_event_totals() {
     let v49 = load("multi_v49.json.gz").await;
     let v75 = load("multi_v75.json.gz").await;
@@ -80,5 +108,37 @@ async fn versions_49_and_75_agree_on_event_totals() {
         let (a, b) = (total(&v49, ev.clone()), total(&v75, ev.clone()));
         assert!(a > 0, "no {ev:?} in the version 49 fixture");
         assert_eq!(a, b, "total for {ev:?}");
+    }
+}
+
+#[tokio::test]
+async fn period_fixture_is_weighted_by_period() {
+    let period = load("multi_period.json.gz").await;
+    let v75 = load("multi_v75.json.gz").await;
+
+    let events = pollard::query::event::list_events(&period);
+    assert_eq!(events[0].event.as_deref(), Some("cycles"));
+    for e in &events {
+        assert_eq!(e.sampling.as_deref(), Some("frequency 999 Hz"), "{e:?}");
+    }
+    let plain = pollard::query::event::list_events(&v75);
+    for (a, b) in events.iter().zip(plain.iter()) {
+        assert_eq!((&a.name, a.count), (&b.name, b.count));
+    }
+
+    for ev in event_sources() {
+        let out = top_functions(
+            &period,
+            &top_functions::Args {
+                event: ev.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.weighted, "{ev:?}");
+        assert!(
+            out.total_samples > total(&v75, ev.clone()),
+            "period weights must exceed counts for {ev:?}"
+        );
     }
 }

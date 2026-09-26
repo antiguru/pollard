@@ -11,7 +11,7 @@
 use crate::error::{ProcessRef, ToolError};
 use crate::profile::Profile;
 use crate::query::filters::Filter;
-use crate::query::top_functions::{Counts, aggregate_grouped};
+use crate::query::top_functions::{Counts, Tally, aggregate_grouped};
 use schemars::JsonSchema;
 use serde::Serialize;
 use std::collections::HashMap;
@@ -61,6 +61,9 @@ pub struct Output {
     pub total_samples: u64,
     pub filter: Option<String>,
     pub sort_by: &'static str,
+    /// True when counts and percentages sum perf event periods rather than
+    /// counting samples. See `top_functions`.
+    pub weighted: bool,
     pub groups: Vec<GroupEntry>,
     /// Set when a bare-name `process=` filter aggregated across more than
     /// one distinct pid. Lists the matched `(pid, name)` pairs so the
@@ -92,7 +95,7 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     // marker-backed events here (cache-misses, …) is out of scope for the
     // initial event= rollout — the README and tool description note this.
     let event = crate::query::event::EventSource::Samples;
-    let (counts, total_samples): (HashMap<String, Counts>, u64) = aggregate_grouped(
+    let (counts, total): (HashMap<String, Counts>, Tally) = aggregate_grouped(
         profile,
         args.filter.as_deref(),
         &args.filter_args,
@@ -108,9 +111,9 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
 
     let mut entries: Vec<(String, Counts)> = counts.into_iter().collect();
     let sort_key = |c: &Counts| match args.sort_by {
-        SortBy::SelfTime => c.self_samples,
-        SortBy::TotalTime => c.total_samples,
-        SortBy::Descendants => c.total_samples.saturating_sub(c.self_samples),
+        SortBy::SelfTime => c.self_.weight,
+        SortBy::TotalTime => c.total.weight,
+        SortBy::Descendants => c.total.weight.saturating_sub(c.self_.weight),
     };
     entries.sort_by(|a, b| {
         sort_key(&b.1)
@@ -123,7 +126,7 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
     } else {
         args.limit
     };
-    let total = total_samples.max(1) as f32;
+    let total_f = total.weight.max(1) as f32;
     let groups: Vec<_> = entries
         .into_iter()
         .take(limit)
@@ -131,10 +134,10 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
         .map(|(i, (key, c))| GroupEntry {
             rank: i + 1,
             key,
-            self_samples: c.self_samples,
-            self_pct: 100.0 * c.self_samples as f32 / total,
-            total_samples: c.total_samples,
-            total_pct: 100.0 * c.total_samples as f32 / total,
+            self_samples: c.self_.weight,
+            self_pct: 100.0 * c.self_.weight as f32 / total_f,
+            total_samples: c.total.weight,
+            total_pct: 100.0 * c.total.weight as f32 / total_f,
         })
         .collect();
 
@@ -145,13 +148,18 @@ pub fn top_groups(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
             GroupBy::File => "file",
             GroupBy::Directory => "directory",
         },
-        total_samples,
+        total_samples: total.weight,
         filter: args.filter.clone(),
         sort_by: match args.sort_by {
             SortBy::SelfTime => "self",
             SortBy::TotalTime => "total",
             SortBy::Descendants => "descendants",
         },
+        weighted: profile.is_weighted(
+            args.filter_args.threads(profile),
+            &event,
+            args.filter_args.time_range,
+        ),
         groups,
         matched_processes: args.filter_args.bare_name_multi_match(profile),
         truncated: None,
@@ -187,6 +195,27 @@ mod tests {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         Profile::from_raw(raw)
+    }
+
+    #[test]
+    fn weighted_groups_follow_periods() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let p = Profile::from_raw(raw);
+        let out = top_groups(
+            &p,
+            &Args {
+                group_by: GroupBy::Function,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.weighted);
+        assert_eq!(out.total_samples, 800);
+        assert_eq!(out.groups[0].key, "cold");
+        assert_eq!(out.groups[0].self_samples, 600);
+        assert!((out.groups[0].self_pct - 75.0).abs() < 1e-4);
     }
 
     #[test]

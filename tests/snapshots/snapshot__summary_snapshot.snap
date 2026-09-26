@@ -20,6 +20,7 @@ expression: result
       "count": 112
     }
   ],
+  "weighted": false,
   "dominant_thread": {
     "tid": 1969261,
     "name": "tokio-runtime-w",

@@ -127,18 +127,24 @@ surface available — `top_functions`, `call_tree`, `summary`,
 
 ## Recording other perf events
 
-`samply record` samples cycles only. For other events, record with `perf` and import:
+`samply record` samples cycles only. For other events, record with `perf` and import.
+
+`--weight-by-period` needs a samply build that includes period support, which is not yet in a samply release. samply 0.13.1 and earlier reject the flag.
 
 ```sh
 perf record -e cycles,cache-misses,instructions -g -- <cmd>
-samply import perf.data --save-only -o /tmp/profile.json.gz
+samply import perf.data --weight-by-period --save-only -o /tmp/profile.json.gz
 ```
 
 The first `-e` event becomes the samples track, which pollard queries by default.
 Every other event becomes markers named after it; pass that name as `event`, e.g. `event="cache-misses"`.
 `describe_profile` lists the events a profile contains.
 
-Use a fixed period (`-c N`) instead of a frequency (`-F`) when comparing counts across events.
-In frequency mode perf varies the period per sample, and pollard counts samples without weighting them by period.
+Pass `--weight-by-period` to `samply import` so the samples track counts events instead of samples.
+samply also records each marker's period, so pollard weights every event by its period and reports `weighted: true` in tool outputs.
+This makes frequency mode (`-F`) and fixed periods (`-c N`) equally usable.
+Without it, pollard counts samples of the first event, which in frequency mode biases shares toward code that ran while the period was small.
+A fixed period (`-c N`) does not save you from this: pollard always weights marker events by their period, so without `--weight-by-period` the samples track counts raw samples while marker totals are already scaled by N, and the two disagree by that factor. Pass `--weight-by-period` whenever you compare the samples track against another event.
+`describe_profile` names the first event and how each event was sampled.
 
 samply saves `.jslb.gz` by default; pollard loads those too.

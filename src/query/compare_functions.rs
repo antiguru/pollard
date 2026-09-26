@@ -15,7 +15,7 @@
 
 use crate::error::ToolError;
 use crate::profile::Profile;
-use crate::query::asm::{self, AsmInstruction};
+use crate::query::asm::{self, AsmInstruction, AsmListing};
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -44,6 +44,11 @@ pub struct Output {
     pub arch: String,
     pub total_samples_a: u64,
     pub total_samples_b: u64,
+    /// True when side A's `samples` sum perf event periods rather than
+    /// counting samples.
+    pub weighted_a: bool,
+    /// Same as [`Self::weighted_a`] for side B.
+    pub weighted_b: bool,
     pub rows: Vec<AlignedRow>,
 }
 
@@ -92,6 +97,14 @@ pub async fn compare_functions(
     )
     .await?;
 
+    build_output(listing_a, listing_b)
+}
+
+/// Assemble the side-by-side `Output` from two already-resolved
+/// `AsmListing`s. Split out from `compare_functions` so tests can exercise
+/// the arch check, sample totals, alignment, and weighted-flag wiring with
+/// hand-built listings, without needing a real disassembler backend.
+fn build_output(listing_a: AsmListing, listing_b: AsmListing) -> Result<Output, ToolError> {
     if listing_a.arch != listing_b.arch {
         return Err(ToolError::Internal {
             message: format!(
@@ -123,6 +136,8 @@ pub async fn compare_functions(
     );
 
     Ok(Output {
+        weighted_a: listing_a.weighted,
+        weighted_b: listing_b.weighted,
         function_a: listing_a.function,
         module_a: listing_a.module,
         function_b: listing_b.function,
@@ -269,6 +284,40 @@ fn only_b_row(bi: &AsmInstruction) -> AlignedRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minimal one-instruction `AsmListing` for `build_output` tests, so
+    /// they can pin the weighted-flag wiring without a real disassembler
+    /// backend.
+    fn listing(weighted: bool, samples: u64) -> AsmListing {
+        AsmListing {
+            function: "f".to_owned(),
+            module: None,
+            start_address: "0x0".to_owned(),
+            size: "0x10".to_owned(),
+            arch: "x86_64".to_owned(),
+            instructions: vec![AsmInstruction {
+                offset: 0,
+                asm: "nop".to_owned(),
+                samples,
+            }],
+            weighted,
+            did_you_mean: None,
+        }
+    }
+
+    #[test]
+    fn build_output_reports_weighted_true_for_both_sides() {
+        let out = build_output(listing(true, 600), listing(true, 200)).unwrap();
+        assert!(out.weighted_a);
+        assert!(out.weighted_b);
+    }
+
+    #[test]
+    fn build_output_reports_mixed_weighting() {
+        let out = build_output(listing(true, 600), listing(false, 2)).unwrap();
+        assert!(out.weighted_a);
+        assert!(!out.weighted_b);
+    }
 
     fn ins(offset: u32, asm: &str, samples: u64) -> AsmInstruction {
         AsmInstruction {

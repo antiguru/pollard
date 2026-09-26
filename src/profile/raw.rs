@@ -38,6 +38,17 @@ pub(crate) fn deserialize_id_as_u64<'de, D: Deserializer<'de>>(de: D) -> Result<
     }
 }
 
+/// Deserialize optional metadata leniently: a value of another shape
+/// becomes `T::default()` instead of failing the whole profile load.
+pub(crate) fn lenient<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let value = serde_json::Value::deserialize(de)?;
+    Ok(serde_json::from_value(value).unwrap_or_default())
+}
+
 /// A samply pid. The Firefox processed-profile schema permits either a plain
 /// integer or a string with a `.N` suffix (e.g. `"1969186.1"`) to distinguish
 /// distinct processes that share the same OS pid (e.g. the parent samply
@@ -121,6 +132,32 @@ pub struct RawMeta {
     /// fixtures, which use the per-thread layout.
     #[serde(default)]
     pub preprocessed_profile_version: Option<u32>,
+    /// Labeled info sections (`meta.extra`). samply writes a `Perf events`
+    /// section here, see [`crate::profile::perf_events`]. A value of an
+    /// unexpected shape loads as empty.
+    #[serde(default, deserialize_with = "lenient")]
+    pub extra: Vec<RawExtraSection>,
+}
+
+/// One section of `meta.extra`, as the Firefox Profiler defines it.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct RawExtraSection {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub entries: Vec<RawExtraEntry>,
+}
+
+/// One labeled value of a [`RawExtraSection`]. samply writes only the
+/// `string` format, whose value is a JSON string.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct RawExtraEntry {
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub format: String,
+    #[serde(default)]
+    pub value: serde_json::Value,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -240,7 +277,7 @@ pub struct RawMarkerTable {
     pub category: Vec<usize>,
 }
 
-/// Marker payload subset. Only `type` and `cause.stack` are consumed;
+/// Marker payload subset. Only `type`, `cause.stack`, and `period` are consumed;
 /// other fields (text, timestamps embedded in the payload) are ignored.
 /// Defaulting `cause` to `None` keeps us forward-compatible with text or
 /// log-style markers that the Firefox schema also permits.
@@ -252,6 +289,10 @@ pub struct RawMarkerData {
     pub type_: Option<String>,
     #[serde(default)]
     pub cause: Option<MarkerCause>,
+    /// Events this marker stands for. samply writes the perf record's
+    /// period on `Other event` markers. A non-numeric value loads as `None`.
+    #[serde(default, deserialize_with = "lenient")]
+    pub period: Option<f64>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -346,5 +387,45 @@ mod tests {
             r#""unknownField": 42, "product": "test"#,
         );
         serde_json::from_str::<RawProfile>(&with_extras).unwrap();
+    }
+
+    #[test]
+    fn meta_extra_sections_deserialize() {
+        let json = MINIMAL.replace(
+            r#""product": "test""#,
+            r#""product": "test", "extra": [{"label": "Perf events", "entries": [{"label": "cycles", "format": "string", "value": "period 5"}]}]"#,
+        );
+        let p: RawProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(p.meta.extra[0].label, "Perf events");
+        assert_eq!(p.meta.extra[0].entries[0].label, "cycles");
+        assert_eq!(
+            p.meta.extra[0].entries[0].value,
+            serde_json::json!("period 5")
+        );
+    }
+
+    #[test]
+    fn malformed_meta_extra_loads_empty() {
+        for extra in [r#"{"not": "an array"}"#, r#"[{"label": 3}]"#, "null", "7"] {
+            let json = MINIMAL.replace(
+                r#""product": "test""#,
+                &format!(r#""product": "test", "extra": {extra}"#),
+            );
+            let p: RawProfile =
+                serde_json::from_str(&json).unwrap_or_else(|e| panic!("{extra}: {e}"));
+            assert!(p.meta.extra.is_empty(), "{extra}");
+        }
+    }
+
+    #[test]
+    fn non_numeric_marker_period_is_ignored() {
+        let non_numeric: RawMarkerData =
+            serde_json::from_str(r#"{"type": "Other event", "period": "x"}"#).unwrap();
+        assert_eq!(non_numeric.period, None);
+        let numeric: RawMarkerData =
+            serde_json::from_str(r#"{"type": "Other event", "period": 25}"#).unwrap();
+        assert_eq!(numeric.period, Some(25.0));
+        let absent: RawMarkerData = serde_json::from_str(r#"{"type": "Other event"}"#).unwrap();
+        assert_eq!(absent.period, None);
     }
 }

@@ -123,6 +123,15 @@ pub struct Output {
     /// name (e.g. `"cache-misses"`). Lets the caller verify which
     /// counter the pct columns are percentages of.
     pub event: String,
+    /// True when profile A's counts and percentages sum perf event periods
+    /// rather than counting samples. See `top_functions`.
+    pub weighted_a: bool,
+    /// Same as [`Self::weighted_a`] for profile B.
+    pub weighted_b: bool,
+    /// Set when exactly one side is weighted: that side's percentages are
+    /// event shares and the other's are sample shares.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
     pub functions: Vec<DiffEntry>,
     /// Set when a bare-name `process=` filter aggregated across more than
     /// one distinct pid in profile A. Lists the matched `(pid, name)`
@@ -164,9 +173,10 @@ pub struct DiffEntry {
     /// `b_total_pct - a_total_pct`.
     #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub delta_total_pct: f32,
-    /// Raw sample-count deltas. Less normalized than the pct deltas — useful
-    /// when both profiles have similar duration and the caller wants to know
-    /// the absolute movement, not just the rebalance.
+    /// Raw count deltas, event counts when `weighted_*` is set. Less
+    /// normalized than the pct deltas, useful when both profiles have
+    /// similar duration and the caller wants to know the absolute movement,
+    /// not just the rebalance.
     pub delta_self_samples: i64,
     pub delta_total_samples: i64,
     /// Per-side wall-time estimate: `samples * meta.interval_ms`. Pct
@@ -249,18 +259,18 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
     for ((function, module), c) in counts_a {
         let key = join_key(function, module, args.align_by);
         let slot = &mut joined.entry(key).or_default().0;
-        slot.self_samples += c.self_samples;
-        slot.total_samples += c.total_samples;
+        slot.self_.merge(c.self_);
+        slot.total.merge(c.total);
     }
     for ((function, module), c) in counts_b {
         let key = join_key(function, module, args.align_by);
         let slot = &mut joined.entry(key).or_default().1;
-        slot.self_samples += c.self_samples;
-        slot.total_samples += c.total_samples;
+        slot.self_.merge(c.self_);
+        slot.total.merge(c.total);
     }
 
-    let denom_a = total_a.max(1) as f32;
-    let denom_b = total_b.max(1) as f32;
+    let denom_a = total_a.weight.max(1) as f32;
+    let denom_b = total_b.weight.max(1) as f32;
     let interval_a = a.meta().interval;
     let interval_b = b.meta().interval;
     let time_shaped = args.event.is_time_shaped();
@@ -268,16 +278,18 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
     let mut rows: Vec<DiffEntry> = joined
         .into_iter()
         .map(|((function, module), (ca, cb))| {
-            let a_self_pct = 100.0 * ca.self_samples as f32 / denom_a;
-            let b_self_pct = 100.0 * cb.self_samples as f32 / denom_b;
-            let a_total_pct = 100.0 * ca.total_samples as f32 / denom_a;
-            let b_total_pct = 100.0 * cb.total_samples as f32 / denom_b;
+            let a_self_pct = 100.0 * ca.self_.weight as f32 / denom_a;
+            let b_self_pct = 100.0 * cb.self_.weight as f32 / denom_b;
+            let a_total_pct = 100.0 * ca.total.weight as f32 / denom_a;
+            let b_total_pct = 100.0 * cb.total.weight as f32 / denom_b;
             let (a_self_ms, b_self_ms, a_total_ms, b_total_ms, delta_self_ms, delta_total_ms) =
                 if time_shaped {
-                    let a_self = ca.self_samples as f64 * interval_a;
-                    let b_self = cb.self_samples as f64 * interval_b;
-                    let a_total = ca.total_samples as f64 * interval_a;
-                    let b_total = cb.total_samples as f64 * interval_b;
+                    // An event count has no time unit, so the ms columns
+                    // stay on sample counts even for weighted profiles.
+                    let a_self = ca.self_.samples as f64 * interval_a;
+                    let b_self = cb.self_.samples as f64 * interval_b;
+                    let a_total = ca.total.samples as f64 * interval_a;
+                    let b_total = cb.total.samples as f64 * interval_b;
                     (
                         Some(a_self),
                         Some(b_self),
@@ -293,18 +305,20 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
                 rank: 0,
                 function,
                 module,
-                a_self_samples: ca.self_samples,
+                a_self_samples: ca.self_.weight,
                 a_self_pct,
-                a_total_samples: ca.total_samples,
+                a_total_samples: ca.total.weight,
                 a_total_pct,
-                b_self_samples: cb.self_samples,
+                b_self_samples: cb.self_.weight,
                 b_self_pct,
-                b_total_samples: cb.total_samples,
+                b_total_samples: cb.total.weight,
                 b_total_pct,
                 delta_self_pct: b_self_pct - a_self_pct,
                 delta_total_pct: b_total_pct - a_total_pct,
-                delta_self_samples: cb.self_samples as i64 - ca.self_samples as i64,
-                delta_total_samples: cb.total_samples as i64 - ca.total_samples as i64,
+                delta_self_samples: i64::try_from(cb.self_.weight).unwrap_or(i64::MAX)
+                    - i64::try_from(ca.self_.weight).unwrap_or(i64::MAX),
+                delta_total_samples: i64::try_from(cb.total.weight).unwrap_or(i64::MAX)
+                    - i64::try_from(ca.total.weight).unwrap_or(i64::MAX),
                 a_self_ms,
                 b_self_ms,
                 a_total_ms,
@@ -338,9 +352,20 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
         r.rank = i + 1;
     }
 
+    let weighted_a = a.is_weighted(
+        args.filter_args.threads(a),
+        &args.event,
+        args.filter_args.time_range,
+    );
+    let weighted_b = b.is_weighted(
+        args.filter_args.threads(b),
+        &args.event,
+        args.filter_args.time_range,
+    );
+
     Ok(Output {
-        a_total_samples: total_a,
-        b_total_samples: total_b,
+        a_total_samples: total_a.weight,
+        b_total_samples: total_b.weight,
         filter: args.filter.clone(),
         sort_by: match args.sort_by {
             SortBy::Delta => "delta",
@@ -349,6 +374,9 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
             SortBy::B => "b",
         },
         event: args.event.label().to_owned(),
+        weighted_a,
+        weighted_b,
+        note: weighting_note(weighted_a, weighted_b),
         functions: rows,
         a_matched_processes: args.filter_args.bare_name_multi_match(a),
         b_matched_processes: args.filter_args.bare_name_multi_match(b),
@@ -368,6 +396,19 @@ fn sort_key(r: &DiffEntry, by: SortBy) -> f64 {
         SortBy::A => r.a_self_pct as f64,
         SortBy::B => r.b_self_pct as f64,
     }
+}
+
+/// The mismatch note for [`Output::note`], `None` when both sides agree.
+fn weighting_note(weighted_a: bool, weighted_b: bool) -> Option<String> {
+    let (weighted, unweighted) = match (weighted_a, weighted_b) {
+        (true, false) => ("A", "B"),
+        (false, true) => ("B", "A"),
+        _ => return None,
+    };
+    Some(format!(
+        "profile {weighted}'s percentages are event shares weighted by perf event period, \
+         profile {unweighted}'s are sample shares, so they are not directly comparable"
+    ))
 }
 
 /// Re-key the per-side aggregator output for the outer-join according to
@@ -396,6 +437,61 @@ mod tests {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         Profile::from_raw(raw)
+    }
+
+    fn weighted_events_raw() -> RawProfile {
+        serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json")).unwrap()
+    }
+
+    fn row<'a>(out: &'a Output, function: &str) -> &'a DiffEntry {
+        out.functions
+            .iter()
+            .find(|r| r.function == function)
+            .unwrap_or_else(|| panic!("no row for {function}"))
+    }
+
+    #[test]
+    fn weighted_profile_shares_follow_periods_and_ms_follows_counts() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let out = compare_profiles(&p, &p, &Args::default()).unwrap();
+        assert!(out.weighted_a && out.weighted_b);
+        assert!(out.note.is_none());
+        assert_eq!(out.a_total_samples, 800);
+        let (hot, cold) = (row(&out, "hot"), row(&out, "cold"));
+        assert_eq!(hot.a_self_samples, 200);
+        assert_eq!(cold.a_self_samples, 600);
+        assert!((hot.a_self_pct - 25.0).abs() < 1e-4);
+        assert!((cold.a_self_pct - 75.0).abs() < 1e-4);
+        // `*_ms` counts samples: two samples each at a 1 ms interval.
+        assert_eq!(hot.a_self_ms, Some(2.0));
+        assert_eq!(cold.a_self_ms, Some(2.0));
+    }
+
+    #[test]
+    fn mixed_weighting_adds_note() {
+        let a = Profile::from_raw(weighted_events_raw());
+        let mut raw_b = weighted_events_raw();
+        raw_b.meta.extra.clear();
+        let b = Profile::from_raw(raw_b);
+        let out = compare_profiles(&a, &b, &Args::default()).unwrap();
+        assert!(out.weighted_a);
+        assert!(!out.weighted_b);
+        let note = out
+            .note
+            .clone()
+            .expect("note when only one side is weighted");
+        assert!(note.contains("not directly comparable"), "{note}");
+        assert!(note.contains("profile A"), "{note}");
+        assert_eq!(row(&out, "hot").b_self_samples, 2);
+        assert_eq!(row(&out, "cold").a_self_samples, 600);
+    }
+
+    #[test]
+    fn unweighted_profiles_have_no_note() {
+        let p = two_functions();
+        let out = compare_profiles(&p, &p, &Args::default()).unwrap();
+        assert!(!out.weighted_a && !out.weighted_b);
+        assert!(out.note.is_none());
     }
 
     #[test]
