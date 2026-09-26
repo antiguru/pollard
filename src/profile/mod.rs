@@ -9,6 +9,7 @@
 //! Markers, counters, profiler config, and other top-level fields are skipped.
 
 pub mod event_source;
+pub(crate) mod jslb;
 pub mod load;
 pub mod parsed;
 pub mod raw;

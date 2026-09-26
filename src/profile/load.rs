@@ -1,7 +1,9 @@
 //! Read a profile file into our raw types.
 //!
 //! The container is detected from magic bytes: gzip first, then JSLB,
-//! and plain JSON otherwise.
+//! and plain JSON otherwise. Only the JSLB path builds a
+//! `serde_json::Value`, because its skeleton is small and the columns
+//! live in binary slabs.
 
 #![allow(dead_code)]
 
@@ -67,6 +69,14 @@ pub(crate) fn decode_bytes(bytes: &[u8]) -> Result<RawProfile, LoadError> {
 }
 
 fn decode_uncompressed(bytes: &[u8]) -> Result<RawProfile, LoadError> {
+    if bytes.starts_with(&crate::profile::jslb::MAGIC) {
+        let value = crate::profile::jslb::to_value(bytes).map_err(LoadError::Jslb)?;
+        let version = value
+            .pointer("/meta/preprocessedProfileVersion")
+            .and_then(serde_json::Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok());
+        return serde_json::from_value(value).map_err(|e| json_error(e, version));
+    }
     serde_json::from_slice(bytes).map_err(|e| {
         // Only the error path pays for a second parse. A file in an
         // unsupported version usually fails schema checks before the
@@ -165,6 +175,31 @@ mod tests {
                        "threads": [{"tid": 1}]}"#;
         let err = decode_bytes(json.as_bytes()).unwrap_err();
         assert!(matches!(err, LoadError::Json(_)), "{err:?}");
+    }
+
+    #[test]
+    fn gzipped_jslb_loads_by_magic() {
+        use flate2::Compression;
+        use flate2::write::GzEncoder;
+        let mut b = json_slabs::Builder::new();
+        let stacks = b.add_slab_from_vec(vec![0i32]);
+        let root = format!(
+            r#"{{"meta": {{"interval": 1.0, "startTime": 0.0}}, "threads": [{{"tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": ["f"],
+                "frameTable": {{"length": 1, "address": [-1], "func": [0], "line": [null], "column": [null], "category": [0], "subcategory": [0]}},
+                "funcTable": {{"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]}},
+                "stackTable": {{"length": 1, "frame": [0], "prefix": [null]}},
+                "resourceTable": {{"length": 0, "lib": [], "name": [], "host": [], "type": []}},
+                "samples": {{"length": 1, "stack": {stacks:#}, "time": [0.0]}}}}]}}"#
+        );
+        let jslb = b.finish(root.as_bytes());
+        // A `.json` name must not matter: detection reads magic bytes.
+        let mut f = NamedTempFile::with_suffix(".json").unwrap();
+        let mut gz = GzEncoder::new(f.as_file_mut(), Compression::default());
+        gz.write_all(&jslb).unwrap();
+        gz.finish().unwrap();
+        let p = load_from_path(f.path()).unwrap();
+        assert_eq!(p.threads[0].samples.stack, vec![Some(0)]);
     }
 
     #[test]

@@ -296,7 +296,7 @@ pub(super) fn decode(mut w: WireProfile) -> Result<RawProfile, String> {
             .stacks
             .frame
             .push(*col(&st.frame, i, "stackTable.frame")?);
-        // 0 marks a root; any other offset points back to the parent,
+        // 0 marks a root. Any other offset points back to the parent,
         // which the format guarantees comes first.
         let offset = *col(&st.prefix_offset, i, "stackTable.prefixOffset")?;
         let prefix = match offset {
