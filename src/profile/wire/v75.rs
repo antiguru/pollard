@@ -164,11 +164,13 @@ pub(super) fn decode(mut w: WireProfile) -> Result<RawProfile, String> {
             .resources
             .name
             .push(map_string(&smap, name, "resourceTable.name", r)?);
+        // An out-of-range host string index dangles rather than failing
+        // decode. `clear_dangling_optional_refs` nulls it out afterward.
         let host = *col(&rt.host, r, "resourceTable.host")?;
-        shared.resources.host.push(
-            host.map(|h| map_string(&smap, h, "resourceTable.host", r))
-                .transpose()?,
-        );
+        shared
+            .resources
+            .host
+            .push(host.and_then(|h| map_string(&smap, h, "resourceTable.host", r).ok()));
         shared
             .resources
             .type_
@@ -226,10 +228,9 @@ pub(super) fn decode(mut w: WireProfile) -> Result<RawProfile, String> {
             "funcTable.source",
             f,
         )?;
-        let file_name = match source {
-            None => None,
-            Some(s) => Some(*col(&source_files, s, "sources")?),
-        };
+        // Same as `resourceTable.host` above: a `source` index past the
+        // sources table dangles instead of failing decode.
+        let file_name = source.and_then(|s| source_files.get(s).copied());
         shared.funcs.file_name.push(file_name);
         shared.funcs.line_number.push(gated_u32(
             flags,

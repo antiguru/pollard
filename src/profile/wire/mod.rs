@@ -101,12 +101,17 @@ impl TryFrom<WireProfile> for RawProfile {
     type Error = String;
 
     fn try_from(w: WireProfile) -> Result<Self, String> {
-        let profile = match w.meta.preprocessed_profile_version {
+        let mut profile = match w.meta.preprocessed_profile_version {
             None => legacy::decode(w)?,
             Some(75) => v75::decode(w)?,
             Some(v) if is_supported_version(v) => legacy::decode(w)?,
             Some(v) => return Err(format!("unsupported processed-profile version {v}")),
         };
+        // Optional cross-references may dangle: before this branch,
+        // accessors reached them with `.get()` and degraded, so a file
+        // with a stale optional reference still loaded. Clear those
+        // before the strict structural validation below.
+        profile.shared.clear_dangling_optional_refs();
         validate(&profile)?;
         Ok(profile)
     }
@@ -234,4 +239,44 @@ pub(super) fn decode_thread(
         samples,
         markers,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WireProfile;
+    use crate::profile::raw::RawProfile;
+
+    const ONE_STACK: &str = r#"{
+        "meta": {"interval": 1.0, "startTime": 0.0, "preprocessedProfileVersion": 49},
+        "libs": [],
+        "threads": [
+            {"tid": 1, "pid": 1, "registerTime": 0.0,
+             "stringArray": ["a", "ev"],
+             "frameTable": {"length": 1, "address": [16], "func": [0], "line": [null], "column": [null], "category": [0], "subcategory": [0], "nativeSymbol": [null]},
+             "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+             "stackTable": {"length": 1, "frame": [0], "prefix": [null]},
+             "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+             "samples": {"length": 1, "stack": [%STACK%], "time": [0.0]}
+             %MARKERS%}
+        ]
+    }"#;
+
+    #[test]
+    fn out_of_range_sample_stack_is_rejected() {
+        let json = ONE_STACK.replace("%STACK%", "5").replace("%MARKERS%", "");
+        let w: WireProfile = serde_json::from_str(&json).unwrap();
+        let err = RawProfile::try_from(w).unwrap_err();
+        assert!(err.contains("samples.stack"), "{err}");
+    }
+
+    #[test]
+    fn out_of_range_marker_cause_stack_is_rejected() {
+        let markers = r#", "markers": {"length": 1, "data": [{"type": "Other event", "cause": {"stack": 5}}], "name": [1], "startTime": [0.5], "endTime": [null], "phase": [0], "category": [0]}"#;
+        let json = ONE_STACK
+            .replace("%STACK%", "0")
+            .replace("%MARKERS%", markers);
+        let w: WireProfile = serde_json::from_str(&json).unwrap();
+        let err = RawProfile::try_from(w).unwrap_err();
+        assert!(err.contains("markers.data.cause.stack"), "{err}");
+    }
 }

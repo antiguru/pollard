@@ -232,29 +232,67 @@ impl SharedTables {
         self.inline_chains[frame_idx] = chain;
     }
 
+    /// Null out every optional cross-reference that points past its
+    /// target table: `funcs.file_name` and `resources.host` against
+    /// `strings`, `funcs.resource` against `resources`, and
+    /// `frames.native_symbol` against `native_symbols`.
+    ///
+    /// These four are the only ones allowed to dangle. Before this
+    /// branch, accessors reached them with `.get()` and degraded, so a
+    /// file with a stale optional reference still loaded. This keeps
+    /// that behavior while `validate_tables` stays strict about every
+    /// structural index.
+    pub fn clear_dangling_optional_refs(&mut self) {
+        let strings = self.strings.len();
+        let resources = self.resources.len();
+        let native_symbols = self.native_symbols.len();
+        for v in &mut self.funcs.file_name {
+            if let Some(idx) = *v
+                && idx >= strings
+            {
+                *v = None;
+            }
+        }
+        for v in &mut self.funcs.resource {
+            if let Some(idx) = *v
+                && idx >= resources
+            {
+                *v = None;
+            }
+        }
+        for v in &mut self.resources.host {
+            if let Some(idx) = *v
+                && idx >= strings
+            {
+                *v = None;
+            }
+        }
+        for v in &mut self.frames.native_symbol {
+            if let Some(idx) = *v
+                && idx >= native_symbols
+            {
+                *v = None;
+            }
+        }
+    }
+
     /// Check every cross-reference between the tables. Decoders build
     /// each column row by row, so all columns of a table have equal
     /// length by construction.
+    ///
+    /// `funcTable.resource`, `funcTable.fileName`, `resourceTable.host`,
+    /// and `frameTable.nativeSymbol` are not checked here: `TryFrom` runs
+    /// `clear_dangling_optional_refs` before this validation, which
+    /// already nulls out any entry of those four that points out of
+    /// range, so they can no longer fire.
     pub fn validate_tables(&self) -> Result<(), String> {
         let strings = self.strings.len();
         check("frameTable.func", &self.frames.func, self.funcs.len())?;
         check_opt("frameTable.lib", &self.frames.lib, self.libs.len())?;
-        check_opt(
-            "frameTable.nativeSymbol",
-            &self.frames.native_symbol,
-            self.native_symbols.len(),
-        )?;
         check("funcTable.name", &self.funcs.name, strings)?;
-        check_opt(
-            "funcTable.resource",
-            &self.funcs.resource,
-            self.resources.len(),
-        )?;
-        check_opt("funcTable.fileName", &self.funcs.file_name, strings)?;
         check("stackTable.frame", &self.stacks.frame, self.frames.len())?;
         check_opt("stackTable.prefix", &self.stacks.prefix, self.stacks.len())?;
         check("resourceTable.name", &self.resources.name, strings)?;
-        check_opt("resourceTable.host", &self.resources.host, strings)?;
         check(
             "nativeSymbols.libIndex",
             &self.native_symbols.lib_index,
@@ -375,5 +413,44 @@ mod tests {
         t.frames.lib[0] = Some(0);
         let err = t.validate_tables().unwrap_err();
         assert_eq!(err, "frameTable.lib[0] = 0 is out of range (length 0)");
+    }
+
+    #[test]
+    fn clear_dangling_optional_refs_keeps_valid_and_clears_invalid() {
+        let mut t = SharedTables::default();
+        t.strings.intern("s0");
+        t.strings.intern("s1");
+        t.resources.name = vec![0, 0];
+        t.resources.host = vec![Some(0), Some(5)];
+        t.resources.type_ = vec![0, 0];
+        t.native_symbols.lib_index = vec![0];
+        t.native_symbols.address = vec![None];
+        t.native_symbols.name = vec![0];
+        t.native_symbols.function_size = vec![None];
+        t.funcs = FuncTable {
+            name: vec![0, 0],
+            is_js: vec![false, false],
+            relevant_for_js: vec![false, false],
+            resource: vec![Some(1), Some(9)],
+            file_name: vec![Some(1), Some(9)],
+            line_number: vec![None, None],
+            column_number: vec![None, None],
+        };
+        t.frames = FrameTable {
+            func: vec![0, 0],
+            address: vec![None, None],
+            lib: vec![None, None],
+            line: vec![None, None],
+            column: vec![None, None],
+            native_symbol: vec![Some(0), Some(4)],
+            inlined: vec![false, false],
+        };
+
+        t.clear_dangling_optional_refs();
+
+        assert_eq!(t.funcs.file_name, vec![Some(1), None]);
+        assert_eq!(t.funcs.resource, vec![Some(1), None]);
+        assert_eq!(t.resources.host, vec![Some(0), None]);
+        assert_eq!(t.frames.native_symbol, vec![Some(0), None]);
     }
 }

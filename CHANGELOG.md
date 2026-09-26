@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * Frames in sub-process threads resolve their module from the sub-process's libraries.
 
+### Changed
+
+* Profiles whose structural indices (frames, funcs, stacks, samples, markers) point out of range now fail to load with a message naming the column, instead of loading with missing frames.
+
 ## [0.0.9](https://github.com/antiguru/pollard/compare/v0.0.8...v0.0.9) - 2026-05-07
 
 ### Other

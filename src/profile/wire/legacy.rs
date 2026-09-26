@@ -137,11 +137,14 @@ fn append_thread(
             .resources
             .name
             .push(map_string(&smap, name, "resourceTable.name", r)?);
+        // An out-of-range host string index dangles rather than failing
+        // decode. `clear_dangling_optional_refs` treats it the same as
+        // one that lands out of range only after threads are merged.
         let host = *col(&resources.host, r, "resourceTable.host")?;
-        shared.resources.host.push(
-            host.map(|h| map_string(&smap, h, "resourceTable.host", r))
-                .transpose()?,
-        );
+        shared
+            .resources
+            .host
+            .push(host.and_then(|h| map_string(&smap, h, "resourceTable.host", r).ok()));
         shared
             .resources
             .type_
@@ -169,11 +172,12 @@ fn append_thread(
             .funcs
             .resource
             .push(usize::try_from(resource).ok().map(|r| r + resource_base));
+        // Same as `resourceTable.host` above: dangle instead of failing.
         let file = *col(&funcs.file_name, f, "funcTable.fileName")?;
-        shared.funcs.file_name.push(
-            file.map(|s| map_string(&smap, s, "funcTable.fileName", f))
-                .transpose()?,
-        );
+        shared
+            .funcs
+            .file_name
+            .push(file.and_then(|s| map_string(&smap, s, "funcTable.fileName", f).ok()));
         shared
             .funcs
             .line_number
@@ -358,6 +362,26 @@ mod tests {
         assert_eq!(t.frames.lib, vec![Some(1)]);
         assert_eq!(t.native_symbols.lib_index, vec![1]);
         assert_eq!(p.processes[0].threads[0].tid, 3);
+    }
+
+    #[test]
+    fn dangling_file_name_loads_as_none() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0, "preprocessedProfileVersion": 49},
+            "libs": [{"name": "root"}],
+            "threads": [
+                {"tid": 1, "pid": 1, "registerTime": 0.0,
+                 "stringArray": ["a"],
+                 "frameTable": {"length": 1, "address": [16], "func": [0], "line": [null], "column": [null], "category": [0], "subcategory": [0], "nativeSymbol": [null]},
+                 "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [99], "lineNumber": [null], "columnNumber": [null]},
+                 "stackTable": {"length": 1, "frame": [0], "prefix": [null]},
+                 "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                 "samples": {"length": 1, "stack": [0], "time": [0.0]}}
+            ]
+        }"#;
+        let w: WireProfile = serde_json::from_str(json).unwrap();
+        let p: crate::profile::raw::RawProfile = w.try_into().unwrap();
+        assert_eq!(p.shared.funcs.file_name, vec![None]);
     }
 
     #[test]
