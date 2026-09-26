@@ -573,18 +573,20 @@ impl Profile {
                             // Gate by the marker's start_time when a
                             // range is set; missing entries are
                             // conservatively dropped (same rationale as
-                            // the unstamped-sample branch).
-                            // Interval-end markers carry only an end
-                            // time; gate them by that.
-                            let t = raw
-                                .markers
-                                .start_time
-                                .get(i)
-                                .copied()
-                                .flatten()
-                                .or_else(|| raw.markers.end_time.get(i).copied().flatten())?;
-                            if !in_range(t) {
-                                return None;
+                            // the unstamped-sample branch). Interval-end
+                            // markers carry only an end time; gate them
+                            // by that. With no range, a marker with
+                            // neither time still matches. The unfiltered
+                            // path never drops a marker for lacking a
+                            // timestamp.
+                            if time_range.is_some() {
+                                let t =
+                                    raw.markers.start_time.get(i).copied().flatten().or_else(
+                                        || raw.markers.end_time.get(i).copied().flatten(),
+                                    )?;
+                                if !in_range(t) {
+                                    return None;
+                                }
                             }
                             Some(
                                 raw.markers
@@ -1091,5 +1093,29 @@ mod tests {
         assert_eq!(inside, vec![Some(0)]);
         let outside: Vec<_> = p.stack_indices(handle, &ev, Some([0.0, 1.0])).collect();
         assert!(outside.is_empty());
+    }
+
+    #[test]
+    fn unfiltered_marker_with_no_times_is_yielded() {
+        let json = r#"{
+            "meta": {"interval": 1.0, "startTime": 0.0},
+            "threads": [{"tid": 1, "pid": 1, "registerTime": 0.0,
+                "stringArray": ["f", "ev"],
+                "frameTable": {"length": 1, "address": [-1], "func": [0], "line": [null], "column": [null], "category": [0], "subcategory": [0]},
+                "funcTable": {"length": 1, "name": [0], "isJS": [false], "relevantForJS": [false], "resource": [-1], "fileName": [null], "lineNumber": [null], "columnNumber": [null]},
+                "stackTable": {"length": 1, "frame": [0], "prefix": [null]},
+                "resourceTable": {"length": 0, "lib": [], "name": [], "host": [], "type": []},
+                "samples": {"length": 1, "stack": [0], "time": [0.0]},
+                "markers": {"length": 1, "data": [{"type": "Other event", "cause": {"stack": 0}}],
+                            "name": [1], "startTime": [null], "endTime": [null], "phase": [1], "category": [0]}}]
+        }"#;
+        let raw: RawProfile = serde_json::from_str(json).unwrap();
+        let p = Profile::from_raw(raw);
+        let handle = p.threads().next().unwrap().handle();
+        let ev = EventSource::Marker("ev".into());
+        let unfiltered: Vec<_> = p.stack_indices(handle, &ev, None).collect();
+        assert_eq!(unfiltered, vec![Some(0)]);
+        let ranged: Vec<_> = p.stack_indices(handle, &ev, Some([0.0, 1.0])).collect();
+        assert!(ranged.is_empty());
     }
 }
