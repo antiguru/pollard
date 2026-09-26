@@ -843,8 +843,9 @@ mod tests {
             total_samples: 151,
             weighted: false,
         };
-        // Envelope (incl. populated `Truncated` and `weighted`) is ~154
-        // bytes; per line ~13 bytes. Budget for two lines ≈ 154 + 2*13 = 180.
+        // Envelope (incl. populated `Truncated` and `weighted`) is ~158
+        // bytes; the kept lines cost 13 + 12 bytes. Budget for two lines
+        // ≈ 158 + 13 + 12 = 183.
         let (rendered, truncated) = fit_folded_to_budget(folded, 185);
         let truncated = truncated.expect("expected to truncate");
         assert_eq!(truncated.dropped, 1);

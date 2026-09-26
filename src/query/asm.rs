@@ -46,6 +46,9 @@ pub struct AsmListing {
     pub size: String,
     pub arch: String,
     pub instructions: Vec<AsmInstruction>,
+    /// True when each instruction's `samples` sums perf event periods
+    /// rather than counting samples.
+    pub weighted: bool,
     /// Set when the requested function name didn't match exactly but the
     /// fuzzy ranker promoted a single high-confidence candidate. Surfaced so
     /// the caller can verify the substitution.
@@ -117,8 +120,9 @@ fn resolve_function(
         let handle = thread.handle();
         let raw = profile.raw_thread(handle);
 
-        for &stack_opt in &raw.samples.stack {
+        for (sample_idx, &stack_opt) in raw.samples.stack.iter().enumerate() {
             let Some(stack_idx) = stack_opt else { continue };
+            let weight = profile.sample_weight(handle, sample_idx);
             for frame_idx in profile.walk_stack(handle, stack_idx) {
                 let Some(info) = profile.frame_info(handle, frame_idx) else {
                     continue;
@@ -178,7 +182,7 @@ fn resolve_function(
                     found_lib_idx = Some(lib_idx);
                 }
 
-                *frame_counts.entry(rel_addr).or_default() += 1;
+                *frame_counts.entry(rel_addr).or_default() += weight;
             }
         }
     }
@@ -570,6 +574,7 @@ async fn asm_for_function_inner(
         size: format!("0x{size_bytes:x}"),
         arch,
         instructions,
+        weighted: profile.samples_weighted_by_period(),
         did_you_mean,
     })
 }
@@ -633,5 +638,87 @@ mod tests {
             }
             other => panic!("expected ModuleNotFound, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn weighted_samples_attribute_periods_to_addresses() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let profile = Profile::from_raw(raw);
+        let matcher = FunctionMatcher::new("cold").unwrap();
+        match resolve_function(&profile, &matcher, None) {
+            ResolveResult::Single(loc) => {
+                assert_eq!(loc.frame_counts.get(&512), Some(&600));
+            }
+            other => panic!("expected Single, got {other:?}"),
+        }
+    }
+
+    /// Patch the fixture's only lib entry to point at this test binary
+    /// itself, using wholesym's own computed identity (debug/code id) for
+    /// it. `disassemble()` requires an id that matches the binary it reads,
+    /// so pointing at a real, self-consistent file lets these tests
+    /// exercise the full `asm_for_function` path (not just `resolve_function`)
+    /// without depending on external tools or a committed test binary, and
+    /// without caring whether the platform is ELF or Mach-O.
+    async fn patch_lib_to_self(raw: &mut RawProfile) {
+        let exe = std::env::current_exe().unwrap();
+        let info = SymbolManager::library_info_for_binary_at_path(&exe, None)
+            .await
+            .unwrap();
+        raw.shared.libs[0] = crate::profile::raw::RawLib {
+            name: info.name,
+            debug_name: info.debug_name,
+            debug_path: info.debug_path,
+            path: info.path,
+            breakpad_id: info.debug_id.map(|id| id.breakpad().to_string()),
+            code_id: info.code_id.map(|id| id.to_string()),
+            arch: info.arch,
+        };
+    }
+
+    #[tokio::test]
+    async fn asm_listing_weighted_true_for_weighted_events() {
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        patch_lib_to_self(&mut raw).await;
+        let profile = Profile::from_raw(raw);
+        let listing = asm_for_function(
+            &profile,
+            &Args {
+                function: "cold".to_owned(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(listing.weighted);
+    }
+
+    #[tokio::test]
+    async fn asm_listing_weighted_false_for_unweighted_profile() {
+        // Same lib/frame/address layout as `weighted_events.json` (so
+        // resolution and disassembly behave identically), but with the
+        // `Perf events` meta section stripped — mirrors
+        // `compare::tests::mixed_weighting_adds_note`'s pattern for
+        // constructing an "otherwise identical, but unweighted" profile.
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        raw.meta.extra.clear();
+        patch_lib_to_self(&mut raw).await;
+        let profile = Profile::from_raw(raw);
+        let listing = asm_for_function(
+            &profile,
+            &Args {
+                function: "cold".to_owned(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!listing.weighted);
     }
 }

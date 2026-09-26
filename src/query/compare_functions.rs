@@ -44,6 +44,11 @@ pub struct Output {
     pub arch: String,
     pub total_samples_a: u64,
     pub total_samples_b: u64,
+    /// True when side A's `samples` sum perf event periods rather than
+    /// counting samples.
+    pub weighted_a: bool,
+    /// Same as [`Self::weighted_a`] for side B.
+    pub weighted_b: bool,
     pub rows: Vec<AlignedRow>,
 }
 
@@ -123,6 +128,8 @@ pub async fn compare_functions(
     );
 
     Ok(Output {
+        weighted_a: listing_a.weighted,
+        weighted_b: listing_b.weighted,
         function_a: listing_a.function,
         module_a: listing_a.module,
         function_b: listing_b.function,
@@ -269,6 +276,82 @@ fn only_b_row(bi: &AsmInstruction) -> AlignedRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::profile::Profile;
+    use crate::profile::raw::RawProfile;
+
+    /// Patch the fixture's only lib entry to point at this test binary
+    /// itself, using wholesym's own computed identity (debug/code id) for
+    /// it, so `asm_for_function`'s disassembly step (which requires an id
+    /// matching the binary it reads) succeeds against a real,
+    /// self-consistent file regardless of platform (ELF/Mach-O), without
+    /// external tools or a committed test binary.
+    async fn patch_lib_to_self(raw: &mut RawProfile) {
+        let exe = std::env::current_exe().unwrap();
+        let info = wholesym::SymbolManager::library_info_for_binary_at_path(&exe, None)
+            .await
+            .unwrap();
+        raw.shared.libs[0] = crate::profile::raw::RawLib {
+            name: info.name,
+            debug_name: info.debug_name,
+            debug_path: info.debug_path,
+            path: info.path,
+            breakpad_id: info.debug_id.map(|id| id.breakpad().to_string()),
+            code_id: info.code_id.map(|id| id.to_string()),
+            arch: info.arch,
+        };
+    }
+
+    #[tokio::test]
+    async fn weighted_flags_true_for_weighted_events_both_sides() {
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        patch_lib_to_self(&mut raw).await;
+        let profile = Profile::from_raw(raw);
+        let out = compare_functions(
+            &profile,
+            &profile,
+            &Args {
+                function_a: "cold".to_owned(),
+                function_b: "cold".to_owned(),
+                with_samples: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(out.weighted_a);
+        assert!(out.weighted_b);
+    }
+
+    #[tokio::test]
+    async fn weighted_flags_false_for_unweighted_profile() {
+        // Same lib/frame/address layout as `weighted_events.json` (so
+        // resolution and disassembly behave identically), but with the
+        // `Perf events` meta section stripped — mirrors
+        // `compare::tests::mixed_weighting_adds_note`'s pattern for
+        // constructing an "otherwise identical, but unweighted" profile.
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        raw.meta.extra.clear();
+        patch_lib_to_self(&mut raw).await;
+        let profile = Profile::from_raw(raw);
+        let out = compare_functions(
+            &profile,
+            &profile,
+            &Args {
+                function_a: "cold".to_owned(),
+                function_b: "cold".to_owned(),
+                with_samples: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(!out.weighted_a);
+        assert!(!out.weighted_b);
+    }
 
     fn ins(offset: u32, asm: &str, samples: u64) -> AsmInstruction {
         AsmInstruction {
