@@ -54,15 +54,31 @@ pub fn load_from_path(path: &Path) -> Result<RawProfile, ToolError> {
     let bytes = std::fs::read(path).map_err(|_| ToolError::FileNotFound {
         path: path.to_path_buf(),
     })?;
-    decode_bytes(&bytes).map_err(|e| e.into_tool_error(path))
+    // Own the compressed bytes here, rather than routing through
+    // `decode_bytes`, so the compressed `Vec` can be dropped before the
+    // (usually much larger) decompressed buffer is parsed, instead of
+    // both staying resident for the whole parse.
+    let result = if bytes.starts_with(&GZIP_MAGIC) {
+        let out = decompress_gzip(&bytes).map_err(|e| e.into_tool_error(path))?;
+        drop(bytes);
+        decode_uncompressed(&out)
+    } else {
+        decode_uncompressed(&bytes)
+    };
+    result.map_err(|e| e.into_tool_error(path))
+}
+
+fn decompress_gzip(bytes: &[u8]) -> Result<Vec<u8>, LoadError> {
+    let mut out = Vec::new();
+    flate2::read::GzDecoder::new(bytes)
+        .read_to_end(&mut out)
+        .map_err(|e| LoadError::Gzip(e.to_string()))?;
+    Ok(out)
 }
 
 pub(crate) fn decode_bytes(bytes: &[u8]) -> Result<RawProfile, LoadError> {
     if bytes.starts_with(&GZIP_MAGIC) {
-        let mut out = Vec::new();
-        flate2::read::GzDecoder::new(bytes)
-            .read_to_end(&mut out)
-            .map_err(|e| LoadError::Gzip(e.to_string()))?;
+        let out = decompress_gzip(bytes)?;
         return decode_uncompressed(&out);
     }
     decode_uncompressed(bytes)
