@@ -28,6 +28,8 @@ Published to [crates.io](https://crates.io/crates/pollard).
 hardware counter instead.
 `top_groups` currently aggregates samples only.
 `describe_profile` lists the events a profile contains.
+When samply recorded perf event periods (`samply import --weight-by-period`), the query and drill-down tools add periods instead of counting samples, so their counts and percentages mean events such as cycles or cache misses.
+Their outputs report `weighted: true` in that case, and `compare_profiles` adds a `note` when only one side is weighted.
 
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
 See `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` for

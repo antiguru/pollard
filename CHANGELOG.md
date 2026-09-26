@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 * Load samply's version 75 profiles, including the JSLB container (`.jslb`, `.jslb.gz`).
 * `describe_profile` and `summary` list the events a profile contains.
+* Weight `top_functions`, `top_groups`, `call_tree`, `stacks_containing`, `folded_stacks`, `compare_profiles`, `compare_functions`, `source_for_function`, `asm_for_function`, and the `summary` rankings by perf event period when samply recorded periods. Outputs report `weighted`.
+* `describe_profile` and `summary` name the main perf event and each event's sampling mode.
 
 ### Fixed
 
