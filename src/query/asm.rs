@@ -142,9 +142,6 @@ fn resolve_function(
                 let Some(rel_addr_i64) = info.address else {
                     continue;
                 };
-                if rel_addr_i64 < 0 {
-                    continue;
-                }
                 let rel_addr = rel_addr_i64 as u32;
 
                 let shared = profile.shared();

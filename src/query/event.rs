@@ -164,6 +164,10 @@ pub fn list_events(profile: &Profile) -> Vec<EventInfo> {
 /// Sorted list of distinct `Other event` marker names that have at
 /// least one stack-bearing entry. Used to populate "did you mean?"
 /// suggestions when `resolve` rejects an unknown event.
+///
+/// These suggestions list perf events only: `resolve` itself is not
+/// limited to `Other event` markers, it also accepts any other
+/// stack-bearing marker by its exact name.
 fn known_marker_events(profile: &Profile) -> Vec<String> {
     list_events(profile)
         .into_iter()
