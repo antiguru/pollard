@@ -141,8 +141,8 @@ pub(crate) fn aggregate_functions(
 /// `event` selects which per-sample stream to walk: the default samples
 /// track (cycles) or a name-filtered slice of the marker stream
 /// (cache-misses, branch-misses, instructions, …). Both shapes go through
-/// the same outer loop because [`event::stack_indices`] yields the same
-/// `Option<usize>` shape as `samples.stack` directly.
+/// the same outer loop because [`Profile::weighted_stack_indices`] yields
+/// the same `(Option<usize>, u64)` shape regardless of source.
 pub(crate) fn aggregate_grouped<K, F>(
     profile: &Profile,
     filter: Option<&str>,

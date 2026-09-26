@@ -315,8 +315,10 @@ pub fn compare_profiles(a: &Profile, b: &Profile, args: &Args) -> Result<Output,
                 b_total_pct,
                 delta_self_pct: b_self_pct - a_self_pct,
                 delta_total_pct: b_total_pct - a_total_pct,
-                delta_self_samples: cb.self_.weight as i64 - ca.self_.weight as i64,
-                delta_total_samples: cb.total.weight as i64 - ca.total.weight as i64,
+                delta_self_samples: i64::try_from(cb.self_.weight).unwrap_or(i64::MAX)
+                    - i64::try_from(ca.self_.weight).unwrap_or(i64::MAX),
+                delta_total_samples: i64::try_from(cb.total.weight).unwrap_or(i64::MAX)
+                    - i64::try_from(ca.total.weight).unwrap_or(i64::MAX),
                 a_self_ms,
                 b_self_ms,
                 a_total_ms,
