@@ -218,7 +218,9 @@ pub struct CallTreeArgs {
     /// Optional absolute-sample floor. Applied alongside `min_pct` —
     /// a node is pruned if either threshold rejects it. Useful for flat
     /// profiles where a percent threshold elides individually small but
-    /// collectively large contributors.
+    /// collectively large contributors. When the response's `weighted`
+    /// field is true, this floor is compared against summed perf event
+    /// periods rather than a sample count.
     #[serde(default)]
     pub min_samples: Option<u64>,
     /// Maximum tree depth (default 8).
@@ -280,6 +282,9 @@ pub struct FoldedStacksOutput {
     /// Folded text: one line per unique stack, formatted as
     /// `root;child;...;leaf <samples>`.
     pub folded: String,
+    /// True when the counts in `folded` sum perf event periods rather than
+    /// counting samples. The folded text has no slot for this.
+    pub weighted: bool,
     /// Set when the response was trimmed to fit
     /// `POLLARD_MAX_OUTPUT_BYTES`. The lowest-sample lines are dropped
     /// first; the remaining `folded` text is still sorted by stack
@@ -520,7 +525,7 @@ impl PollardServer {
 
     #[tool(
         name = "call_tree",
-        description = "Hierarchical call tree, pruned for LLM consumption. Pass `event=\"<name>\"` to build the tree from a marker-backed counter (cache-misses, branch-misses, instructions, …) instead of the default samples track. With `inverted=true` and no `process=` filter, multi-process recordings expose `cross_process: true` plus a `processes_in_tree: [{pid, name, samples, pct}]` summary so the caller can tell when one leaf's caller chain mixes time from different processes; narrow with `process=pid:<N>` to peel off a single contributor."
+        description = "Hierarchical call tree, pruned for LLM consumption. Pass `event=\"<name>\"` to build the tree from a marker-backed counter (cache-misses, branch-misses, instructions, …) instead of the default samples track. With `inverted=true` and no `process=` filter, multi-process recordings expose `cross_process: true` plus a `processes_in_tree: [{pid, name, samples, pct}]` summary so the caller can tell when one leaf's caller chain mixes time from different processes; narrow with `process=pid:<N>` to peel off a single contributor. When the profile carries perf event periods, the response's `weighted: true` field means counts, `min_samples` pruning, and `processes_in_tree` sample figures all sum event periods rather than counting samples."
     )]
     pub async fn call_tree(
         &self,
@@ -572,10 +577,12 @@ impl PollardServer {
             function_filter: args.function_filter.clone(),
         };
         let folded = folded::folded_stacks_structured(session.profile(), &q_args)?;
+        let weighted = folded.weighted;
         let budget = resolve_budget(output_budget_bytes(), args.max_output_bytes);
         let (rendered, truncated) = fit_folded_to_budget(folded, budget);
         Ok(Json(FoldedStacksOutput {
             folded: rendered,
+            weighted,
             truncated,
         }))
     }
@@ -733,6 +740,7 @@ fn fit_folded_to_budget(
     };
     let envelope_with_truncated = FoldedStacksOutput {
         folded: String::new(),
+        weighted: folded.weighted,
         truncated: Some(probe_truncated),
     };
     let envelope_bytes = crate::serde_util::serialized_byte_count(&envelope_with_truncated);
@@ -772,6 +780,7 @@ fn fit_folded_to_budget(
     // rendered string can shift the byte total by a few bytes.
     let final_response = FoldedStacksOutput {
         folded: rendered.clone(),
+        weighted: folded.weighted,
         truncated: Some(crate::tools::budget::Truncated {
             dropped,
             dropped_pct: Some(dropped_pct),
@@ -832,10 +841,11 @@ mod tests {
                 },
             ],
             total_samples: 151,
+            weighted: false,
         };
-        // Envelope (incl. populated `Truncated`) is ~145 bytes; per
-        // line ~13 bytes. Budget for two lines ≈ 145 + 2*13 = 171.
-        let (rendered, truncated) = fit_folded_to_budget(folded, 175);
+        // Envelope (incl. populated `Truncated` and `weighted`) is ~154
+        // bytes; per line ~13 bytes. Budget for two lines ≈ 154 + 2*13 = 180.
+        let (rendered, truncated) = fit_folded_to_budget(folded, 185);
         let truncated = truncated.expect("expected to truncate");
         assert_eq!(truncated.dropped, 1);
         assert!(!rendered.contains("cccccccc"));
@@ -851,6 +861,7 @@ mod tests {
                 samples: 1,
             }],
             total_samples: 1,
+            weighted: false,
         };
         let (rendered, truncated) = fit_folded_to_budget(folded, 10_000);
         assert_eq!(rendered, "x 1\n");
@@ -871,6 +882,7 @@ mod tests {
                 },
             ],
             total_samples: 8,
+            weighted: false,
         };
         // Budget so small no line fits — the trimmer keeps the largest
         // line anyway so the response isn't an empty payload.
