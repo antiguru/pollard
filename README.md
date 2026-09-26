@@ -27,6 +27,7 @@ Published to [crates.io](https://crates.io/crates/pollard).
 `cache-misses`, `branch-misses`, or `instructions` to aggregate that
 hardware counter instead.
 `top_groups` currently aggregates samples only.
+`describe_profile` lists the events a profile contains.
 
 See `docs/superpowers/specs/2026-04-28-pollard-design.md` for full details.
 See `docs/superpowers/specs/2026-05-06-view-presets-cookbook.md` for
@@ -35,6 +36,12 @@ Rust noise (tracing-subscriber, tokio internals, stdlib glue). The same
 cookbook ships as the `pollard:view-presets` skill — see
 `.claude-plugin/` for the bundled plugin layout that registers both the
 MCP server and the skills.
+
+## Accepted input
+
+`pollard` reads Firefox processed profiles in `.json`, `.json.gz`, `.jslb`,
+or `.jslb.gz` format, emitted by `samply` or the Firefox Profiler.
+Supported profile versions are 49 through 55 and 75.
 
 ## Install
 
