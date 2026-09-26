@@ -50,6 +50,10 @@ pub struct Output {
     /// track or the marker name (e.g. `"cache-misses"`). The pct
     /// columns are percentages of this event's total count.
     pub event: String,
+    /// True when counts and percentages sum perf event periods, so they
+    /// count events such as cycles or cache misses rather than samples.
+    /// Without period information every item weighs 1 and this is false.
+    pub weighted: bool,
     pub functions: Vec<FunctionEntry>,
     /// Set when a bare-name `process=` filter aggregated across more than
     /// one distinct pid. Lists the matched `(pid, name)` pairs so the
@@ -78,13 +82,34 @@ pub struct FunctionEntry {
 
 const DEFAULT_LIMIT: usize = 30;
 
-#[derive(Default, Clone)]
-pub(crate) struct Counts {
-    pub(crate) self_samples: u64,
-    pub(crate) total_samples: u64,
+/// Items counted and their summed weight. Without period information every
+/// weight is 1, so `weight == samples`.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Tally {
+    pub(crate) samples: u64,
+    pub(crate) weight: u64,
 }
 
-/// Per-function `(self, total)` sample counts plus profile-wide total.
+impl Tally {
+    pub(crate) fn add(&mut self, weight: u64) {
+        self.samples += 1;
+        self.weight = self.weight.saturating_add(weight);
+    }
+
+    pub(crate) fn merge(&mut self, other: Tally) {
+        self.samples += other.samples;
+        self.weight = self.weight.saturating_add(other.weight);
+    }
+}
+
+/// Per-key self and total tallies.
+#[derive(Default, Clone)]
+pub(crate) struct Counts {
+    pub(crate) self_: Tally,
+    pub(crate) total: Tally,
+}
+
+/// Per-function `(self, total)` tallies plus the profile-wide tally.
 /// Shared between [`top_functions`] and [`crate::query::compare`] so cross-
 /// profile diffs see the same aggregation rules.
 pub(crate) fn aggregate_functions(
@@ -93,7 +118,7 @@ pub(crate) fn aggregate_functions(
     filter_args: &Filter,
     expand_inlines: bool,
     event: &EventSource,
-) -> Result<(HashMap<(String, Option<String>), Counts>, u64), ToolError> {
+) -> Result<(HashMap<(String, Option<String>), Counts>, Tally), ToolError> {
     aggregate_grouped(
         profile,
         filter,
@@ -104,7 +129,8 @@ pub(crate) fn aggregate_functions(
     )
 }
 
-/// Aggregate self/total sample counts under a caller-provided key extractor.
+/// Aggregate self/total tallies under a caller-provided key extractor. Each
+/// item adds its weight from [`Profile::weighted_stack_indices`].
 /// Returning `None` from `key_fn` skips the frame — used by groupings (e.g.
 /// `file`, `directory`) where some frames lack the underlying metadata.
 ///
@@ -124,7 +150,7 @@ pub(crate) fn aggregate_grouped<K, F>(
     expand_inlines: bool,
     event: &EventSource,
     mut key_fn: F,
-) -> Result<(HashMap<K, Counts>, u64), ToolError>
+) -> Result<(HashMap<K, Counts>, Tally), ToolError>
 where
     K: std::hash::Hash + Eq + Clone,
     F: FnMut(&str, Option<&str>, Option<&str>) -> Option<K>,
@@ -135,12 +161,14 @@ where
     let matcher = optional_matcher("filter", filter)?;
 
     let mut counts: HashMap<K, Counts> = HashMap::new();
-    let mut total_samples: u64 = 0;
+    let mut total = Tally::default();
 
     for handle in filter_args.threads(profile) {
-        for stack_opt in profile.stack_indices(handle, event, filter_args.time_range) {
+        for (stack_opt, weight) in
+            profile.weighted_stack_indices(handle, event, filter_args.time_range)
+        {
             let Some(stack_idx) = stack_opt else { continue };
-            total_samples += 1;
+            total.add(weight);
 
             // resolved_chain returns root-to-leaf with view transforms
             // (hide / rename / collapse) and optional inline expansion
@@ -161,8 +189,8 @@ where
                 )
             {
                 let entry = counts.entry(k.clone()).or_default();
-                entry.self_samples += 1;
-                entry.total_samples += 1;
+                entry.self_.add(weight);
+                entry.total.add(weight);
                 seen_in_stack.insert(k);
             }
             for frame in iter {
@@ -174,17 +202,17 @@ where
                     )
                     && seen_in_stack.insert(k.clone())
                 {
-                    counts.entry(k).or_default().total_samples += 1;
+                    counts.entry(k).or_default().total.add(weight);
                 }
             }
         }
     }
 
-    Ok((counts, total_samples))
+    Ok((counts, total))
 }
 
 pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError> {
-    let (counts, total_samples) = aggregate_functions(
+    let (counts, total) = aggregate_functions(
         profile,
         args.filter.as_deref(),
         &args.filter_args,
@@ -195,9 +223,9 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
     // Build output
     let mut entries: Vec<((String, Option<String>), Counts)> = counts.into_iter().collect();
     let key = |c: &Counts| match args.sort_by {
-        SortBy::SelfTime => c.self_samples,
-        SortBy::TotalTime => c.total_samples,
-        SortBy::Descendants => c.total_samples.saturating_sub(c.self_samples),
+        SortBy::SelfTime => c.self_.weight,
+        SortBy::TotalTime => c.total.weight,
+        SortBy::Descendants => c.total.weight.saturating_sub(c.self_.weight),
     };
     entries.sort_by(|a, b| {
         key(&b.1)
@@ -211,7 +239,7 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
     } else {
         args.limit
     };
-    let total = total_samples.max(1) as f32;
+    let total_f = total.weight.max(1) as f32;
     let functions: Vec<_> = entries
         .into_iter()
         .take(limit)
@@ -220,17 +248,17 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
             rank: i + 1,
             function,
             module,
-            self_samples: c.self_samples,
-            self_pct: 100.0 * c.self_samples as f32 / total,
-            total_samples: c.total_samples,
-            total_pct: 100.0 * c.total_samples as f32 / total,
+            self_samples: c.self_.weight,
+            self_pct: 100.0 * c.self_.weight as f32 / total_f,
+            total_samples: c.total.weight,
+            total_pct: 100.0 * c.total.weight as f32 / total_f,
         })
         .collect();
 
     Ok(Output {
         thread: None,
         process: None,
-        total_samples,
+        total_samples: total.weight,
         filter: args.filter.clone(),
         sort_by: match args.sort_by {
             SortBy::SelfTime => "self",
@@ -238,6 +266,11 @@ pub fn top_functions(profile: &Profile, args: &Args) -> Result<Output, ToolError
             SortBy::Descendants => "descendants",
         },
         event: args.event.label().to_owned(),
+        weighted: profile.is_weighted(
+            args.filter_args.threads(profile),
+            &args.event,
+            args.filter_args.time_range,
+        ),
         functions,
         matched_processes: args.filter_args.bare_name_multi_match(profile),
         truncated: None,
@@ -251,6 +284,66 @@ mod tests {
 
     fn raw_with_two_functions() -> RawProfile {
         serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap()
+    }
+
+    fn weighted_events() -> Profile {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        Profile::from_raw(raw)
+    }
+
+    #[test]
+    fn weighted_samples_rank_by_period() {
+        let out = top_functions(&weighted_events(), &Args::default()).unwrap();
+        assert!(out.weighted);
+        assert_eq!(out.total_samples, 800);
+        assert_eq!(out.functions[0].function, "cold");
+        assert_eq!(out.functions[0].self_samples, 600);
+        assert!((out.functions[0].self_pct - 75.0).abs() < 1e-4);
+        assert_eq!(out.functions[1].function, "hot");
+        assert_eq!(out.functions[1].self_samples, 200);
+    }
+
+    #[test]
+    fn marker_periods_weight_marker_events() {
+        let out = top_functions(
+            &weighted_events(),
+            &Args {
+                event: EventSource::Marker("cache-misses".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.weighted);
+        assert_eq!(out.total_samples, 80);
+        assert_eq!(out.functions[0].function, "cold");
+        assert!((out.functions[0].self_pct - 75.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn fixed_period_weights_markers_without_period() {
+        let out = top_functions(
+            &weighted_events(),
+            &Args {
+                event: EventSource::Marker("instructions".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(out.weighted);
+        assert_eq!(out.total_samples, 2000);
+    }
+
+    #[test]
+    fn unweighted_profile_reports_weighted_false() {
+        let out = top_functions(
+            &Profile::from_raw(raw_with_two_functions()),
+            &Args::default(),
+        )
+        .unwrap();
+        assert!(!out.weighted);
+        assert_eq!(out.total_samples, 100);
     }
 
     #[test]
