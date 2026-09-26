@@ -13,6 +13,7 @@
 #![allow(dead_code)]
 
 use crate::profile::event_source::EventSource;
+use crate::profile::perf_events::PerfEvents;
 use crate::profile::raw::{InlineFrame, Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
@@ -23,6 +24,8 @@ pub struct Profile {
     transforms: crate::profile::transforms::Transforms,
     /// Flattened (process, thread) tuples for top-level enumeration.
     threads: Vec<ThreadHandle>,
+    /// The `Perf events` section of `meta.extra`, parsed once.
+    perf_events: Option<PerfEvents>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -110,10 +113,12 @@ impl Profile {
                 });
             }
         }
+        let perf_events = PerfEvents::from_extra(&raw.meta.extra);
         Self {
             raw,
             transforms,
             threads,
+            perf_events,
         }
     }
 
@@ -125,6 +130,11 @@ impl Profile {
 
     pub fn meta(&self) -> &crate::profile::raw::RawMeta {
         &self.raw.meta
+    }
+
+    /// The profile's `Perf events` section, when samply wrote one.
+    pub fn perf_events(&self) -> Option<&PerfEvents> {
+        self.perf_events.as_ref()
     }
 
     pub fn threads(&self) -> impl Iterator<Item = ThreadView<'_>> + '_ {

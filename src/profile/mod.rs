@@ -12,6 +12,7 @@ pub mod event_source;
 pub(crate) mod jslb;
 pub mod load;
 pub mod parsed;
+pub mod perf_events;
 pub mod raw;
 pub mod symbolicate;
 pub mod tables;
