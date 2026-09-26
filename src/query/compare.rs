@@ -420,7 +420,7 @@ mod tests {
         let mut raw_a: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         // stringArray index 0 is "hot" — rename it so A no longer has it.
-        raw_a.threads[0].string_array[0] = "hot_renamed_in_a".to_owned();
+        raw_a.shared.strings.replace(0, "hot_renamed_in_a");
         let a = Profile::from_raw(raw_a);
         let b = two_functions();
 
@@ -666,38 +666,24 @@ mod tests {
     }
 
     /// Build a `two_functions` profile with a single library named
-    /// `module_name` and wire every function in the thread to point at it,
-    /// so `frame_info` reports `module_name` as the module for every
-    /// frame. Used to exercise module-key normalization.
+    /// `module_name` and point every frame at it, so `frame_info`
+    /// reports `module_name` as the module for every frame. Used to
+    /// exercise module-key normalization.
     fn profile_with_module(module_name: &str) -> Profile {
         use crate::profile::raw::RawLib;
 
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
 
-        let lib_idx = raw.libs.len();
-        raw.libs.push(RawLib {
+        let lib_idx = raw.shared.libs.len();
+        raw.shared.libs.push(RawLib {
             name: Some(module_name.to_owned()),
             ..Default::default()
         });
 
-        let thread = &mut raw.threads[0];
-        // Resource table needs a row pointing at our new lib. Reuse an
-        // existing string slot for the resource name to avoid disturbing
-        // string indices the rest of the fixture references.
-        let res_name_idx = 0;
-        let res_idx = thread.resource_table.length as i32;
-        thread.resource_table.length += 1;
-        thread.resource_table.lib.push(Some(lib_idx));
-        thread.resource_table.name.push(res_name_idx);
-        thread.resource_table.host.push(None);
-        thread.resource_table.type_.push(1);
-
-        // Wire every function in the funcTable to that resource so each
-        // frame resolves to the same module.
-        for slot in &mut thread.func_table.resource {
-            *slot = res_idx;
-        }
+        // Point every frame at the new lib so each resolves to the
+        // same module.
+        raw.shared.frames.lib.fill(Some(lib_idx));
 
         Profile::from_raw(raw)
     }
@@ -710,8 +696,8 @@ mod tests {
         let mut raw_b: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_functions.json")).unwrap();
         // Rename `cold` → `hot` and `hot` → `cold` to invert the split.
-        raw_b.threads[0].string_array[0] = "cold".to_owned();
-        raw_b.threads[0].string_array[1] = "hot".to_owned();
+        raw_b.shared.strings.replace(0, "cold");
+        raw_b.shared.strings.replace(1, "hot");
         let b = Profile::from_raw(raw_b);
 
         let out = compare_profiles(&a, &b, &Args::default()).unwrap();

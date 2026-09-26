@@ -66,11 +66,14 @@ enum MarkerLookup {
 }
 
 fn marker_lookup(profile: &Profile, target: &str) -> MarkerLookup {
+    let Some(target_idx) = profile.shared().strings.position(target) else {
+        return MarkerLookup::Unknown;
+    };
     let mut seen_stackless = false;
     for thread in profile.threads() {
         let raw = thread.raw();
         for (i, &str_idx) in raw.markers.name.iter().enumerate() {
-            if raw.string_array.get(str_idx).map(String::as_str) != Some(target) {
+            if str_idx != target_idx {
                 continue;
             }
             let has_stack = raw
@@ -112,8 +115,8 @@ fn known_marker_events(profile: &Profile) -> Vec<String> {
             if !has_stack {
                 continue;
             }
-            if let Some(s) = raw.string_array.get(str_idx) {
-                names.insert(s.clone());
+            if let Some(s) = profile.shared().strings.get(str_idx) {
+                names.insert(s.to_owned());
             }
         }
     }

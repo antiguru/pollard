@@ -4,7 +4,8 @@
 //! [`WireProfile`] deserializes both layouts in one serde pass: the
 //! per-thread tables live on [`WireThread`], the shared tables on
 //! [`WireProfile::shared`]. The decoders turn either into
-//! [`SharedTables`] plus threads that keep only samples and markers.
+//! [`crate::profile::tables::SharedTables`] plus threads that keep
+//! only samples and markers.
 
 #![allow(dead_code)]
 
@@ -13,9 +14,10 @@ mod legacy;
 use serde::Deserialize;
 
 use crate::profile::raw::{
-    Pid, RawLib, RawMarkerData, RawMeta, RawSampleTable, deserialize_id_as_u64,
+    Pid, RawLib, RawMarkerData, RawMarkerTable, RawMeta, RawProfile, RawSampleTable, RawThread,
+    deserialize_id_as_u64,
 };
-use crate::profile::tables::{SharedTables, out_of_range};
+use crate::profile::tables::out_of_range;
 
 /// Versions the decoders understand. A missing version counts as the
 /// per-thread layout, because the hand-written test fixtures carry none.
@@ -91,35 +93,56 @@ pub struct WireMarkerTable {
     pub category: Vec<usize>,
 }
 
-#[derive(Debug)]
-pub struct DecodedProfile {
-    pub meta: RawMeta,
-    pub shared: SharedTables,
-    pub threads: Vec<DecodedThread>,
-    pub processes: Vec<Vec<DecodedThread>>,
+impl TryFrom<WireProfile> for RawProfile {
+    type Error = String;
+
+    fn try_from(w: WireProfile) -> Result<Self, String> {
+        let profile = match w.meta.preprocessed_profile_version {
+            None => legacy::decode(w)?,
+            Some(v) if (49..=55).contains(&v) => legacy::decode(w)?,
+            Some(v) => return Err(format!("unsupported processed-profile version {v}")),
+        };
+        validate(&profile)?;
+        Ok(profile)
+    }
 }
 
-#[derive(Debug)]
-pub struct DecodedThread {
-    pub tid: u64,
-    pub pid: Pid,
-    pub name: Option<String>,
-    pub process_name: Option<String>,
-    pub register_time: f64,
-    pub samples: RawSampleTable,
-    pub markers: DecodedMarkerTable,
-}
-
-#[derive(Debug, Default)]
-pub struct DecodedMarkerTable {
-    pub length: usize,
-    pub data: Vec<Option<RawMarkerData>>,
-    /// String indices into [`SharedTables::strings`].
-    pub name: Vec<usize>,
-    pub start_time: Vec<Option<f64>>,
-    pub end_time: Vec<Option<f64>>,
-    pub phase: Vec<u8>,
-    pub category: Vec<usize>,
+/// Check every index a thread holds, after the table-level checks.
+fn validate(p: &RawProfile) -> Result<(), String> {
+    p.shared.validate_tables()?;
+    let stacks = p.shared.stacks.len();
+    let strings = p.shared.strings.len();
+    let threads = p
+        .threads
+        .iter()
+        .chain(p.processes.iter().flat_map(|pr| pr.threads.iter()));
+    for t in threads {
+        for (row, s) in t.samples.stack.iter().enumerate() {
+            if let Some(s) = *s
+                && s >= stacks
+            {
+                return Err(out_of_range("samples.stack", row, s, stacks));
+            }
+        }
+        for (row, &n) in t.markers.name.iter().enumerate() {
+            if n >= strings {
+                return Err(out_of_range("markers.name", row, n, strings));
+            }
+        }
+        for (row, d) in t.markers.data.iter().enumerate() {
+            if let Some(c) = d.as_ref().and_then(|d| d.cause.as_ref())
+                && c.stack >= stacks
+            {
+                return Err(out_of_range(
+                    "markers.data.cause.stack",
+                    row,
+                    c.stack,
+                    stacks,
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Row `row` of `column`, or an error naming the column.
@@ -164,14 +187,14 @@ pub(super) fn decode_thread(
     t: WireThread,
     string_map: &[usize],
     stack_base: usize,
-) -> Result<DecodedThread, String> {
+) -> Result<RawThread, String> {
     let mut samples = t.samples;
     for stack in samples.stack.iter_mut().flatten() {
         *stack += stack_base;
     }
 
     let m = t.markers;
-    let mut markers = DecodedMarkerTable {
+    let mut markers = RawMarkerTable {
         length: m.length,
         category: m.category,
         phase: m.phase,
@@ -197,7 +220,7 @@ pub(super) fn decode_thread(
         markers.end_time.push(end);
     }
 
-    Ok(DecodedThread {
+    Ok(RawThread {
         tid: t.tid,
         pid: t.pid,
         name: t.name,

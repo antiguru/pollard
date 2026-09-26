@@ -6,7 +6,8 @@
 
 use serde::Deserialize;
 
-use super::{DecodedProfile, WireProfile, WireThread, col, decode_thread, map_string};
+use super::{WireProfile, WireThread, col, decode_thread, map_string};
+use crate::profile::raw::{RawProcess, RawProfile, RawThread};
 use crate::profile::tables::SharedTables;
 
 #[derive(Debug, Deserialize)]
@@ -71,7 +72,7 @@ pub struct LegacyNativeSymbols {
     pub function_size: Vec<Option<u64>>,
 }
 
-pub(super) fn decode(w: WireProfile) -> Result<DecodedProfile, String> {
+pub(super) fn decode(w: WireProfile) -> Result<RawProfile, String> {
     let mut shared = SharedTables {
         libs: w.libs,
         ..Default::default()
@@ -93,9 +94,11 @@ pub(super) fn decode(w: WireProfile) -> Result<DecodedProfile, String> {
                     .map_err(|e| format!("processes[{pi}].threads[{i}]: {e}"))?,
             );
         }
-        processes.push(process_threads);
+        processes.push(RawProcess {
+            threads: process_threads,
+        });
     }
-    Ok(DecodedProfile {
+    Ok(RawProfile {
         meta: w.meta,
         shared,
         threads,
@@ -107,7 +110,7 @@ fn append_thread(
     shared: &mut SharedTables,
     mut t: WireThread,
     lib_base: usize,
-) -> Result<super::DecodedThread, String> {
+) -> Result<RawThread, String> {
     let strings = t.string_array.take().ok_or("missing stringArray")?;
     let frames = t.frame_table.take().ok_or("missing frameTable")?;
     let funcs = t.func_table.take().ok_or("missing funcTable")?;
@@ -270,7 +273,7 @@ mod tests {
         ]
     }"#;
 
-    fn decode_str(json: &str) -> super::super::DecodedProfile {
+    fn decode_str(json: &str) -> crate::profile::raw::RawProfile {
         let w: WireProfile = serde_json::from_str(json).unwrap();
         decode(w).unwrap()
     }
@@ -351,7 +354,7 @@ mod tests {
         assert_eq!(t.libs[1].name.as_deref(), Some("child"));
         assert_eq!(t.frames.lib, vec![Some(1)]);
         assert_eq!(t.native_symbols.lib_index, vec![1]);
-        assert_eq!(p.processes[0][0].tid, 3);
+        assert_eq!(p.processes[0].threads[0].tid, 3);
     }
 
     #[test]

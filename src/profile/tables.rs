@@ -182,7 +182,8 @@ pub struct SharedTables {
     pub libs: Vec<RawLib>,
     /// Per-frame inline-call chain (innermost-first), populated by
     /// [`crate::profile::symbolicate`]. Index parallel to `frames`;
-    /// shorter than `frames` until symbolication resizes it.
+    /// shorter than `frames` until symbolication resizes it. Not part
+    /// of the Firefox processed-profile schema, pollard-internal.
     pub inline_chains: Vec<Vec<InlineFrame>>,
 }
 

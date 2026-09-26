@@ -286,13 +286,14 @@ mod tests {
         use crate::profile::raw::InlineFrame;
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/linear_chain.json")).unwrap();
-        let t = &mut raw.threads[0];
-        t.inline_chains.resize_with(t.frame_table.length, Vec::new);
-        t.inline_chains[3] = vec![InlineFrame {
-            function: "leaf_inline".into(),
-            file: None,
-            line: None,
-        }];
+        raw.shared.set_inline_chain(
+            3,
+            vec![InlineFrame {
+                function: "leaf_inline".into(),
+                file: None,
+                line: None,
+            }],
+        );
         let profile = Profile::from_raw(raw);
 
         let plain = top_functions(&profile, &Args::default()).unwrap();

@@ -314,54 +314,48 @@ pub fn nearest_function_scored(profile: &Profile, matcher: &FunctionMatcher) -> 
     // The String tie-breaker keeps output deterministic when scores collide.
     let mut heap: BinaryHeap<Reverse<(Score, String)>> = BinaryHeap::with_capacity(NEAREST_K + 1);
 
-    for thread in profile.threads() {
-        let raw = thread.raw();
-        for func_idx in 0..raw.func_table.length {
-            let Some(s_idx) = raw.func_table.name.get(func_idx) else {
-                continue;
-            };
-            let Some(name) = raw.string_array.get(*s_idx) else {
-                continue;
-            };
+    let shared = profile.shared();
+    for func_idx in 0..shared.funcs.len() {
+        let Some(name) = shared.strings.get(shared.funcs.name[func_idx]) else {
+            continue;
+        };
 
-            // Cheap dedup: same function name can appear in multiple threads.
-            // Heap holds at most K+1 entries, so this scan is bounded.
-            if heap.iter().any(|Reverse((_, n))| n == name) {
-                continue;
-            }
+        // Cheap dedup: several funcs can share a name. Heap holds at
+        // most K+1 entries, so this scan is bounded.
+        if heap.iter().any(|Reverse((_, n))| n == name) {
+            continue;
+        }
 
-            let name_lc = name.to_lowercase();
-            let score = if name_lc.contains(&needle_lc) {
-                // Reward containing matches strongly; tie-break toward the
-                // closest-sized candidate.
-                2.0 - (name.len() as f64 - needle.len() as f64).abs() / 1024.0
-            } else if needle_lc.contains(&name_lc) {
-                1.5 - (needle.len() as f64 - name.len() as f64).abs() / 1024.0
-            } else {
-                // Token tier sits between reverse-containment (1.5) and
-                // substring (2.0): a full in-order token match scores ~1.9,
-                // partial matches blend with the bigram floor.
-                let cand_toks = tokenize_identifier(name);
-                let token_score = if !needle_toks.is_empty() && !cand_toks.is_empty() {
-                    let lcs =
-                        token_lcs_len(&needle_toks, &cand_toks) as f64 / needle_toks.len() as f64;
-                    let cov = token_set_coverage(&needle_toks, &cand_toks);
-                    if (lcs - 1.0).abs() < f64::EPSILON {
-                        1.5 + 0.4 * cov
-                    } else {
-                        0.6 * lcs + 0.4 * cov
-                    }
+        let name_lc = name.to_lowercase();
+        let score = if name_lc.contains(&needle_lc) {
+            // Reward containing matches strongly; tie-break toward the
+            // closest-sized candidate.
+            2.0 - (name.len() as f64 - needle.len() as f64).abs() / 1024.0
+        } else if needle_lc.contains(&name_lc) {
+            1.5 - (needle.len() as f64 - name.len() as f64).abs() / 1024.0
+        } else {
+            // Token tier sits between reverse-containment (1.5) and
+            // substring (2.0): a full in-order token match scores ~1.9,
+            // partial matches blend with the bigram floor.
+            let cand_toks = tokenize_identifier(name);
+            let token_score = if !needle_toks.is_empty() && !cand_toks.is_empty() {
+                let lcs = token_lcs_len(&needle_toks, &cand_toks) as f64 / needle_toks.len() as f64;
+                let cov = token_set_coverage(&needle_toks, &cand_toks);
+                if (lcs - 1.0).abs() < f64::EPSILON {
+                    1.5 + 0.4 * cov
                 } else {
-                    0.0
-                };
-                let dice = strsim::sorensen_dice(&needle_lc, &name_lc);
-                token_score.max(dice)
+                    0.6 * lcs + 0.4 * cov
+                }
+            } else {
+                0.0
             };
+            let dice = strsim::sorensen_dice(&needle_lc, &name_lc);
+            token_score.max(dice)
+        };
 
-            heap.push(Reverse((Score(score), name.clone())));
-            if heap.len() > NEAREST_K {
-                heap.pop();
-            }
+        heap.push(Reverse((Score(score), name.to_owned())));
+        if heap.len() > NEAREST_K {
+            heap.pop();
         }
     }
 
