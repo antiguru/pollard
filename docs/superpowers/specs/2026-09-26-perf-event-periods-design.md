@@ -13,6 +13,7 @@ It builds on sub-project A (`2026-09-25-shared-tables-format-design.md`), which 
 The findings below come from `samply import` of `perf record -e cycles,cache-misses,instructions,branch-misses` recordings made with `-F 999` and with `-c 100000`, on samply `da48ff40`.
 
 * Every main-event sample gets `weight` 1 at all three `add_sample` sites in `handle_main_event_sample` (`samply/src/linux_shared/converter.rs`): the thread, the per-CPU thread, and the combined CPU thread.
+* samply writes the `samples.weight` column unconditionally (`fxprof-processed-profile/src/sample_table.rs`), so its presence says nothing about how the weights were chosen.
 * Off-CPU samples get weight 1 whenever `sampling_is_time_based` is set, which is true for every `-F` recording regardless of event (`converter.rs`, `off_cpu_weight_per_sample`; `event_interpretation.rs`).
 * `Other event` markers carry only `type` and `cause.stack`; their schema has no fields (`samply/src/shared/process_sample_data.rs`, `OtherEventMarker`).
 * With `-F`, each sample record carries `PERIOD`; with `-c`, the sample type omits `PERIOD` and the attribute's `sample_period` gives the fixed value (`perf evlist -v`).
@@ -23,7 +24,7 @@ The findings below come from `samply import` of `perf record -e cycles,cache-mis
 ## Goals
 
 * samply writes each `Other event` marker's period.
-* samply names every perf event and its sampling mode in `meta.extra`.
+* samply names every perf event, its sampling mode, and the sample weight mode in `meta.extra`.
 * `samply import --weight-by-period` writes the main event's period as the sample weight.
 * samply stops writing non-clock periods into `threadCPUDelta`.
 * pollard weights shares by period when the profile carries periods, and reports the main event's name.
@@ -35,11 +36,12 @@ The findings below come from `samply import` of `perf record -e cycles,cache-mis
 * A new `WeightType` variant; the Firefox Profiler accepts only `samples`, `tracing-ms`, and `bytes`.
   With `--weight-by-period`, the Firefox Profiler therefore labels weighted totals as samples.
 * Making `sampling_is_time_based` event-aware. `-F cycles` keeps its time-based profile interval.
+* CPU deltas for `-c cpu-clock` imports, whose records carry no period. They stay 0, as today.
 * Recovering periods of duplicate-timestamp samples, which the converter already drops.
 
 ## samply changes
 
-The samply work splits into two pull requests against `mstange/samply`, so the maintainer can take the bug fix without the feature.
+The samply work splits into two independent pull requests against `mstange/samply`, so the maintainer can take the bug fix without the feature.
 
 ### Pull request 1: periods and event metadata
 
@@ -48,16 +50,19 @@ Each entry has a label, a format, and a value, and samply uses only the `string`
 The Firefox Profiler formats these values without a string table, so string-index formats such as `unique-string` must not be used.
 The method is additive, so the crate's public API stays compatible.
 
-**Event metadata.** `samply import` adds one `meta.extra` section labeled `Perf events`, with one `string` entry per perf event attribute in attribute order.
-The label is the event name exactly as `EventInterpretation::event_names` holds it, which includes placeholders like `<unknown event 2>`.
-The value follows this grammar, with `N` a decimal integer:
+**Event metadata.** `samply import` adds one `meta.extra` section labeled `Perf events`.
+It holds one `string` entry per perf event attribute in attribute order, followed by one entry labeled `Sample weight`.
+An event entry's label is the event name exactly as `EventInterpretation::event_names` holds it, which includes modifiers and PMU prefixes such as `cycles:u` or `cpu_core/cycles/`, and placeholders such as `<unknown event 2>`.
+The values follow this grammar, with `N` a decimal integer:
 
 ```
-value = "frequency " N " Hz" | "period " N
+event value  = "frequency " N " Hz" | "period " N
+weight value = "period" | "1"
 ```
 
-The first entry is the main event, which becomes the samples track.
-pollard reads this section to name the samples track and to find fixed periods, and the Firefox Profiler shows it in the profile info panel.
+`Sample weight` reads `period` when `--weight-by-period` was passed and `1` otherwise.
+The first event entry is the main event, which becomes the samples track, because `EventInterpretation::main_event_attr_index` is always 0.
+pollard reads this section to name the samples track, to find fixed periods, and to tell weighted samples apart. The Firefox Profiler shows it in the profile info panel, where duplicate labels only cause a React key warning.
 
 **Marker period.** `OtherEventMarker` gains an integer field `period`.
 The value is the sample record's `period` when present, and the attribute's fixed `sample_period` otherwise, so `-c` recordings carry a period too.
@@ -82,39 +87,50 @@ The weight decision lives in one pure function so it can be unit tested without 
 fn sample_weight(record_period: Option<u64>, fixed_period: Option<u64>, weight_by_period: bool) -> (i32, bool)
 ```
 
+It returns `(1, false)` when the flag is off, and also when the flag is on but neither period is known.
 The derivation of `fixed_periods` from the attributes' sampling policies is a second pure function with its own unit tests.
 
 ### Pull request 2: CPU delta only for clock events
 
 `EventInterpretation` gains `main_event_is_clock: bool`, true when the main attribute is the software `cpu-clock` or `task-clock` event, as `divine_from_attrs` already matches for `sampling_is_time_based`.
-`handle_main_event_sample` converts the period to `CpuDelta` only when `main_event_is_clock` is true, and uses the fixed period when the record has none, so `-c cpu-clock` imports gain CPU deltas.
+`samply record`'s hand-built `EventInterpretation` in `linux/profiler.rs` sets it to `false`, which changes nothing, because the record path always has context-switch data and never reaches the period branch.
+`handle_main_event_sample` converts the record's period to `CpuDelta` only when `main_event_is_clock` is true.
 For other main events without context-switch data, the CPU delta becomes 0 instead of an event count.
 This changes the Firefox Profiler's CPU graph for such imports from wrong values to no CPU data, and the pull request says so.
-The pull request covers the CPU delta only and leaves the profile interval alone.
+The pull request covers the CPU delta only, does not depend on pull request 1, and leaves the profile interval alone.
 
 ## pollard changes
 
+**Perf event metadata.** `RawMeta` gains `extra: Vec<RawExtraSection>` (`#[serde(default)]`), where a section has a `label` and `entries` of `{label, format, value}`.
+`Profile::perf_events()` parses the `Perf events` section into the event list and the sample weight mode, and ignores values that do not match the grammar.
+`list_events` and marker weight lookup both use it.
+
 **Weight per item.** `Profile` gains `weighted_stack_indices`, which yields `(Option<usize>, u64)` pairs of stack index and weight.
 The existing `stack_indices` becomes a wrapper that drops the weight, so callers move over one at a time.
-A sample's weight is `samples.weight[i]` when the column exists, and 1 otherwise.
-A marker's weight is its `data.period` when present, then the fixed period of that event from the `Perf events` section, then 1.
+A sample's weight is `samples.weight[i]` when the `Perf events` section says `Sample weight: period`, and 1 otherwise.
+A marker's weight is its `data.period` when present, then the fixed period of that event from the `Perf events` section, then 1. samply always writes `period`, so the fallbacks exist for older samply output and hand-built fixtures.
 `RawMarkerData` gains `period: Option<f64>`.
 
-**Weighted tools.** These tools add weights instead of counting items: `top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`, `top_groups`, `compare_profiles`, `source_for_function`, and `asm_for_function`.
+**Weighted tools.** These tools add weights instead of counting items: `top_functions`, `call_tree`, `stacks_containing`, `folded_stacks`, `top_groups`, `compare_profiles`, `compare_functions`, `source_for_function`, `asm_for_function`, and the rankings in `summary` (`top_modules`, `top_self_functions`, `top_total_functions`).
 Their totals and percentages therefore mean event counts, e.g. cache misses, rather than sample counts.
-`source_for_function` and `asm_for_function` iterate `samples.stack` directly and keep doing so, reading `samples.weight[i]` for each sample, so their event and time-range behavior does not change.
-`summary`, `describe_profile`, `view_stats`, and `list_events` keep reporting raw sample and marker counts, because they describe the recording rather than rank code.
+`source_for_function` and `asm_for_function` iterate `samples.stack` directly and keep doing so, reading the sample weight for each sample, so their event and time-range behavior does not change.
+`summary.total_samples`, per-thread sample counts, `describe_profile`, `view_stats`, and `list_events` keep reporting raw sample and marker counts, because they describe the recording rather than rank code.
+`summary`'s `function_recurs_in_any_stack` and `view_stats` stay permanent callers of the unweighted `stack_indices`.
 
-**Counts with weights.** `top_functions`' per-function `Counts` become `{ samples: u64, weight: u64 }` for self and total.
+**Accumulators.** `Counts`, shared by `top_functions`, `compare_profiles`, and `top_groups`, becomes `{ samples: u64, weight: u64 }` for self and total.
 `*_samples` and `*_pct` report `weight`, and `compare_profiles`' `*_ms` columns keep using `samples` times the interval, because an event count has no time unit.
+`call_tree`'s `AggNode` totals, `stacks_containing`'s per-stack and matched-frame counts, and `folded_stacks`' per-line counts accumulate weight in their existing `u64` fields, whose names stay unchanged.
+For profiles without weight information every weight is 1, so every output is identical to today's.
 
-**`weighted` flag.** Outputs of the weighted tools gain `weighted: bool`.
-It is true when the selected event source carries weight information on at least one selected thread: a `samples.weight` column for the samples track, or a marker `period` or fixed period for a marker event.
+**`weighted` flag.** Outputs of the weighted tools gain `weighted: bool`, including `summary` and `FoldedStacksOutput`, since the folded text has no slot for it.
+For the samples track it is true when the `Perf events` section says `Sample weight: period`.
+For a marker event it is true when at least one selected marker of that event has a `period` or its event has a fixed period.
 It does not depend on the weight values, so a `-c 1` recording is still weighted.
-`compare_profiles` reports `weighted_a` and `weighted_b`, and its shares stay comparable when only one side is weighted, because each side's percentages are relative to its own total.
+`compare_profiles` reports `weighted_a` and `weighted_b`.
+When they differ it adds a `note` saying that one side's percentages are event shares and the other's are sample shares, which are not directly comparable.
 
 **Event names.** `list_events` from sub-project A reads the `Perf events` section.
-The samples entry keeps `name: "samples"` and gains `event: "cycles"` and `sampling: "frequency 999 Hz"` when the section exists.
+The samples entry keeps `name: "samples"` and gains `event` (the raw label of the first entry, e.g. `cycles:u`) and `sampling` (e.g. `frequency 999 Hz`) when the section exists.
 Marker entries gain `sampling` from the entry with the same label.
 When several entries share a label, the first one wins, because markers of equally named events are indistinguishable anyway.
 
@@ -128,18 +144,20 @@ When several entries share a label, the first one wins, because markers of equal
 
 ## Testing
 
-* samply: unit tests for `sample_weight` cover a record period, a fixed period only, neither, the flag off, and saturation above `i32::MAX`.
+* samply: unit tests for `sample_weight` cover a record period, a fixed period only, neither with the flag on (`(1, false)`), the flag off, and saturation above `i32::MAX`.
 * samply: unit tests for the `fixed_periods` derivation cover frequency and period attributes.
 * samply: the fixtures from sub-project A's `regenerate.sh` are re-imported with and without the flag.
-  The default import differs from before only by the marker field and the `meta.extra` section, and the flagged import's sample weights equal `perf script -F period` for the main event.
+  The default import differs from before only by the marker field and the `meta.extra` section.
+  In the flagged import, the per-tid sums of sample weights on non-CPU threads equal the per-tid sums of `perf script -F tid,period` for the main event, over the samples samply keeps (tid 0 and duplicate timestamps are dropped).
 * samply: a `-F cycles` recording with context switches, imported with the flag, has off-CPU samples of weight 0.
-* samply: a unit test for `main_event_is_clock` covers `cpu-clock`, `task-clock`, and `cycles`, and a `-c cpu-clock` import has CPU deltas equal to the period.
-* pollard: unit tests cover weight lookup for samples, markers with `period`, markers with only a fixed period, and neither.
-* pollard: aggregation tests use a fixture where two functions have equal counts but different periods, and check that shares follow periods, `weighted` is true, and `compare_profiles` `_ms` columns follow counts.
-* pollard: all existing tests pass unchanged, because their fixtures carry no weights or periods.
+* samply: a unit test for `main_event_is_clock` covers `cpu-clock`, `task-clock`, and `cycles`, and a `-F cycles` import without context switches has CPU deltas of 0.
+* pollard: unit tests cover `perf_events()` parsing, including invalid values, and weight lookup for samples with and without `Sample weight: period`, markers with `period`, markers with only a fixed period, and neither.
+* pollard: aggregation tests use a fixture where two functions have equal counts but different periods, and check that shares follow periods in each weighted tool, `weighted` is true, and `compare_profiles` `_ms` columns follow counts.
+* pollard: a `compare_profiles` test with one weighted and one unweighted side checks `weighted_a`, `weighted_b`, and the `note`.
+* pollard: all existing tests pass unchanged, because their fixtures carry no weight information.
 
 ## Rollout
 
-samply pull request 1 lands on branch `import-period`, and pull request 2 on branch `cpu-delta-clock-events`, both from `upstream/main` in the samply fork.
+samply pull request 1 lands on branch `import-period`, and pull request 2 on branch `cpu-delta-clock-events`, both from `upstream/main` in the samply fork and independent of each other.
 pollard's part lands on branch `period-weighting`, stacked on `shared-tables-format`.
 pollard does not depend on the samply pull requests being merged: it reads the new fields when present and behaves as today otherwise.
