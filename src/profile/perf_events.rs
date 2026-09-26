@@ -19,9 +19,8 @@ pub const SECTION_LABEL: &str = "Perf events";
 pub const SAMPLE_WEIGHT_LABEL: &str = "Sample weight";
 
 /// Whether a period value counts as a period rather than being absent:
-/// zero, negative, and non-finite values are absent. Shared so `fixed_period`
-/// below and Task 10's marker weights and `is_weighted` agree on the same
-/// rule.
+/// zero, negative, and non-finite values are absent.
+#[allow(dead_code)]
 pub(crate) fn is_positive_period(period: f64) -> bool {
     period.is_finite() && period > 0.0
 }
@@ -114,7 +113,9 @@ impl PerfEvents {
     /// that carries no usable weight.
     pub fn fixed_period(&self, label: &str) -> Option<u64> {
         match self.event(label)?.sampling? {
-            Sampling::Period(n) if is_positive_period(n as f64) => Some(n),
+            // Same rule as `is_positive_period`: zero counts as absent.
+            // `n` is a `u64`, so it can't be negative or non-finite.
+            Sampling::Period(n) if n > 0 => Some(n),
             _ => None,
         }
     }
@@ -207,6 +208,20 @@ mod tests {
                 .fixed_period("cycles"),
             Some(5)
         );
+    }
+
+    #[test]
+    fn fixed_period_is_none_for_a_zero_period() {
+        let extra = section("Perf events", &[("ev", "period 0".into())]);
+        let p = PerfEvents::from_extra(&extra).unwrap();
+        assert_eq!(p.fixed_period("ev"), None);
+    }
+
+    #[test]
+    fn fixed_period_is_some_for_a_positive_period() {
+        let extra = section("Perf events", &[("ev", "period 5".into())]);
+        let p = PerfEvents::from_extra(&extra).unwrap();
+        assert_eq!(p.fixed_period("ev"), Some(5));
     }
 
     #[test]
