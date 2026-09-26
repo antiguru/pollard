@@ -76,6 +76,31 @@ async fn json_and_jslb_from_one_build_match() {
 }
 
 #[tokio::test]
+async fn period_json_and_jslb_from_one_build_match() {
+    let json = load("multi_period.json.gz").await;
+    let jslb = load("multi_period.jslb.gz").await;
+    for ev in event_sources() {
+        assert_eq!(
+            top(&json, ev.clone()),
+            top(&jslb, ev.clone()),
+            "top_functions {ev:?}"
+        );
+        let weighted = |p: &Profile| {
+            top_functions(
+                p,
+                &top_functions::Args {
+                    event: ev.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .weighted
+        };
+        assert_eq!(weighted(&json), weighted(&jslb), "weighted {ev:?}");
+    }
+}
+
+#[tokio::test]
 async fn versions_49_and_75_agree_on_event_totals() {
     let v49 = load("multi_v49.json.gz").await;
     let v75 = load("multi_v75.json.gz").await;

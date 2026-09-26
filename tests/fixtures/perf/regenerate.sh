@@ -24,12 +24,13 @@ perf record -q -o "$work/multi.data" \
 "$SAMPLY_V75" import "$work/multi.data" -s -o "$work/multi_v75.json.gz"
 "$SAMPLY_V75" import "$work/multi.data" -s -o "$work/multi_v75.jslb.gz"
 "$SAMPLY_PERIOD" import "$work/multi.data" -s --weight-by-period -o "$work/multi_period.json.gz"
+"$SAMPLY_PERIOD" import "$work/multi.data" -s --weight-by-period -o "$work/multi_period.jslb.gz"
 
 # Replace host-identifying strings with same-length placeholders, so
 # JSLB slab offsets stay valid.
 host=$(uname -n)
 release=$(uname -r)
-for f in multi_v49.json.gz multi_v75.json.gz multi_v75.jslb.gz multi_period.json.gz; do
+for f in multi_v49.json.gz multi_v75.json.gz multi_v75.jslb.gz multi_period.json.gz multi_period.jslb.gz; do
   python3 - "$work/$f" "$f" "$host" "$release" "$HOME" <<'EOF'
 import gzip, sys
 src, dst, host, release, home = sys.argv[1:]
