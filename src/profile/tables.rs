@@ -57,12 +57,18 @@ impl Strings {
 
     /// Replace the string at `idx` in place. Tests use this to rename
     /// functions in a fixture without disturbing other indices.
+    ///
+    /// Rebuilds the whole index afterwards: swapping two names by two
+    /// `replace` calls (rename `values[0]` to what `values[1]` held,
+    /// then vice versa) would otherwise leave one of them unindexed,
+    /// since a naive update only repoints the entry for the new string
+    /// and clears the entry for the old one.
     pub fn replace(&mut self, idx: usize, s: &str) {
-        let old = std::mem::replace(&mut self.values[idx], s.to_owned());
-        if self.index.get(&old) == Some(&idx) {
-            self.index.remove(&old);
+        self.values[idx] = s.to_owned();
+        self.index.clear();
+        for (i, v) in self.values.iter().enumerate() {
+            self.index.entry(v.clone()).or_insert(i);
         }
-        self.index.entry(s.to_owned()).or_insert(idx);
     }
 }
 
@@ -283,6 +289,17 @@ mod tests {
         assert_eq!(s.get(0), Some("new"));
         assert_eq!(s.position("new"), Some(0));
         assert_eq!(s.position("old"), None);
+    }
+
+    #[test]
+    fn replace_swap_keeps_both_indexed() {
+        let mut s = Strings::default();
+        s.intern("hot");
+        s.intern("cold");
+        s.replace(0, "cold");
+        s.replace(1, "hot");
+        assert_eq!(s.position("cold"), Some(0));
+        assert_eq!(s.position("hot"), Some(1));
     }
 
     #[test]

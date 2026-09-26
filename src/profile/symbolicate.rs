@@ -240,9 +240,9 @@ async fn symbolicate_tables(
         }
         let raw_lib = t.libs.get(lib_idx);
         let (map, load_status) = load_symbol_map_for_lib(symbol_manager, raw_lib).await;
-        // Record the load status in the per-lib outcome the first time
-        // we see this lib. Subsequent attempts (e.g. reused across
-        // threads) just inherit the cached status.
+        // Record the load status in the per-lib outcome. Library
+        // indices are profile-global, so this runs once per library
+        // regardless of how many threads or frames reference it.
         if let Some(lib) = raw_lib {
             outcomes
                 .entry(outcome_key(lib))

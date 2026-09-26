@@ -10,6 +10,7 @@
 #![allow(dead_code)]
 
 mod legacy;
+mod v75;
 
 use serde::Deserialize;
 
@@ -31,6 +32,9 @@ pub struct WireProfile {
     pub meta: RawMeta,
     #[serde(default)]
     pub libs: Vec<RawLib>,
+    /// Shared layout only.
+    #[serde(default)]
+    pub shared: Option<v75::WireShared>,
     #[serde(default)]
     pub threads: Vec<WireThread>,
     #[serde(default)]
@@ -99,7 +103,8 @@ impl TryFrom<WireProfile> for RawProfile {
     fn try_from(w: WireProfile) -> Result<Self, String> {
         let profile = match w.meta.preprocessed_profile_version {
             None => legacy::decode(w)?,
-            Some(v) if (49..=55).contains(&v) => legacy::decode(w)?,
+            Some(75) => v75::decode(w)?,
+            Some(v) if is_supported_version(v) => legacy::decode(w)?,
             Some(v) => return Err(format!("unsupported processed-profile version {v}")),
         };
         validate(&profile)?;

@@ -73,6 +73,9 @@ pub struct LegacyNativeSymbols {
 }
 
 pub(super) fn decode(w: WireProfile) -> Result<RawProfile, String> {
+    if w.shared.is_some() {
+        return Err("per-thread layout profile has a shared section".to_owned());
+    }
     let mut shared = SharedTables {
         libs: w.libs,
         ..Default::default()

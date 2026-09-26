@@ -171,7 +171,6 @@ pub struct RawThread {
     /// hardware counter samples (cache-misses, branch-misses,
     /// instructions, …); each such marker carries a `data.cause.stack`
     /// pointing into the same stack table the samples track uses.
-    /// `default` so older fixtures without a markers field still parse.
     pub markers: RawMarkerTable,
 }
 
