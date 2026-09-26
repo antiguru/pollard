@@ -203,6 +203,19 @@ mod tests {
     }
 
     #[test]
+    fn jslb_unsupported_version_reports_unsupported() {
+        // Same shape as `version_60_reports_unsupported`, but through the
+        // JSLB path: the skeleton has no slab placeholders, so no slabs
+        // are needed.
+        let b = json_slabs::Builder::new();
+        let root = br#"{"meta": {"interval": 1.0, "startTime": 0.0, "preprocessedProfileVersion": 60},
+                       "shared": {"stringArray": [], "frameTable": {"length": 0, "address": []}}, "threads": []}"#;
+        let jslb = b.finish(root);
+        let err = decode_bytes(&jslb).unwrap_err();
+        assert!(matches!(err, LoadError::UnsupportedVersion(60)), "{err:?}");
+    }
+
+    #[test]
     fn unsupported_version_maps_to_tool_error() {
         let mut f = NamedTempFile::with_suffix(".json").unwrap();
         f.write_all(br#"{"meta": {"interval": 1.0, "startTime": 0.0, "preprocessedProfileVersion": 74}, "threads": []}"#)
