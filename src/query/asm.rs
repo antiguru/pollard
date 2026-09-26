@@ -486,6 +486,35 @@ fn attribute_samples(
         .collect()
 }
 
+/// Assemble the final `AsmListing` from a decoded instruction stream and the
+/// resolved function location. Split out from `asm_for_function_inner` so
+/// tests can exercise sample/weight attribution with a hand-built
+/// `Vec<DecodedInstr>`, without needing a real disassembler backend.
+#[allow(clippy::too_many_arguments)]
+fn build_listing(
+    profile: &Profile,
+    function: &str,
+    module: Option<String>,
+    arch: String,
+    start_rel: u32,
+    size_bytes: u32,
+    decoded: &[DecodedInstr],
+    loc: &FunctionLocation,
+    did_you_mean: Option<DidYouMean>,
+) -> AsmListing {
+    let instructions = attribute_samples(decoded, start_rel, &loc.frame_counts);
+    AsmListing {
+        function: function.to_owned(),
+        module,
+        start_address: format!("0x{start_rel:x}"),
+        size: format!("0x{size_bytes:x}"),
+        arch,
+        instructions,
+        weighted: profile.samples_weighted_by_period(),
+        did_you_mean,
+    }
+}
+
 // ─── public entry point ──────────────────────────────────────────────────────
 
 pub async fn asm_for_function(profile: &Profile, args: &Args) -> Result<AsmListing, ToolError> {
@@ -565,18 +594,17 @@ async fn asm_for_function_inner(
     let (decoded, arch, start_rel, size_bytes) =
         disassemble(&lib, loc.start_rel, loc.size_bytes, sample_anchor).await?;
 
-    let instructions = attribute_samples(&decoded, start_rel, &loc.frame_counts);
-
-    Ok(AsmListing {
-        function: function.to_owned(),
-        module: module_name,
-        start_address: format!("0x{start_rel:x}"),
-        size: format!("0x{size_bytes:x}"),
+    Ok(build_listing(
+        profile,
+        function,
+        module_name,
         arch,
-        instructions,
-        weighted: profile.samples_weighted_by_period(),
+        start_rel,
+        size_bytes,
+        &decoded,
+        &loc,
         did_you_mean,
-    })
+    ))
 }
 
 impl std::fmt::Debug for ResolveResult {
@@ -655,70 +683,78 @@ mod tests {
         }
     }
 
-    /// Patch the fixture's only lib entry to point at this test binary
-    /// itself, using wholesym's own computed identity (debug/code id) for
-    /// it. `disassemble()` requires an id that matches the binary it reads,
-    /// so pointing at a real, self-consistent file lets these tests
-    /// exercise the full `asm_for_function` path (not just `resolve_function`)
-    /// without depending on external tools or a committed test binary, and
-    /// without caring whether the platform is ELF or Mach-O.
-    async fn patch_lib_to_self(raw: &mut RawProfile) {
-        let exe = std::env::current_exe().unwrap();
-        let info = SymbolManager::library_info_for_binary_at_path(&exe, None)
-            .await
-            .unwrap();
-        raw.shared.libs[0] = crate::profile::raw::RawLib {
-            name: info.name,
-            debug_name: info.debug_name,
-            debug_path: info.debug_path,
-            path: info.path,
-            breakpad_id: info.debug_id.map(|id| id.breakpad().to_string()),
-            code_id: info.code_id.map(|id| id.to_string()),
-            arch: info.arch,
-        };
+    /// Build a one-instruction decoded stream spanning `loc`'s whole
+    /// function, so `attribute_samples` folds every sampled address into
+    /// that single instruction. Lets tests check weighted sample
+    /// attribution without a real disassembler backend.
+    fn whole_function_instr(loc: &FunctionLocation) -> Vec<DecodedInstr> {
+        vec![DecodedInstr {
+            offset: 0,
+            len: loc.size_bytes,
+            text: "nop".to_owned(),
+        }]
     }
 
-    #[tokio::test]
-    async fn asm_listing_weighted_true_for_weighted_events() {
-        let mut raw: RawProfile =
+    #[test]
+    fn build_listing_reports_weighted_true_and_summed_periods() {
+        let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
                 .unwrap();
-        patch_lib_to_self(&mut raw).await;
         let profile = Profile::from_raw(raw);
-        let listing = asm_for_function(
+        let matcher = FunctionMatcher::new("cold").unwrap();
+        let loc = match resolve_function(&profile, &matcher, None) {
+            ResolveResult::Single(loc) => loc,
+            other => panic!("expected Single, got {other:?}"),
+        };
+        let decoded = whole_function_instr(&loc);
+        let listing = build_listing(
             &profile,
-            &Args {
-                function: "cold".to_owned(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+            "cold",
+            None,
+            "x86_64".to_owned(),
+            loc.start_rel,
+            loc.size_bytes,
+            &decoded,
+            &loc,
+            None,
+        );
         assert!(listing.weighted);
+        assert_eq!(listing.instructions.len(), 1);
+        assert_eq!(listing.instructions[0].samples, 600);
     }
 
-    #[tokio::test]
-    async fn asm_listing_weighted_false_for_unweighted_profile() {
+    #[test]
+    fn build_listing_reports_weighted_false_for_unweighted_profile() {
         // Same lib/frame/address layout as `weighted_events.json` (so
-        // resolution and disassembly behave identically), but with the
-        // `Perf events` meta section stripped — mirrors
+        // resolution behaves identically), but with the `Perf events`
+        // meta section stripped. Mirrors
         // `compare::tests::mixed_weighting_adds_note`'s pattern for
         // constructing an "otherwise identical, but unweighted" profile.
         let mut raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
                 .unwrap();
         raw.meta.extra.clear();
-        patch_lib_to_self(&mut raw).await;
         let profile = Profile::from_raw(raw);
-        let listing = asm_for_function(
+        let matcher = FunctionMatcher::new("cold").unwrap();
+        let loc = match resolve_function(&profile, &matcher, None) {
+            ResolveResult::Single(loc) => loc,
+            other => panic!("expected Single, got {other:?}"),
+        };
+        let decoded = whole_function_instr(&loc);
+        let listing = build_listing(
             &profile,
-            &Args {
-                function: "cold".to_owned(),
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+            "cold",
+            None,
+            "x86_64".to_owned(),
+            loc.start_rel,
+            loc.size_bytes,
+            &decoded,
+            &loc,
+            None,
+        );
         assert!(!listing.weighted);
+        assert_eq!(listing.instructions.len(), 1);
+        // Unweighted: every sample counts 1, not its period.
+        assert_eq!(listing.instructions[0].samples, 2);
     }
 }

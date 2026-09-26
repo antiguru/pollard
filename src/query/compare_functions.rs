@@ -15,7 +15,7 @@
 
 use crate::error::ToolError;
 use crate::profile::Profile;
-use crate::query::asm::{self, AsmInstruction};
+use crate::query::asm::{self, AsmInstruction, AsmListing};
 use regex::Regex;
 use schemars::JsonSchema;
 use serde::Serialize;
@@ -97,6 +97,14 @@ pub async fn compare_functions(
     )
     .await?;
 
+    build_output(listing_a, listing_b)
+}
+
+/// Assemble the side-by-side `Output` from two already-resolved
+/// `AsmListing`s. Split out from `compare_functions` so tests can exercise
+/// the arch check, sample totals, alignment, and weighted-flag wiring with
+/// hand-built listings, without needing a real disassembler backend.
+fn build_output(listing_a: AsmListing, listing_b: AsmListing) -> Result<Output, ToolError> {
     if listing_a.arch != listing_b.arch {
         return Err(ToolError::Internal {
             message: format!(
@@ -276,80 +284,38 @@ fn only_b_row(bi: &AsmInstruction) -> AlignedRow {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::Profile;
-    use crate::profile::raw::RawProfile;
 
-    /// Patch the fixture's only lib entry to point at this test binary
-    /// itself, using wholesym's own computed identity (debug/code id) for
-    /// it, so `asm_for_function`'s disassembly step (which requires an id
-    /// matching the binary it reads) succeeds against a real,
-    /// self-consistent file regardless of platform (ELF/Mach-O), without
-    /// external tools or a committed test binary.
-    async fn patch_lib_to_self(raw: &mut RawProfile) {
-        let exe = std::env::current_exe().unwrap();
-        let info = wholesym::SymbolManager::library_info_for_binary_at_path(&exe, None)
-            .await
-            .unwrap();
-        raw.shared.libs[0] = crate::profile::raw::RawLib {
-            name: info.name,
-            debug_name: info.debug_name,
-            debug_path: info.debug_path,
-            path: info.path,
-            breakpad_id: info.debug_id.map(|id| id.breakpad().to_string()),
-            code_id: info.code_id.map(|id| id.to_string()),
-            arch: info.arch,
-        };
+    /// A minimal one-instruction `AsmListing` for `build_output` tests, so
+    /// they can pin the weighted-flag wiring without a real disassembler
+    /// backend.
+    fn listing(weighted: bool, samples: u64) -> AsmListing {
+        AsmListing {
+            function: "f".to_owned(),
+            module: None,
+            start_address: "0x0".to_owned(),
+            size: "0x10".to_owned(),
+            arch: "x86_64".to_owned(),
+            instructions: vec![AsmInstruction {
+                offset: 0,
+                asm: "nop".to_owned(),
+                samples,
+            }],
+            weighted,
+            did_you_mean: None,
+        }
     }
 
-    #[tokio::test]
-    async fn weighted_flags_true_for_weighted_events_both_sides() {
-        let mut raw: RawProfile =
-            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
-                .unwrap();
-        patch_lib_to_self(&mut raw).await;
-        let profile = Profile::from_raw(raw);
-        let out = compare_functions(
-            &profile,
-            &profile,
-            &Args {
-                function_a: "cold".to_owned(),
-                function_b: "cold".to_owned(),
-                with_samples: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
+    #[test]
+    fn build_output_reports_weighted_true_for_both_sides() {
+        let out = build_output(listing(true, 600), listing(true, 200)).unwrap();
         assert!(out.weighted_a);
         assert!(out.weighted_b);
     }
 
-    #[tokio::test]
-    async fn weighted_flags_false_for_unweighted_profile() {
-        // Same lib/frame/address layout as `weighted_events.json` (so
-        // resolution and disassembly behave identically), but with the
-        // `Perf events` meta section stripped — mirrors
-        // `compare::tests::mixed_weighting_adds_note`'s pattern for
-        // constructing an "otherwise identical, but unweighted" profile.
-        let mut raw: RawProfile =
-            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
-                .unwrap();
-        raw.meta.extra.clear();
-        patch_lib_to_self(&mut raw).await;
-        let profile = Profile::from_raw(raw);
-        let out = compare_functions(
-            &profile,
-            &profile,
-            &Args {
-                function_a: "cold".to_owned(),
-                function_b: "cold".to_owned(),
-                with_samples: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .unwrap();
-        assert!(!out.weighted_a);
+    #[test]
+    fn build_output_reports_mixed_weighting() {
+        let out = build_output(listing(true, 600), listing(false, 2)).unwrap();
+        assert!(out.weighted_a);
         assert!(!out.weighted_b);
     }
 

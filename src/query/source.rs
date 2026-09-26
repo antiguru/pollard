@@ -520,6 +520,44 @@ mod tests {
     }
 
     #[test]
+    fn weighted_samples_read_weight_by_original_sample_index() {
+        // Insert a null-stack sample before the existing ones, with its own
+        // weight entry. `attribute` enumerates `raw.samples.stack` and reads
+        // `profile.sample_weight(handle, sample_idx)` at that same index.
+        // If it instead read weights off a compacted index that skips
+        // null-stack rows before looking up the weight, every real sample's
+        // weight would shift by one and this test would fail.
+        let mut raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let samples = &mut raw.threads[0].samples;
+        samples.stack.insert(0, None);
+        samples.time.insert(0, -1.0);
+        if let Some(weight) = samples.weight.as_mut() {
+            weight.insert(0, 9999.0);
+        }
+        let profile = Profile::from_raw(raw);
+        let content: String = (1..=25).map(|i| format!("line {i}\n")).collect();
+        let listing = build_listing(
+            &profile,
+            "cold",
+            None,
+            ResolvedSource {
+                file: "/src/lib.rs".to_owned(),
+                language: None,
+                content,
+            },
+            true,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_eq!(listing.total_function_samples, 600);
+        let line = listing.lines.iter().find(|l| l.line == 20).unwrap();
+        assert_eq!(line.samples, 600);
+    }
+
+    #[test]
     fn expand_inlines_matches_inline_function_with_its_own_line() {
         // linear_chain.json: a → b → c → d, 100 samples on `d`. Inject one
         // inline record on `d` mapping to a different file + line. With
