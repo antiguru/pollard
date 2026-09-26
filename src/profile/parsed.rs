@@ -532,8 +532,9 @@ impl Profile {
     ///
     /// A sample weighs its `samples.weight` entry when the `Perf events`
     /// section says `Sample weight: period`, else 1. A marker weighs its
-    /// `data.period` when positive, else its event's fixed period from the
-    /// `Perf events` section, else 1. See [`crate::profile::perf_events`].
+    /// `data.period` when it counts at least one event, else its event's
+    /// fixed period from the `Perf events` section, else 1. See
+    /// [`crate::profile::perf_events`].
     pub fn weighted_stack_indices<'a>(
         &'a self,
         handle: ThreadHandle,
@@ -589,7 +590,8 @@ impl Profile {
     /// `source` over these threads come from perf event periods. For
     /// samples: the `Perf events` section says `Sample weight: period`. For
     /// markers: the event has a fixed period, or a marker selected by the
-    /// threads and `time_range` carries a positive finite `period`.
+    /// threads and `time_range` carries a `period` that
+    /// [`perf_events::marker_period`] counts.
     /// Independent of the weight values.
     pub fn is_weighted(
         &self,
@@ -615,7 +617,8 @@ impl Profile {
                             .get(i)
                             .and_then(|d| d.as_ref())
                             .and_then(|d| d.period)
-                            .is_some_and(perf_events::is_positive_period)
+                            .and_then(perf_events::marker_period)
+                            .is_some()
                     })
                 })
             }
@@ -1325,6 +1328,39 @@ mod tests {
             .collect();
         assert_eq!(weights, vec![1, 1, 1, 1]);
         assert!(!p.is_weighted([h], &ev, None));
+    }
+
+    #[test]
+    fn markers_with_a_period_below_one_alone_are_not_weighted() {
+        let mut raw = weighted_events_raw();
+        for d in raw.threads[0].markers.data.iter_mut().flatten() {
+            if d.period.is_some() {
+                d.period = Some(0.5);
+            }
+        }
+        let p = Profile::from_raw(raw);
+        let h = first_handle(&p);
+        let ev = EventSource::Marker("cache-misses".into());
+        // A period of 0.5 truncates to 0 events, so it counts as absent
+        // and, without a fixed period, each marker weighs 1.
+        let weights: Vec<u64> = p
+            .weighted_stack_indices(h, &ev, None)
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(weights, vec![1, 1, 1, 1]);
+        assert!(!p.is_weighted([h], &ev, None));
+    }
+
+    #[test]
+    fn sample_weights_stay_aligned_under_a_time_range() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let h = first_handle(&p);
+        // Samples 1 and 2 fall in [1, 2]. Their weights come from the
+        // same indices, not from the first two weight entries.
+        let items: Vec<_> = p
+            .weighted_stack_indices(h, &EventSource::Samples, Some([1.0, 2.0]))
+            .collect();
+        assert_eq!(items, vec![(Some(0), 100), (Some(1), 300)]);
     }
 
     #[test]

@@ -18,10 +18,11 @@ pub const SECTION_LABEL: &str = "Perf events";
 /// Label of the entry that says how samples are weighted.
 pub const SAMPLE_WEIGHT_LABEL: &str = "Sample weight";
 
-/// Whether a period value counts as a period rather than being absent:
-/// zero, negative, and non-finite values are absent.
-pub(crate) fn is_positive_period(period: f64) -> bool {
-    period.is_finite() && period > 0.0
+/// A marker period as an event count, when it counts as a period rather
+/// than being absent: values whose [`event_count`] is `None` or 0 are
+/// absent. This covers zero, negative, non-finite, and values in (0, 1).
+pub(crate) fn marker_period(period: f64) -> Option<u64> {
+    event_count(period).filter(|&n| n > 0)
 }
 
 /// How perf sampled one event.
@@ -112,7 +113,7 @@ impl PerfEvents {
     /// that carries no usable weight.
     pub fn fixed_period(&self, label: &str) -> Option<u64> {
         match self.event(label)?.sampling? {
-            // Same rule as `is_positive_period`: zero counts as absent.
+            // Same rule as `marker_period`: zero counts as absent.
             // `n` is a `u64`, so it can't be negative or non-finite.
             Sampling::Period(n) if n > 0 => Some(n),
             _ => None,
@@ -141,14 +142,10 @@ pub fn sample_weight(weights: Option<&[f64]>, i: usize, weight_by_period: bool) 
     }
 }
 
-/// Weight of a marker: its `period` when positive and finite, else its
-/// event's fixed period, else 1.
+/// Weight of a marker: its `period` when [`marker_period`] counts it, else
+/// its event's fixed period, else 1.
 pub fn marker_weight(period: Option<f64>, fixed_period: Option<u64>) -> u64 {
-    period
-        .filter(|&p| is_positive_period(p))
-        .and_then(event_count)
-        .or(fixed_period)
-        .unwrap_or(1)
+    period.and_then(marker_period).or(fixed_period).unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -293,5 +290,11 @@ mod tests {
     fn marker_weight_treats_a_zero_period_as_absent() {
         assert_eq!(marker_weight(Some(0.0), Some(100)), 100);
         assert_eq!(marker_weight(Some(0.0), None), 1);
+    }
+
+    #[test]
+    fn marker_weight_treats_a_period_truncating_to_zero_as_absent() {
+        assert_eq!(marker_weight(Some(0.5), Some(100)), 100);
+        assert_eq!(marker_weight(Some(0.5), None), 1);
     }
 }
