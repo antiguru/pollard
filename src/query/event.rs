@@ -7,6 +7,8 @@ pub use crate::profile::EventSource;
 
 use crate::error::ToolError;
 use crate::profile::Profile;
+use schemars::JsonSchema;
+use serde::Serialize;
 
 /// Resolve a user-facing event string to an [`EventSource`].
 ///
@@ -97,30 +99,77 @@ fn marker_lookup(profile: &Profile, target: &str) -> MarkerLookup {
     }
 }
 
-/// Sorted list of distinct marker names that have at least one
-/// stack-bearing entry. Used to populate "did you mean?" suggestions
-/// when `resolve` rejects an unknown event.
-fn known_marker_events(profile: &Profile) -> Vec<String> {
-    let mut names: std::collections::BTreeSet<String> = Default::default();
+/// Marker schema samply uses for secondary perf events.
+const OTHER_EVENT_TYPE: &str = "Other event";
+
+/// One event a profile can aggregate by.
+#[derive(Debug, Clone, Serialize, JsonSchema)]
+pub struct EventInfo {
+    /// `"samples"` for the samples track, else the marker name, e.g.
+    /// `"cache-misses"`. The samples track's real event name (such as
+    /// cycles) is not recorded in the profile.
+    pub name: String,
+    /// `"samples"` or `"marker"`.
+    pub source: &'static str,
+    /// Samples or markers across all threads.
+    pub count: u64,
+    /// For markers: true when no marker of this name carries a stack,
+    /// so it cannot be aggregated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stackless: Option<bool>,
+}
+
+/// The samples track first, then `Other event` markers by name.
+pub fn list_events(profile: &Profile) -> Vec<EventInfo> {
+    let mut samples = 0u64;
+    let mut markers: std::collections::BTreeMap<usize, (u64, bool)> = Default::default();
     for thread in profile.threads() {
         let raw = thread.raw();
+        samples += raw.samples.length as u64;
         for (i, &str_idx) in raw.markers.name.iter().enumerate() {
-            let has_stack = raw
-                .markers
-                .data
-                .get(i)
-                .and_then(|d| d.as_ref())
-                .and_then(|d| d.cause.as_ref())
-                .is_some();
-            if !has_stack {
+            let Some(data) = raw.markers.data.get(i).and_then(|d| d.as_ref()) else {
+                continue;
+            };
+            if data.type_.as_deref() != Some(OTHER_EVENT_TYPE) {
                 continue;
             }
-            if let Some(s) = profile.shared().strings.get(str_idx) {
-                names.insert(s.to_owned());
-            }
+            let entry = markers.entry(str_idx).or_default();
+            entry.0 += 1;
+            entry.1 |= data.cause.is_some();
         }
     }
-    names.into_iter().collect()
+    let strings = &profile.shared().strings;
+    let mut marker_events: Vec<EventInfo> = markers
+        .into_iter()
+        .filter_map(|(idx, (count, has_stack))| {
+            Some(EventInfo {
+                name: strings.get(idx)?.to_owned(),
+                source: "marker",
+                count,
+                stackless: Some(!has_stack),
+            })
+        })
+        .collect();
+    marker_events.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut events = vec![EventInfo {
+        name: "samples".to_owned(),
+        source: "samples",
+        count: samples,
+        stackless: None,
+    }];
+    events.extend(marker_events);
+    events
+}
+
+/// Sorted list of distinct `Other event` marker names that have at
+/// least one stack-bearing entry. Used to populate "did you mean?"
+/// suggestions when `resolve` rejects an unknown event.
+fn known_marker_events(profile: &Profile) -> Vec<String> {
+    list_events(profile)
+        .into_iter()
+        .filter(|e| e.stackless == Some(false))
+        .map(|e| e.name)
+        .collect()
 }
 
 #[cfg(test)]
@@ -132,6 +181,21 @@ mod tests {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
         Profile::from_raw(raw)
+    }
+
+    #[test]
+    fn list_events_reports_samples_and_other_event_markers() {
+        let p = fixture();
+        let events = list_events(&p);
+        assert_eq!(events[0].name, "samples");
+        assert_eq!(events[0].source, "samples");
+        assert_eq!(events[0].stackless, None);
+        let cm = events.iter().find(|e| e.name == "cache-misses").unwrap();
+        assert_eq!(cm.source, "marker");
+        assert_eq!(cm.count, 2);
+        assert_eq!(cm.stackless, Some(false));
+        // `mmap` markers are bookkeeping, not events.
+        assert!(events.iter().all(|e| e.name != "mmap"));
     }
 
     #[test]

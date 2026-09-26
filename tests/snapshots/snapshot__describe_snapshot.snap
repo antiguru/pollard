@@ -13,6 +13,13 @@ expression: desc
   "total_processes": 3,
   "total_threads": 11,
   "unsymbolicated_pct": "[pct]",
+  "events": [
+    {
+      "name": "samples",
+      "source": "samples",
+      "count": 112
+    }
+  ],
   "processes": [
     {
       "pid": "1969186.1",

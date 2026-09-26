@@ -38,6 +38,10 @@ pub struct ProfileDescription {
     /// arrays may hold fewer entries.
     pub total_threads: usize,
     pub unsymbolicated_pct: f32,
+    /// Events the profile can aggregate by: the samples track, then
+    /// each perf event samply stored as markers. Pass a marker name as
+    /// `event` to `top_functions`, `call_tree`, or `compare_profiles`.
+    pub events: Vec<crate::query::event::EventInfo>,
     /// Processes sorted descending by sample count. 0-sample processes
     /// and any beyond `top_n` are omitted; see `omitted_process_*`.
     pub processes: Vec<ProcessDescription>,
@@ -212,6 +216,7 @@ pub fn describe(
         total_processes,
         total_threads,
         unsymbolicated_pct,
+        events: crate::query::event::list_events(profile),
         processes,
         omitted_process_count,
         omitted_process_samples,

@@ -1,6 +1,5 @@
 ---
 source: tests/snapshot.rs
-assertion_line: 60
 expression: result
 ---
 {
@@ -14,6 +13,13 @@ expression: result
   "profile_start_ms": "[start]",
   "unsymbolicated_pct": "[pct]",
   "unsymbolicated_bracket": ">50%",
+  "events": [
+    {
+      "name": "samples",
+      "source": "samples",
+      "count": 112
+    }
+  ],
   "dominant_thread": {
     "tid": 1969261,
     "name": "tokio-runtime-w",
