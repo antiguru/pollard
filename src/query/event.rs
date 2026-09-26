@@ -107,7 +107,7 @@ const OTHER_EVENT_TYPE: &str = "Other event";
 pub struct EventInfo {
     /// `"samples"` for the samples track, else the marker name, e.g.
     /// `"cache-misses"`. The samples track's real event name (such as
-    /// cycles) is not recorded in the profile.
+    /// cycles) is in `event` when the profile records it.
     pub name: String,
     /// `"samples"` or `"marker"`.
     pub source: &'static str,
@@ -117,6 +117,15 @@ pub struct EventInfo {
     /// so it cannot be aggregated.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stackless: Option<bool>,
+    /// For the samples track: the main perf event's name as samply
+    /// recorded it, e.g. `"cycles:u"`. Absent without samply's
+    /// `Perf events` section.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event: Option<String>,
+    /// How perf sampled this event, `"frequency N Hz"` or `"period N"`.
+    /// Absent when the profile does not say.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling: Option<String>,
 }
 
 /// The samples track first, then `Other event` markers by name.
@@ -139,23 +148,36 @@ pub fn list_events(profile: &Profile) -> Vec<EventInfo> {
         }
     }
     let strings = &profile.shared().strings;
+    let perf = profile.perf_events();
+    // Equally named events share the first entry's sampling.
+    let sampling_of = |label: &str| {
+        perf.and_then(|p| p.event(label))
+            .and_then(|e| e.sampling)
+            .map(|s| s.describe())
+    };
     let mut marker_events: Vec<EventInfo> = markers
         .into_iter()
         .filter_map(|(idx, (count, has_stack))| {
+            let name = strings.get(idx)?.to_owned();
             Some(EventInfo {
-                name: strings.get(idx)?.to_owned(),
+                sampling: sampling_of(&name),
+                name,
                 source: "marker",
                 count,
                 stackless: Some(!has_stack),
+                event: None,
             })
         })
         .collect();
     marker_events.sort_by(|a, b| a.name.cmp(&b.name));
+    let main = perf.and_then(|p| p.main_event());
     let mut events = vec![EventInfo {
         name: "samples".to_owned(),
         source: "samples",
         count: samples,
         stackless: None,
+        event: main.map(|e| e.label.clone()),
+        sampling: main.and_then(|e| e.sampling).map(|s| s.describe()),
     }];
     events.extend(marker_events);
     events
@@ -185,6 +207,34 @@ mod tests {
         let raw: RawProfile =
             serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
         Profile::from_raw(raw)
+    }
+
+    #[test]
+    fn list_events_reads_the_perf_events_section() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json"))
+                .unwrap();
+        let p = Profile::from_raw(raw);
+        let events = list_events(&p);
+        assert_eq!(events[0].name, "samples");
+        assert_eq!(events[0].event.as_deref(), Some("cycles"));
+        assert_eq!(events[0].sampling.as_deref(), Some("frequency 1000 Hz"));
+        let cm = events.iter().find(|e| e.name == "cache-misses").unwrap();
+        assert_eq!(cm.event, None);
+        assert_eq!(cm.sampling.as_deref(), Some("frequency 1000 Hz"));
+        assert_eq!(cm.count, 4);
+        let ins = events.iter().find(|e| e.name == "instructions").unwrap();
+        assert_eq!(ins.sampling.as_deref(), Some("period 1000"));
+    }
+
+    #[test]
+    fn list_events_without_section_omits_event_and_sampling() {
+        let events = list_events(&fixture());
+        assert_eq!(events[0].event, None);
+        assert_eq!(events[0].sampling, None);
+        let json = serde_json::to_value(&events[0]).unwrap();
+        assert!(json.get("event").is_none(), "{json}");
+        assert!(json.get("sampling").is_none(), "{json}");
     }
 
     #[test]
