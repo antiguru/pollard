@@ -20,7 +20,6 @@ pub const SAMPLE_WEIGHT_LABEL: &str = "Sample weight";
 
 /// Whether a period value counts as a period rather than being absent:
 /// zero, negative, and non-finite values are absent.
-#[allow(dead_code)]
 pub(crate) fn is_positive_period(period: f64) -> bool {
     period.is_finite() && period > 0.0
 }
@@ -119,6 +118,37 @@ impl PerfEvents {
             _ => None,
         }
     }
+}
+
+/// A period or weight as an event count, when it is a finite non-negative
+/// number. Fractions are truncated.
+pub fn event_count(v: f64) -> Option<u64> {
+    // No lossless f64 to u64 conversion exists. `as` truncates and
+    // saturates above u64::MAX.
+    (v.is_finite() && v >= 0.0).then_some(v as u64)
+}
+
+/// Weight of sample `i`: its `samples.weight` entry when the profile is
+/// weighted by period, else 1. A negative or non-finite entry weighs 0,
+/// and a missing entry weighs 1.
+pub fn sample_weight(weights: Option<&[f64]>, i: usize, weight_by_period: bool) -> u64 {
+    if !weight_by_period {
+        return 1;
+    }
+    match weights.and_then(|w| w.get(i)) {
+        Some(&w) => event_count(w).unwrap_or(0),
+        None => 1,
+    }
+}
+
+/// Weight of a marker: its `period` when positive and finite, else its
+/// event's fixed period, else 1.
+pub fn marker_weight(period: Option<f64>, fixed_period: Option<u64>) -> u64 {
+    period
+        .filter(|&p| is_positive_period(p))
+        .and_then(event_count)
+        .or(fixed_period)
+        .unwrap_or(1)
 }
 
 #[cfg(test)]
@@ -236,5 +266,32 @@ mod tests {
         for s in ["frequency 999 Hz", "period 10000", "period 0"] {
             assert_eq!(Sampling::parse(s).unwrap().describe(), s);
         }
+    }
+
+    #[test]
+    fn sample_weight_reads_the_weight_column_only_with_period_weights() {
+        let w = [5.0, -1.0, f64::NAN, 2.5];
+        assert_eq!(sample_weight(Some(&w), 0, true), 5);
+        assert_eq!(sample_weight(Some(&w), 1, true), 0);
+        assert_eq!(sample_weight(Some(&w), 2, true), 0);
+        assert_eq!(sample_weight(Some(&w), 3, true), 2);
+        assert_eq!(sample_weight(Some(&w), 0, false), 1);
+        assert_eq!(sample_weight(None, 0, true), 1);
+        assert_eq!(sample_weight(Some(&w), 9, true), 1);
+    }
+
+    #[test]
+    fn marker_weight_prefers_period_then_fixed_period_then_one() {
+        assert_eq!(marker_weight(Some(7.0), Some(100)), 7);
+        assert_eq!(marker_weight(None, Some(100)), 100);
+        assert_eq!(marker_weight(None, None), 1);
+        assert_eq!(marker_weight(Some(-3.0), None), 1);
+        assert_eq!(marker_weight(Some(f64::INFINITY), Some(100)), 100);
+    }
+
+    #[test]
+    fn marker_weight_treats_a_zero_period_as_absent() {
+        assert_eq!(marker_weight(Some(0.0), Some(100)), 100);
+        assert_eq!(marker_weight(Some(0.0), None), 1);
     }
 }

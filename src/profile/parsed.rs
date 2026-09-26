@@ -13,7 +13,7 @@
 #![allow(dead_code)]
 
 use crate::profile::event_source::EventSource;
-use crate::profile::perf_events::PerfEvents;
+use crate::profile::perf_events::{self, PerfEvents};
 use crate::profile::raw::{InlineFrame, Pid, RawLib, RawProfile, RawThread};
 
 pub struct Profile {
@@ -498,10 +498,25 @@ pub(crate) fn collapse_cycles(chain: &mut Vec<ResolvedFrame>, max_len: usize) {
 }
 
 impl Profile {
+    /// Like [`Self::weighted_stack_indices`], without the weights. For
+    /// callers that count items rather than events.
+    pub fn stack_indices<'a>(
+        &'a self,
+        handle: ThreadHandle,
+        source: &'a EventSource,
+        time_range: Option<[f64; 2]>,
+    ) -> Box<dyn Iterator<Item = Option<usize>> + 'a> {
+        Box::new(
+            self.weighted_stack_indices(handle, source, time_range)
+                .map(|(stack, _)| stack),
+        )
+    }
+
     /// Iterate the stack-table indices that this thread contributes for
-    /// the given event source. `Some(idx)` per sample/marker, `None` to
-    /// skip (matching the existing `samples.stack: Vec<Option<usize>>`
-    /// shape so callers can stay in their per-stack loop).
+    /// the given event source, each with its weight. `Some(idx)` per
+    /// sample/marker, `None` to skip (matching the existing
+    /// `samples.stack: Vec<Option<usize>>` shape so callers can stay in
+    /// their per-stack loop).
     ///
     /// `time_range`, when set, gates each yielded item by its per-sample
     /// timestamp ([`crate::profile::raw::RawSampleTable::absolute_times`]
@@ -514,32 +529,27 @@ impl Profile {
     /// profile uses boot-relative or zero-anchored timestamps. Items
     /// outside the inclusive range are dropped entirely. Pass `None`
     /// for the unfiltered behavior.
-    pub fn stack_indices<'a>(
+    ///
+    /// A sample weighs its `samples.weight` entry when the `Perf events`
+    /// section says `Sample weight: period`, else 1. A marker weighs its
+    /// `data.period` when positive, else its event's fixed period from the
+    /// `Perf events` section, else 1. See [`crate::profile::perf_events`].
+    pub fn weighted_stack_indices<'a>(
         &'a self,
         handle: ThreadHandle,
         source: &'a EventSource,
         time_range: Option<[f64; 2]>,
-    ) -> Box<dyn Iterator<Item = Option<usize>> + 'a> {
+    ) -> Box<dyn Iterator<Item = (Option<usize>, u64)> + 'a> {
         let raw = self.raw_thread(handle);
-        let start = self.start_time_ms();
-        // Closure copies the range so each branch's iterator can move
-        // it freely without borrowing `time_range` itself. Sample times
-        // are offset by `start` so a [s, e] filter behaves the same way
-        // regardless of whether the profile's clock is boot-relative
-        // (samply) or already zero-anchored (synthetic fixtures).
-        let in_range = move |t: f64| match time_range {
-            None => true,
-            Some([s, e]) => {
-                let rel = t - start;
-                rel >= s && rel <= e
-            }
-        };
         match source {
             EventSource::Samples => {
+                let in_range = self.time_filter(time_range);
                 // Materialize absolute times once per thread; samply
                 // emits either `time` directly or `timeDeltas`, and
                 // `absolute_times` unifies the two.
                 let times = raw.samples.absolute_times();
+                let weights = raw.samples.weight.as_deref();
+                let by_period = self.samples_weighted_by_period();
                 Box::new(
                     raw.samples
                         .stack
@@ -556,59 +566,149 @@ impl Profile {
                             if !in_range(t) {
                                 return None;
                             }
-                            Some(s)
+                            Some((s, perf_events::sample_weight(weights, i, by_period)))
                         }),
                 )
             }
             EventSource::Marker(name) => {
-                // Resolve the marker name to its string index
-                // *once* per call; markers without a `cause.stack`
-                // payload are yielded as `None` so the caller's
-                // "skip None" branch handles them uniformly with samples
-                // that have no stack.
-                let str_idx = self.raw.shared.strings.position(name);
-                match str_idx {
-                    None => Box::new(std::iter::empty()),
-                    Some(target) => Box::new(raw.markers.name.iter().enumerate().filter_map(
-                        move |(i, &n)| {
-                            // Skip non-matching markers entirely so we
-                            // yield exactly one item per *matching*
-                            // marker. Text-only matches still appear,
-                            // as `None`, so the aggregator can tell
-                            // "no stack to attribute to" apart from
-                            // "marker isn't ours".
-                            if n != target {
-                                return None;
-                            }
-                            // Gate by the marker's start_time when a
-                            // range is set; missing entries are
-                            // conservatively dropped (same rationale as
-                            // the unstamped-sample branch). Interval-end
-                            // markers carry only an end time; gate them
-                            // by that. With no range, a marker with
-                            // neither time still matches. The unfiltered
-                            // path never drops a marker for lacking a
-                            // timestamp.
-                            if time_range.is_some() {
-                                let t =
-                                    raw.markers.start_time.get(i).copied().flatten().or_else(
-                                        || raw.markers.end_time.get(i).copied().flatten(),
-                                    )?;
-                                if !in_range(t) {
-                                    return None;
-                                }
-                            }
-                            Some(
-                                raw.markers
-                                    .data
-                                    .get(i)
-                                    .and_then(|d| d.as_ref())
-                                    .and_then(|d| d.cause.as_ref())
-                                    .map(|c| c.stack),
-                            )
-                        },
-                    )),
+                // Markers without a `cause.stack` payload are yielded as
+                // `None` so the caller's "skip None" branch handles them
+                // uniformly with samples that have no stack.
+                let fixed = self.perf_events().and_then(|p| p.fixed_period(name));
+                Box::new(self.marker_rows(handle, name, time_range).map(move |i| {
+                    let data = raw.markers.data.get(i).and_then(|d| d.as_ref());
+                    let stack = data.and_then(|d| d.cause.as_ref()).map(|c| c.stack);
+                    let period = data.and_then(|d| d.period);
+                    (stack, perf_events::marker_weight(period, fixed))
+                }))
+            }
+        }
+    }
+
+    /// Whether the weights [`Self::weighted_stack_indices`] yields for
+    /// `source` over these threads come from perf event periods. For
+    /// samples: the `Perf events` section says `Sample weight: period`. For
+    /// markers: the event has a fixed period, or a marker selected by the
+    /// threads and `time_range` carries a positive finite `period`.
+    /// Independent of the weight values.
+    pub fn is_weighted(
+        &self,
+        handles: impl IntoIterator<Item = ThreadHandle>,
+        source: &EventSource,
+        time_range: Option<[f64; 2]>,
+    ) -> bool {
+        match source {
+            EventSource::Samples => self.samples_weighted_by_period(),
+            EventSource::Marker(name) => {
+                if self
+                    .perf_events()
+                    .and_then(|p| p.fixed_period(name))
+                    .is_some()
+                {
+                    return true;
                 }
+                handles.into_iter().any(|h| {
+                    let raw = self.raw_thread(h);
+                    self.marker_rows(h, name, time_range).any(|i| {
+                        raw.markers
+                            .data
+                            .get(i)
+                            .and_then(|d| d.as_ref())
+                            .and_then(|d| d.period)
+                            .is_some_and(perf_events::is_positive_period)
+                    })
+                })
+            }
+        }
+    }
+
+    /// True when the `Perf events` section says `Sample weight: period`.
+    pub fn samples_weighted_by_period(&self) -> bool {
+        self.perf_events().is_some_and(|p| p.weight_by_period)
+    }
+
+    /// Weight of sample `i` of this thread, see
+    /// [`Self::weighted_stack_indices`].
+    pub fn sample_weight(&self, handle: ThreadHandle, i: usize) -> u64 {
+        let raw = self.raw_thread(handle);
+        perf_events::sample_weight(
+            raw.samples.weight.as_deref(),
+            i,
+            self.samples_weighted_by_period(),
+        )
+    }
+
+    /// Row indices of this thread's markers named `name` that pass
+    /// `time_range`, with the gating [`Self::weighted_stack_indices`]
+    /// documents.
+    fn marker_rows<'a>(
+        &'a self,
+        handle: ThreadHandle,
+        name: &str,
+        time_range: Option<[f64; 2]>,
+    ) -> Box<dyn Iterator<Item = usize> + 'a> {
+        let raw = self.raw_thread(handle);
+        let in_range = self.time_filter(time_range);
+        // Resolve the marker name to its string index
+        // *once* per call.
+        let Some(target) = self.raw.shared.strings.position(name) else {
+            return Box::new(std::iter::empty());
+        };
+        Box::new(
+            raw.markers
+                .name
+                .iter()
+                .enumerate()
+                .filter_map(move |(i, &n)| {
+                    // Skip non-matching markers entirely so we
+                    // yield exactly one item per *matching*
+                    // marker. Text-only matches still appear,
+                    // as `None`, so the aggregator can tell
+                    // "no stack to attribute to" apart from
+                    // "marker isn't ours".
+                    if n != target {
+                        return None;
+                    }
+                    // Gate by the marker's start_time when a
+                    // range is set; missing entries are
+                    // conservatively dropped (same rationale as
+                    // the unstamped-sample branch). Interval-end
+                    // markers carry only an end time; gate them
+                    // by that. With no range, a marker with
+                    // neither time still matches. The unfiltered
+                    // path never drops a marker for lacking a
+                    // timestamp.
+                    if time_range.is_some() {
+                        let t = raw
+                            .markers
+                            .start_time
+                            .get(i)
+                            .copied()
+                            .flatten()
+                            .or_else(|| raw.markers.end_time.get(i).copied().flatten())?;
+                        if !in_range(t) {
+                            return None;
+                        }
+                    }
+                    Some(i)
+                }),
+        )
+    }
+
+    /// Inclusive `time_range` test for a raw timestamp, relative to
+    /// [`Self::start_time_ms`]. Always true without a range.
+    fn time_filter(&self, time_range: Option<[f64; 2]>) -> impl Fn(f64) -> bool + Copy {
+        let start = self.start_time_ms();
+        // Closure copies the range so each branch's iterator can move
+        // it freely without borrowing `time_range` itself. Sample times
+        // are offset by `start` so a [s, e] filter behaves the same way
+        // regardless of whether the profile's clock is boot-relative
+        // (samply) or already zero-anchored (synthetic fixtures).
+        move |t: f64| match time_range {
+            None => true,
+            Some([s, e]) => {
+                let rel = t - start;
+                rel >= s && rel <= e
             }
         }
     }
@@ -1127,5 +1227,122 @@ mod tests {
         assert_eq!(unfiltered, vec![Some(0)]);
         let ranged: Vec<_> = p.stack_indices(handle, &ev, Some([0.0, 1.0])).collect();
         assert!(ranged.is_empty());
+    }
+
+    fn weighted_events_raw() -> RawProfile {
+        serde_json::from_str(include_str!("../../tests/fixtures/weighted_events.json")).unwrap()
+    }
+
+    fn first_handle(p: &Profile) -> ThreadHandle {
+        p.threads().next().unwrap().handle()
+    }
+
+    #[test]
+    fn samples_weigh_their_period_when_the_profile_says_so() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let h = first_handle(&p);
+        let items: Vec<_> = p
+            .weighted_stack_indices(h, &EventSource::Samples, None)
+            .collect();
+        assert_eq!(
+            items,
+            vec![
+                (Some(0), 100),
+                (Some(0), 100),
+                (Some(1), 300),
+                (Some(1), 300)
+            ]
+        );
+        assert!(p.is_weighted([h], &EventSource::Samples, None));
+        assert_eq!(p.sample_weight(h, 2), 300);
+    }
+
+    #[test]
+    fn samples_weigh_one_without_sample_weight_period() {
+        let mut raw = weighted_events_raw();
+        raw.meta.extra[0].entries.last_mut().unwrap().value = serde_json::json!("1");
+        let p = Profile::from_raw(raw);
+        let h = first_handle(&p);
+        let weights: Vec<u64> = p
+            .weighted_stack_indices(h, &EventSource::Samples, None)
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(weights, vec![1, 1, 1, 1]);
+        assert!(!p.is_weighted([h], &EventSource::Samples, None));
+    }
+
+    #[test]
+    fn markers_weigh_their_period() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let h = first_handle(&p);
+        let ev = EventSource::Marker("cache-misses".into());
+        let items: Vec<_> = p.weighted_stack_indices(h, &ev, None).collect();
+        assert_eq!(
+            items,
+            vec![(Some(0), 10), (Some(0), 10), (Some(1), 30), (Some(1), 30)]
+        );
+        assert!(p.is_weighted([h], &ev, None));
+    }
+
+    #[test]
+    fn markers_without_period_weigh_their_fixed_period() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let h = first_handle(&p);
+        let ev = EventSource::Marker("instructions".into());
+        let items: Vec<_> = p.weighted_stack_indices(h, &ev, None).collect();
+        assert_eq!(items, vec![(Some(0), 1000), (Some(1), 1000)]);
+        assert!(p.is_weighted([h], &ev, None));
+    }
+
+    #[test]
+    fn markers_without_any_period_weigh_one() {
+        let raw: RawProfile =
+            serde_json::from_str(include_str!("../../tests/fixtures/two_events.json")).unwrap();
+        let p = Profile::from_raw(raw);
+        let h = first_handle(&p);
+        let ev = EventSource::Marker("cache-misses".into());
+        let items: Vec<_> = p.weighted_stack_indices(h, &ev, None).collect();
+        assert_eq!(items, vec![(Some(0), 1), (Some(1), 1)]);
+        assert!(!p.is_weighted([h], &ev, None));
+        assert!(!p.is_weighted([h], &EventSource::Samples, None));
+    }
+
+    #[test]
+    fn markers_with_period_zero_alone_are_not_weighted() {
+        let mut raw = weighted_events_raw();
+        for d in raw.threads[0].markers.data.iter_mut().flatten() {
+            if d.period.is_some() {
+                d.period = Some(0.0);
+            }
+        }
+        let p = Profile::from_raw(raw);
+        let h = first_handle(&p);
+        let ev = EventSource::Marker("cache-misses".into());
+        // cache-misses has no fixed period, so period-0 markers weigh 1.
+        let weights: Vec<u64> = p
+            .weighted_stack_indices(h, &ev, None)
+            .map(|(_, w)| w)
+            .collect();
+        assert_eq!(weights, vec![1, 1, 1, 1]);
+        assert!(!p.is_weighted([h], &ev, None));
+    }
+
+    #[test]
+    fn marker_weighting_follows_the_time_range() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let h = first_handle(&p);
+        let ev = EventSource::Marker("cache-misses".into());
+        assert!(p.is_weighted([h], &ev, Some([0.0, 1.0])));
+        // No cache-misses marker falls in this range, and the event has
+        // no fixed period, so nothing selected is weighted.
+        assert!(!p.is_weighted([h], &ev, Some([10.0, 20.0])));
+    }
+
+    #[test]
+    fn stack_indices_drops_the_weights() {
+        let p = Profile::from_raw(weighted_events_raw());
+        let h = first_handle(&p);
+        let items: Vec<_> = p.stack_indices(h, &EventSource::Samples, None).collect();
+        assert_eq!(items, vec![Some(0), Some(0), Some(1), Some(1)]);
     }
 }
