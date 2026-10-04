@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.10](https://github.com/antiguru/pollard/compare/v0.0.9...v0.0.10) - 2026-10-04
+
+### Added
+
+- The MCP server now sends usage instructions in its initialize
+  response. Agents connected without the Claude Code plugin learn when
+  to use pollard and the record, load, and drill-down workflow.
+- The recording and view-preset guides are served as the MCP resources
+  `pollard://guides/profile-recording` and
+  `pollard://guides/view-presets`, so any MCP client can read them.
+
+### Changed
+
+- `Cargo.lock` is now committed and published. Install with
+  `cargo install --locked pollard` to build with the tested dependency
+  versions.
+- Updated rmcp from 1.8 to 3.5.
+- Releases no longer attach the unused `pollard.skill` bundle.
+
 ## [0.0.9](https://github.com/antiguru/pollard/compare/v0.0.8...v0.0.9) - 2026-05-07
 
 ### Other
