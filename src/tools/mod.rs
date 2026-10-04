@@ -4,8 +4,9 @@ use crate::registry::SessionRegistry;
 use rmcp::{
     ErrorData, RoleServer, ServerHandler,
     model::{
-        Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
-        ReadResourceResponse, ReadResourceResult, ServerCapabilities, ServerConfig,
+        CacheScope, Implementation, ListResourcesResult, PaginatedRequestParams,
+        ReadResourceRequestParams, ReadResourceResponse, ReadResourceResult, ServerCapabilities,
+        ServerConfig,
     },
     service::RequestContext,
     tool_handler,
@@ -62,7 +63,11 @@ impl ServerHandler for PollardServer {
         _request: Option<PaginatedRequestParams>,
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
-        Ok(ListResourcesResult::with_all_items(guides::list()))
+        // Protocol 2026-07-28 requires ttlMs and cacheScope on results, and
+        // rmcp leaves them unset. Clients reject results without them.
+        Ok(ListResourcesResult::with_all_items(guides::list())
+            .with_ttl_ms(0)
+            .with_cache_scope(CacheScope::Public))
     }
 
     async fn read_resource(
@@ -71,7 +76,10 @@ impl ServerHandler for PollardServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
         match guides::read(&request.uri) {
-            Some(contents) => Ok(ReadResourceResult::new(vec![contents]).into()),
+            Some(contents) => Ok(ReadResourceResult::new(vec![contents])
+                .with_ttl_ms(0)
+                .with_cache_scope(CacheScope::Public)
+                .into()),
             None => Err(ErrorData::resource_not_found(
                 format!("unknown resource: {}", request.uri),
                 None,

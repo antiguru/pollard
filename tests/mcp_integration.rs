@@ -1028,6 +1028,19 @@ async fn guide_resources_list_and_read() {
         "unexpected body: {text:.80}"
     );
 
+    // Claude Code rejects resource results that lack the cache fields from
+    // protocol 2026-07-28, even when an older version was negotiated.
+    for (what, resp) in [("list", &list), ("read", &read)] {
+        assert!(
+            resp["result"]["ttlMs"].is_u64(),
+            "{what} lacks ttlMs: {resp}"
+        );
+        assert!(
+            resp["result"]["cacheScope"].is_string(),
+            "{what} lacks cacheScope: {resp}"
+        );
+    }
+
     srv.send(r#"{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"pollard://guides/nope"}}"#)
         .await;
     let missing = srv.recv(3).await;
