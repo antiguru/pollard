@@ -18,7 +18,7 @@ Installing the plugin only registered the MCP server config — the
 before recording, and install whatever's missing:
 
 ```sh
-pollard --version || cargo install pollard
+pollard --version || cargo install --locked pollard
 samply  --version || cargo install --locked samply
 ```
 

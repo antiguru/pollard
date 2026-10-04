@@ -34,7 +34,7 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
       - name: Cargo test
-        run: cargo test --workspace --all-targets
+        run: cargo test --locked --workspace --all-targets
       - name: Cargo doc test
         run: cargo test --doc
 

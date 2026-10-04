@@ -694,9 +694,7 @@ mod tests {
 
         // Wire every function in the funcTable to that resource so each
         // frame resolves to the same module.
-        for slot in &mut thread.func_table.resource {
-            *slot = res_idx;
-        }
+        thread.func_table.resource.fill(res_idx);
 
         Profile::from_raw(raw)
     }

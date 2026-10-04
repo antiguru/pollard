@@ -42,13 +42,15 @@ The `pollard` binary always has to be on your `PATH` — the plugin
 bundle does not ship it. Install with cargo:
 
 ```sh
-cargo install pollard
+cargo install --locked pollard
 ```
 
+`--locked` builds with the dependency versions recorded in the
+published `Cargo.lock` instead of resolving the newest compatible ones.
 Or build the latest from this repository:
 
 ```sh
-cargo install --git https://github.com/antiguru/pollard
+cargo install --locked --git https://github.com/antiguru/pollard
 ```
 
 Then pick one of two ways to register pollard with Claude Code.
