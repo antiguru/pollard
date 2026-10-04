@@ -69,13 +69,19 @@ pub fn read(uri: &str) -> Option<ResourceContents> {
 
 /// Removes a leading YAML frontmatter block. The skill metadata in it is meaningless to MCP clients.
 fn strip_frontmatter(body: &str) -> &str {
-    let Some(rest) = body.strip_prefix("---\n") else {
-        return body;
+    // Compare lines with their terminators trimmed so CRLF checkouts strip too.
+    let mut lines = body.split_inclusive('\n');
+    let mut offset = match lines.next() {
+        Some(first) if first.trim_end() == "---" => first.len(),
+        _ => return body,
     };
-    match rest.find("\n---\n") {
-        Some(end) => rest[end + "\n---\n".len()..].trim_start(),
-        None => body,
+    for line in lines {
+        offset += line.len();
+        if line.trim_end() == "---" {
+            return body[offset..].trim_start();
+        }
     }
+    body
 }
 
 #[cfg(test)]
@@ -107,6 +113,22 @@ mod tests {
                 "instructions reference unknown guide {uri}"
             );
         }
+    }
+
+    #[test]
+    fn strip_frontmatter_handles_line_endings() {
+        assert_eq!(
+            strip_frontmatter("---\nname: x\n---\n\n# Body\n"),
+            "# Body\n"
+        );
+        assert_eq!(
+            strip_frontmatter("---\r\nname: x\r\n---\r\n\r\n# Body\r\n"),
+            "# Body\r\n"
+        );
+        assert_eq!(strip_frontmatter("---\nname: x\n---"), "");
+        // Unterminated or absent frontmatter leaves the body untouched.
+        assert_eq!(strip_frontmatter("---\nname: x\n"), "---\nname: x\n");
+        assert_eq!(strip_frontmatter("# Body\n"), "# Body\n");
     }
 
     #[test]

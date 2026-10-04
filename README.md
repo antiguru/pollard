@@ -89,8 +89,7 @@ resources `pollard://guides/profile-recording` and
 skill and lets Claude Code load the guides as skills.
 
 Either path makes `load_profile`, `top_functions`, `call_tree` and
-the rest of the tools listed above available in any Claude Code
-session.
+the rest of the tools listed above available in any MCP client.
 
 ## Build from source
 
