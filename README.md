@@ -42,13 +42,15 @@ The `pollard` binary always has to be on your `PATH` — the plugin
 bundle does not ship it. Install with cargo:
 
 ```sh
-cargo install pollard
+cargo install --locked pollard
 ```
 
+`--locked` builds with the dependency versions recorded in the
+published `Cargo.lock` instead of resolving the newest compatible ones.
 Or build the latest from this repository:
 
 ```sh
-cargo install --git https://github.com/antiguru/pollard
+cargo install --locked --git https://github.com/antiguru/pollard
 ```
 
 Then pick one of two ways to register pollard with Claude Code.
@@ -73,16 +75,21 @@ order and surfaces the exact remediation.
 
 ### Option 2 — MCP server only
 
-If you only want the tools and not the skills, register the binary
-directly as a user-scoped MCP server:
+Register the binary directly as a user-scoped MCP server:
 
 ```sh
 claude mcp add pollard pollard --scope user
 ```
 
+The server carries its own usage guidance, so this path works in any
+MCP client. It sends instructions that tell the agent when to reach for
+pollard, and serves the recording and view-preset guides as the
+resources `pollard://guides/profile-recording` and
+`pollard://guides/view-presets`. The plugin adds the `pollard-doctor`
+skill and lets Claude Code load the guides as skills.
+
 Either path makes `load_profile`, `top_functions`, `call_tree` and
-the rest of the tools listed above available in any Claude Code
-session.
+the rest of the tools listed above available in any MCP client.
 
 ## Build from source
 

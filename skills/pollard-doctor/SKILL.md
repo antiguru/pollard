@@ -21,9 +21,9 @@ pollard --version
 samply  --version
 ```
 
-- `pollard: command not found` → `cargo install pollard`
+- `pollard: command not found` → `cargo install --locked pollard`
 - `pollard --version` prints but is older than expected →
-  `cargo install pollard --force` to overwrite.
+  `cargo install --locked --force pollard` to overwrite.
 - `samply: command not found` → `cargo install --locked samply`
 
 If `cargo` itself is missing, point the user at <https://rustup.rs/>
@@ -43,10 +43,10 @@ call list_profiles
 - Returns an empty list or any list at all → server is up.
 - "Tool not found" or similar → the MCP client hasn't picked up the
   plugin's `mcpServers` registration yet. In Claude Code, run
-  `/plugin reload` or restart the session. Other clients have their
+  `/reload-plugins` or restart the session. Other clients have their
   own reload story; check their docs.
 - Server starts but every call hangs → likely a stale binary on
-  `PATH`. Re-run `cargo install pollard --force` to overwrite.
+  `PATH`. Re-run `cargo install --locked --force pollard` to overwrite.
 
 ### 3. A profile actually loads
 
