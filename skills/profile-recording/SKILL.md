@@ -13,9 +13,9 @@ that matches what the user has in hand, run the command, then call
 
 ## Prerequisites
 
-Installing the plugin only registered the MCP server config — the
-`pollard` binary and `samply` still have to be on `PATH`. Verify
-before recording, and install whatever's missing:
+The MCP registration does not install anything: the `pollard` binary
+and `samply` both have to be on `PATH`. Verify before recording, and
+install whatever's missing:
 
 ```sh
 pollard --version || cargo install --locked pollard
@@ -24,7 +24,7 @@ samply  --version || cargo install --locked samply
 
 If diagnosis goes deeper than these two checks (MCP server unreachable,
 `load_profile` failing on a known-good file, etc.) the `pollard-doctor`
-skill in this plugin walks through the full health check.
+skill of the Claude Code plugin walks through the full health check.
 
 ## When to use which path
 
@@ -106,7 +106,8 @@ surface available — `top_functions`, `call_tree`, `summary`,
    modules, hints toward `create_view` if the profile is noisy).
 2. **`create_view`** with appropriate `hide_modules` / `hide_frames`
    patterns when the raw profile is dominated by framework noise.
-   The `view-presets` skill (also in this plugin) lists copy-paste
+   The view presets guide (the `view-presets` skill, or the
+   `pollard://guides/view-presets` MCP resource) lists copy-paste
    regex sets for tracing-subscriber, tokio, and stdlib glue.
 
 ## Common pitfalls

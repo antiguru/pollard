@@ -75,12 +75,18 @@ order and surfaces the exact remediation.
 
 ### Option 2 — MCP server only
 
-If you only want the tools and not the skills, register the binary
-directly as a user-scoped MCP server:
+Register the binary directly as a user-scoped MCP server:
 
 ```sh
 claude mcp add pollard pollard --scope user
 ```
+
+The server carries its own usage guidance, so this path works in any
+MCP client. It sends instructions that tell the agent when to reach for
+pollard, and serves the recording and view-preset guides as the
+resources `pollard://guides/profile-recording` and
+`pollard://guides/view-presets`. The plugin adds the `pollard-doctor`
+skill and lets Claude Code load the guides as skills.
 
 Either path makes `load_profile`, `top_functions`, `call_tree` and
 the rest of the tools listed above available in any Claude Code

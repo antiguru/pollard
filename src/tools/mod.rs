@@ -2,14 +2,19 @@
 
 use crate::registry::SessionRegistry;
 use rmcp::{
-    ServerHandler,
-    model::{Implementation, ServerCapabilities, ServerConfig},
+    ErrorData, RoleServer, ServerHandler,
+    model::{
+        Implementation, ListResourcesResult, PaginatedRequestParams, ReadResourceRequestParams,
+        ReadResourceResponse, ReadResourceResult, ServerCapabilities, ServerConfig,
+    },
+    service::RequestContext,
     tool_handler,
 };
 use std::sync::Arc;
 
 pub mod budget;
 pub mod drill_down;
+pub mod guides;
 pub mod lifecycle;
 pub mod query;
 pub mod views;
@@ -39,8 +44,38 @@ impl PollardServer {
 #[tool_handler]
 impl ServerHandler for PollardServer {
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_server_info(
-            Implementation::new(env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION")),
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_resources()
+                .build(),
         )
+        .with_server_info(Implementation::new(
+            env!("CARGO_PKG_NAME"),
+            env!("CARGO_PKG_VERSION"),
+        ))
+        .with_instructions(guides::INSTRUCTIONS)
+    }
+
+    async fn list_resources(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, ErrorData> {
+        Ok(ListResourcesResult::with_all_items(guides::list()))
+    }
+
+    async fn read_resource(
+        &self,
+        request: ReadResourceRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResponse, ErrorData> {
+        match guides::read(&request.uri) {
+            Some(contents) => Ok(ReadResourceResult::new(vec![contents]).into()),
+            None => Err(ErrorData::resource_not_found(
+                format!("unknown resource: {}", request.uri),
+                None,
+            )),
+        }
     }
 }

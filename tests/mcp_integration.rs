@@ -965,3 +965,76 @@ async fn top_functions_empty_filter_is_treated_as_no_filter() {
 
     srv.kill().await;
 }
+
+// ---------------------------------------------------------------------------
+// Instructions and guide resources
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn initialize_advertises_instructions_and_resources() {
+    let bin = env!("CARGO_BIN_EXE_pollard");
+    let mut child = Command::new(bin)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .spawn()
+        .expect("failed to spawn pollard");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut reader = BufReader::new(child.stdout.take().unwrap()).lines();
+
+    let init = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"integration","version":"0.1"}}}"#;
+    stdin.write_all(init.as_bytes()).await.unwrap();
+    stdin.write_all(b"\n").await.unwrap();
+    let line = reader.next_line().await.unwrap().expect("EOF");
+    let resp: serde_json::Value = serde_json::from_str(&line).unwrap();
+
+    let result = &resp["result"];
+    let instructions = result["instructions"]
+        .as_str()
+        .unwrap_or_else(|| panic!("instructions missing; response: {resp}"));
+    assert!(instructions.contains("load_profile"));
+    assert!(
+        result["capabilities"]["resources"].is_object(),
+        "resources capability missing; response: {resp}"
+    );
+
+    let _ = child.kill().await;
+}
+
+#[tokio::test]
+async fn guide_resources_list_and_read() {
+    let mut srv = Server::spawn().await;
+
+    srv.send(r#"{"jsonrpc":"2.0","id":1,"method":"resources/list","params":{}}"#)
+        .await;
+    let list = srv.recv(1).await;
+    let uris: Vec<&str> = list["result"]["resources"]
+        .as_array()
+        .unwrap_or_else(|| panic!("resources missing; response: {list}"))
+        .iter()
+        .filter_map(|r| r["uri"].as_str())
+        .collect();
+    assert!(uris.contains(&"pollard://guides/profile-recording"));
+    assert!(uris.contains(&"pollard://guides/view-presets"));
+
+    srv.send(r#"{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"pollard://guides/view-presets"}}"#)
+        .await;
+    let read = srv.recv(2).await;
+    let text = read["result"]["contents"][0]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("contents missing; response: {read}"));
+    assert!(
+        text.starts_with("# View presets"),
+        "unexpected body: {text:.80}"
+    );
+
+    srv.send(r#"{"jsonrpc":"2.0","id":3,"method":"resources/read","params":{"uri":"pollard://guides/nope"}}"#)
+        .await;
+    let missing = srv.recv(3).await;
+    assert!(
+        missing["error"].is_object(),
+        "expected error; response: {missing}"
+    );
+
+    srv.kill().await;
+}
