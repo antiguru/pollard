@@ -61,7 +61,9 @@ impl Server {
         {
             if let Some(schema) = tool.get("outputSchema") {
                 let name = tool["name"].as_str().expect("tool without name");
-                server.output_schemas.insert(name.to_owned(), schema.clone());
+                server
+                    .output_schemas
+                    .insert(name.to_owned(), schema.clone());
             }
         }
 
@@ -210,7 +212,9 @@ async fn unload_profile_frees() {
 async fn list_profiles_empty_matches_output_schema() {
     let mut srv = Server::spawn().await;
     // `call_tool` validates the response against the advertised schema.
-    let resp = srv.call_tool(1, "list_profiles", serde_json::json!({})).await;
+    let resp = srv
+        .call_tool(1, "list_profiles", serde_json::json!({}))
+        .await;
     let profiles = resp["result"]["structuredContent"]["profiles"]
         .as_array()
         .unwrap_or_else(|| panic!("no profiles array; response: {resp}"));
