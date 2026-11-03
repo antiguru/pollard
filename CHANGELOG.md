@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.11](https://github.com/antiguru/pollard/compare/v0.0.10...v0.0.11) - 2026-11-03
+
+### Other
+
+- Bump jsonschema dev-dependency to 0.60.2
+- Format integration test
+- Mark skippable output fields optional in MCP schemas
+
 ## [0.0.10](https://github.com/antiguru/pollard/compare/v0.0.9...v0.0.10) - 2026-10-04
 
 ### Added
