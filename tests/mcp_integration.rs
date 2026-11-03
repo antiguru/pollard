@@ -16,6 +16,8 @@ struct Server {
     child: tokio::process::Child,
     stdin: tokio::process::ChildStdin,
     reader: tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+    /// Output schemas advertised by `tools/list`, keyed by tool name.
+    output_schemas: std::collections::HashMap<String, serde_json::Value>,
 }
 
 impl Server {
@@ -36,12 +38,32 @@ impl Server {
             child,
             stdin,
             reader,
+            output_schemas: Default::default(),
         };
 
         // Send initialize and wait for the response before returning.
         let init = r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"integration","version":"0.1"}}}"#;
         server.send(init).await;
         server.recv(0).await; // discard; just need to sync
+        server
+            .send(r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#)
+            .await;
+
+        // Record every advertised output schema so `call_tool` can check
+        // each successful response against it, as a strict client would.
+        server
+            .send(r#"{"jsonrpc":"2.0","id":-1,"method":"tools/list"}"#)
+            .await;
+        let tools = server.recv(-1).await;
+        for tool in tools["result"]["tools"]
+            .as_array()
+            .expect("tools/list returned no tools array")
+        {
+            if let Some(schema) = tool.get("outputSchema") {
+                let name = tool["name"].as_str().expect("tool without name");
+                server.output_schemas.insert(name.to_owned(), schema.clone());
+            }
+        }
 
         server
     }
@@ -82,7 +104,37 @@ impl Server {
             "params": { "name": tool, "arguments": args }
         });
         self.send(&req.to_string()).await;
-        self.recv(id).await
+        let resp = self.recv(id).await;
+        self.check_output_schema(tool, &resp);
+        resp
+    }
+
+    /// Validate a successful response's `structuredContent` against the
+    /// tool's advertised output schema. Error envelopes are exempt, the
+    /// MCP spec only constrains successful results.
+    fn check_output_schema(&self, tool: &str, resp: &serde_json::Value) {
+        let result = &resp["result"];
+        if result["isError"].as_bool() == Some(true) {
+            return;
+        }
+        let Some(content) = result.get("structuredContent") else {
+            return;
+        };
+        let schema = self
+            .output_schemas
+            .get(tool)
+            .unwrap_or_else(|| panic!("{tool} returned structuredContent without an outputSchema"));
+        let validator = jsonschema::validator_for(schema)
+            .unwrap_or_else(|e| panic!("{tool} advertises an invalid outputSchema: {e}"));
+        let errors: Vec<String> = validator
+            .iter_errors(content)
+            .map(|e| format!("{e} at {}", e.instance_path()))
+            .collect();
+        assert!(
+            errors.is_empty(),
+            "{tool} structuredContent does not match its outputSchema:\n{}\ncontent: {content}",
+            errors.join("\n")
+        );
     }
 
     /// Call load_profile and return the profile_id from structuredContent.
@@ -151,6 +203,18 @@ async fn unload_profile_frees() {
         .expect("freed missing");
     assert!(freed, "expected freed=true after unloading");
 
+    srv.kill().await;
+}
+
+#[tokio::test]
+async fn list_profiles_empty_matches_output_schema() {
+    let mut srv = Server::spawn().await;
+    // `call_tool` validates the response against the advertised schema.
+    let resp = srv.call_tool(1, "list_profiles", serde_json::json!({})).await;
+    let profiles = resp["result"]["structuredContent"]["profiles"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no profiles array; response: {resp}"));
+    assert!(profiles.is_empty());
     srv.kill().await;
 }
 

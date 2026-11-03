@@ -45,7 +45,7 @@ pub struct LoadProfileResult {
     pub description: ProfileDescription,
     /// Profiles that were evicted from the in-memory cache to make room for this
     /// load. Each entry retains the original path so the caller can re-load it.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub evicted: Vec<EvictedRef>,
 }
 
@@ -80,7 +80,7 @@ pub struct ListResult {
     pub profiles: Vec<LoadedProfile>,
     /// Profiles that were evicted but are still tracked by path so they can be
     /// re-loaded. Empty when nothing has been evicted this session.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub evicted: Vec<EvictedRef>,
 }
 

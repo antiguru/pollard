@@ -38,6 +38,7 @@ debugid = "0.8"
 
 [dev-dependencies]
 insta = { version = "1", features = ["json", "yaml", "redactions"] }
+jsonschema = { version = "0.58", default-features = false }
 tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "process"] }
 

@@ -41,9 +41,9 @@ pub struct ProfileDescription {
     /// Processes sorted descending by sample count. 0-sample processes
     /// and any beyond `top_n` are omitted; see `omitted_process_*`.
     pub processes: Vec<ProcessDescription>,
-    #[serde(skip_serializing_if = "is_zero_usize")]
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
     pub omitted_process_count: usize,
-    #[serde(skip_serializing_if = "is_zero_u64")]
+    #[serde(skip_serializing_if = "is_zero_u64", default)]
     pub omitted_process_samples: u64,
     /// Per-lib symbolication outcomes worth flagging — non-`Loaded`
     /// libs, plus loaded libs whose every address lookup missed (a
@@ -68,9 +68,9 @@ pub struct ProcessDescription {
     /// Threads sorted descending by sample count. 0-sample threads and
     /// any beyond `top_n` are omitted; see `omitted_thread_*`.
     pub threads: Vec<ThreadDescription>,
-    #[serde(skip_serializing_if = "is_zero_usize")]
+    #[serde(skip_serializing_if = "is_zero_usize", default)]
     pub omitted_thread_count: usize,
-    #[serde(skip_serializing_if = "is_zero_u64")]
+    #[serde(skip_serializing_if = "is_zero_u64", default)]
     pub omitted_thread_samples: u64,
 }
 

@@ -144,7 +144,7 @@ pub struct FrameNode {
     pub total_samples: u64,
     #[serde(serialize_with = "crate::serde_util::round1_pct")]
     pub total_pct: f32,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub children: Vec<Node>,
 }
 
@@ -156,7 +156,7 @@ pub struct OmittedSummary {
     /// Names of up to [`TOP_OMITTED_CAP`] omitted children, biggest first,
     /// so the caller can decide whether widening `min_pct` / `max_breadth`
     /// is worth a second call.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub top_omitted: Vec<OmittedPreview>,
 }
 
