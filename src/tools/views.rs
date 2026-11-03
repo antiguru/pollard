@@ -99,7 +99,7 @@ pub struct CreateViewResult {
     pub total_base_samples: u64,
     /// Profiles that were evicted from the in-memory cache to make room
     /// for this view. Empty when no eviction was needed.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub evicted: Vec<EvictedRef>,
 }
 
@@ -123,7 +123,7 @@ pub struct DescribeViewResult {
     /// Composed view scope (process / thread / time_range) inherited
     /// from every layer above this view. Omitted when no scope is set
     /// anywhere in the chain.
-    #[serde(skip_serializing_if = "ScopeView::is_empty")]
+    #[serde(skip_serializing_if = "ScopeView::is_empty", default)]
     pub scope: ScopeView,
     /// Per-rule diagnostic counts. Same shape as `create_view`'s
     /// `rule_stats`; reused so callers can re-fetch later without

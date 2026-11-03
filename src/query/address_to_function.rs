@@ -44,7 +44,7 @@ pub struct Output {
     pub address: u64,
     /// Inlined call chain at this address, innermost-first. Empty when no
     /// DWARF inline records cover the address.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty", default)]
     pub inline_chain: Vec<InlineEntry>,
 }
 

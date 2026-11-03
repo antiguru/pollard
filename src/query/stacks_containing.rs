@@ -51,7 +51,7 @@ pub struct FrameOutput {
     pub function: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[serde(skip_serializing_if = "std::ops::Not::not", default)]
     pub matched: bool,
 }
 
