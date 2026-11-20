@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.12](https://github.com/antiguru/pollard/compare/v0.0.11...v0.0.12) - 2026-11-20
+
+### Other
+
+- Move fxprof-processed-profile to dev-dependencies
+- Merge remote-tracking branch 'origin/dependabot/cargo/jsonschema-0.61.2' into claude/gifted-wright-yec9t7
+- *(deps)* bump jsonschema from 0.60.2 to 0.61.2
+
 ## [0.0.11](https://github.com/antiguru/pollard/compare/v0.0.10...v0.0.11) - 2026-11-03
 
 ### Other
